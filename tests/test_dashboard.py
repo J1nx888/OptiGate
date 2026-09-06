@@ -2190,12 +2190,46 @@ def test_user_detail_page_shows_pause_card_when_user_has_devices(client, db_conn
     assert b"Pause the internet" in resp.data
 
 
-def test_user_detail_page_hides_pause_card_when_user_has_no_devices(client, db_conn):
+def test_user_detail_page_shows_pause_card_even_with_no_devices(client, db_conn):
+    # Real bug fixed 2026-09-06: the whole "Pause the internet" card used
+    # to disappear entirely for a user with zero devices assigned, making
+    # the feature look missing rather than just currently inapplicable
+    # (found via live user testing -- see chat). Now it always renders,
+    # explaining why there's nothing to pause yet instead of hiding.
     client.post("/users/add", data={"username": "kid4", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid4'").fetchone()["id"]
 
     resp = client.get(f"/users/{user_id}", headers=_auth_header())
-    assert b"Pause the internet" not in resp.data
+    assert b"Pause the internet" in resp.data
+    assert b"no devices assigned yet" in resp.data
+    assert b'action="/users/pause"' not in resp.data  # no pause form when there's nothing to pause
+
+
+def test_user_detail_shows_currently_active_schedule(client, db_conn):
+    client.post("/users/add", data={"username": "kid5", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid5'").fetchone()["id"]
+    client.post(
+        "/schedules/add",
+        data={"name": "Bedtime", "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+              "start_time": "00:00", "end_time": "23:59", "time_zone": "UTC", "lockout_all": "on"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Bedtime'").fetchone()["id"]
+    client.post(
+        "/schedules/access", data={"schedule_id": schedule_id, "user_ids": [str(user_id)]}, headers=_auth_header()
+    )
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+    assert b"Active right now" in resp.data
+    assert b"Bedtime" in resp.data
+    assert b"Nothing active right now" not in resp.data
+
+
+def test_user_detail_shows_nothing_active_when_no_schedule_applies(client, db_conn):
+    client.post("/users/add", data={"username": "kid6", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid6'").fetchone()["id"]
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+    assert b"Nothing active right now" in resp.data
 
 
 def test_pausing_an_ignored_device_offers_no_pause_button(client, db_conn):
@@ -2311,6 +2345,88 @@ def test_deleting_a_group_unassigns_its_devices(client, db_conn):
     row = db_conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
     assert row is not None
     assert row["group_id"] is None
+
+
+# ============================================================
+# Group detail page + per-group pause (real gap found 2026-09-06 --
+# per-device and per-user pause both already existed, but there was no
+# group_detail page at all to put a per-group pause control on)
+# ============================================================
+
+def test_group_detail_page_renders(client, db_conn):
+    client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    resp = client.get(f"/groups/{group_id}", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"TVs" in resp.data
+    assert b"Active right now" in resp.data
+    assert b"Pause the internet" in resp.data
+
+
+def test_group_detail_unknown_id_redirects_with_error(client):
+    resp = client.get("/groups/999999", headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_group_detail_shows_no_devices_message_when_empty(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    resp = client.get(f"/groups/{group_id}", headers=_auth_header())
+    assert b"No devices in" in resp.data
+    assert b'action="/groups/pause"' not in resp.data
+
+
+def test_pause_group_pauses_every_device_in_it(client, db_conn):
+    client.post("/groups/add", data={"name": "Gaming Computers"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'Gaming Computers'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:20", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:21", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+
+    resp = client.post("/groups/pause", data={"group_id": group_id}, headers=_auth_header())
+    assert resp.status_code == 302
+    rows = db_conn.execute("SELECT quarantined_at FROM devices WHERE group_id = ?", (group_id,)).fetchall()
+    assert len(rows) == 2
+    assert all(row["quarantined_at"] is not None for row in rows)
+
+
+def test_resume_group_clears_the_pause(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:22", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+    client.post("/groups/pause", data={"group_id": group_id}, headers=_auth_header())
+    client.post("/groups/resume", data={"group_id": group_id}, headers=_auth_header())
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE group_id = ?", (group_id,)).fetchone()
+    assert row["quarantined_at"] is None
+
+
+def test_pause_group_skips_ignored_devices(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, group_id, ignored, created_at) "
+        "VALUES ('aa:bb:cc:dd:ee:23', ?, 1, datetime('now'))",
+        (group_id,),
+    )
+    db_conn.commit()
+
+    client.post("/groups/pause", data={"group_id": group_id}, headers=_auth_header())
+
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:23'").fetchone()
+    assert row["quarantined_at"] is None
+
+
+def test_pause_group_requires_admin_auth(client, db_conn):
+    resp = client.post("/groups/pause", data={"group_id": "1"})
+    assert resp.status_code == 401
 
 
 def test_domains_filter_by_group_shows_group_assigned_and_global_domains(client, db_conn):
@@ -2918,6 +3034,91 @@ def test_sync_category_now_reports_failure_cleanly(client, db_conn, monkeypatch)
     resp = client.post(f"/categories/{category_id}/sync", headers=_auth_header())
     assert resp.status_code == 302
     assert "error=1" in resp.headers["Location"]
+
+
+def test_sync_category_now_flags_zero_domains_as_likely_wrong_format(client, db_conn, monkeypatch):
+    # Real gap found 2026-09-06 by live user testing: fetching a URL that
+    # isn't a supported blocklist format (e.g. a documentation webpage)
+    # succeeds and legitimately parses to 0 domains -- that used to flash
+    # an unhelpful "Synced 0 domains." with nothing explaining why.
+    import category_fetch
+
+    client.post(
+        "/categories/add",
+        data={"name": "AI", "subscription_url": "https://example.invalid/not-a-blocklist"},
+        headers=_auth_header(),
+    )
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'AI'").fetchone()["id"]
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
+
+    resp = client.post(f"/categories/{category_id}/sync", headers=_auth_header())
+    assert resp.status_code == 302
+    assert "error=1" in resp.headers["Location"]
+    assert "0+recognizable+domains" in resp.headers["Location"]
+
+
+def test_sync_category_now_normal_nonzero_result_is_not_flagged_as_an_error(client, db_conn, monkeypatch):
+    import category_fetch
+
+    client.post(
+        "/categories/add", data={"name": "Gambling", "subscription_url": "https://example.invalid/real.txt"},
+        headers=_auth_header(),
+    )
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 42)
+
+    resp = client.post(f"/categories/{category_id}/sync", headers=_auth_header())
+    assert "error=1" not in resp.headers["Location"]
+    assert "Synced+42+domains" in resp.headers["Location"]
+
+
+def test_sync_all_categories_names_which_ones_came_back_empty(client, db_conn, monkeypatch):
+    import category_fetch
+
+    monkeypatch.setattr(
+        category_fetch, "sync_all_categories", lambda conn, timeout=None: {"AI": 0, "Gambling": 100}
+    )
+    resp = client.post("/categories/sync-all", headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    assert "AI" in resp.headers["Location"]
+
+
+def test_categories_page_has_supported_format_hint(client):
+    resp = client.get("/categories", headers=_auth_header())
+    assert b"must be a raw domain-list file" in resp.data.lower() or b"Must be a raw domain-list file" in resp.data
+
+
+# ============================================================
+# Cross-category domain lookup (real gap found 2026-09-06: no way to
+# check whether the same domain appears in more than one category
+# without opening each one individually)
+# ============================================================
+
+def test_category_lookup_finds_a_domain_in_multiple_categories(client, db_conn):
+    client.post("/categories/add", data={"name": "Facebook"}, headers=_auth_header())
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    facebook_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Facebook'").fetchone()["id"]
+    gambling_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    db_conn.executemany(
+        "INSERT INTO category_domains (category_id, pattern, source, created_at) VALUES (?, ?, 'manual', datetime('now'))",
+        [(facebook_id, r"facebook\.com"), (gambling_id, r"facebook\.com")],
+    )
+    db_conn.commit()
+
+    resp = client.get("/categories?domain=facebook.com", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"Facebook" in resp.data
+    assert b"Gambling" in resp.data
+
+
+def test_category_lookup_no_match_shows_a_clear_message(client, db_conn):
+    resp = client.get("/categories?domain=totally-unrelated.example", headers=_auth_header())
+    assert b"No category currently lists" in resp.data
+
+
+def test_category_lookup_blank_domain_shows_no_results_section(client, db_conn):
+    resp = client.get("/categories", headers=_auth_header())
+    assert b"No category currently lists" not in resp.data
 
 
 # ============================================================

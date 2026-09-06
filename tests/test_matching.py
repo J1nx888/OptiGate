@@ -382,3 +382,93 @@ def test_schedule_applies_to_device_via_user_group_device_assignment(conn):
     assert matching.schedule_applies_to_device(conn, device_via_user, schedule) is True
     assert matching.schedule_applies_to_device(conn, device_via_group, schedule) is True
     assert matching.schedule_applies_to_device(conn, device_via_direct, schedule) is True
+
+
+# ---------------------------------------------------- schedule_applies_to_target
+
+def test_schedule_applies_to_target_via_is_global(conn):
+    schedule = _add_schedule(conn, "Bedtime", is_global=1)
+    assert matching.schedule_applies_to_target(conn, schedule, user_id=999) is True
+
+
+def test_schedule_applies_to_target_via_bare_user_id_no_device_needed(conn):
+    """The whole point of pulling this out of schedule_applies_to_device()
+    (2026-09-06, for the user detail page's 'active right now' display):
+    a caller with only a user id in hand, no device row at all, can still
+    get a real answer."""
+    user = _add_user(conn, "kid3")
+    schedule = _add_schedule(conn, "Free Time")
+    assert matching.schedule_applies_to_target(conn, schedule, user_id=user["id"]) is False
+    conn.execute("INSERT INTO schedule_users (schedule_id, user_id) VALUES (?, ?)", (schedule["id"], user["id"]))
+    conn.commit()
+    assert matching.schedule_applies_to_target(conn, schedule, user_id=user["id"]) is True
+
+
+def test_schedule_applies_to_target_via_group_id(conn):
+    group = _add_group(conn, "TVs")
+    schedule = _add_schedule(conn, "Bedtime")
+    assert matching.schedule_applies_to_target(conn, schedule, group_id=group["id"]) is False
+    conn.execute("INSERT INTO schedule_groups (schedule_id, group_id) VALUES (?, ?)", (schedule["id"], group["id"]))
+    conn.commit()
+    assert matching.schedule_applies_to_target(conn, schedule, group_id=group["id"]) is True
+
+
+def test_schedule_applies_to_target_no_ids_and_not_global_is_false(conn):
+    schedule = _add_schedule(conn, "Bedtime")
+    assert matching.schedule_applies_to_target(conn, schedule) is False
+
+
+# --------------------------------------------------- find_categories_for_hostname
+
+def _add_category_domain(conn, category_id, pattern, source="manual"):
+    conn.execute(
+        "INSERT INTO category_domains (category_id, pattern, source, created_at) VALUES (?, ?, ?, ?)",
+        (category_id, pattern, source, db.now_iso()),
+    )
+    conn.commit()
+
+
+def test_find_categories_for_hostname_finds_every_matching_category(conn):
+    facebook = _add_category(conn, "Facebook")
+    gambling = _add_category(conn, "Gambling")
+    _add_category_domain(conn, facebook["id"], r"facebook\.com")
+    _add_category_domain(conn, gambling["id"], r"facebook\.com")  # deliberately also listed here
+
+    results = matching.find_categories_for_hostname(conn, "facebook.com")
+
+    names = {m["category"]["name"] for m in results}
+    assert names == {"Facebook", "Gambling"}
+
+
+def test_find_categories_for_hostname_matches_a_subdomain(conn):
+    category = _add_category(conn, "Gambling")
+    _add_category_domain(conn, category["id"], r"bet\.example\.com")
+    results = matching.find_categories_for_hostname(conn, "www.bet.example.com")
+    assert len(results) == 1
+    assert results[0]["pattern"] == r"bet\.example\.com"
+
+
+def test_find_categories_for_hostname_no_match_returns_empty_list(conn):
+    category = _add_category(conn, "Gambling")
+    _add_category_domain(conn, category["id"], r"bet\.example\.com")
+    assert matching.find_categories_for_hostname(conn, "totally-unrelated.example") == []
+
+
+def test_find_categories_for_hostname_flags_an_override_exemption(conn):
+    category = _add_category(conn, "Gambling")
+    _add_category_domain(conn, category["id"], r"casino\.example\.com")
+    conn.execute(
+        "INSERT INTO category_overrides (category_id, pattern, created_at) VALUES (?, ?, ?)",
+        (category["id"], r"casino\.example\.com", db.now_iso()),
+    )
+    conn.commit()
+
+    results = matching.find_categories_for_hostname(conn, "casino.example.com")
+
+    assert len(results) == 1
+    assert results[0]["overridden"] is True
+
+
+def test_find_categories_for_hostname_blank_input_returns_empty_list(conn):
+    assert matching.find_categories_for_hostname(conn, "") == []
+    assert matching.find_categories_for_hostname(conn, "   ") == []

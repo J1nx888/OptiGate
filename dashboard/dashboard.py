@@ -1020,9 +1020,27 @@ USER_DETAIL_BODY = """
 <p><a href="{{ url_for('users') }}">&larr; All users</a></p>
 <h1>{{ u.display_name }} <code>({{ u.username }})</code></h1>
 
-{% if user_devices %}
+<div class="card">
+<h2>Active right now</h2>
+{% if active_schedules %}
+<ul style="margin:.3rem 0 0; padding-left:1.2rem;">
+{% for s in active_schedules %}
+  <li>
+    <strong>{{ s.name }}</strong>
+    {% if s.lockout_all %}<span class="badge blocked">full lockout</span>{% else %}<span class="badge">category block</span>{% endif %}
+    {% if s.is_mode %}<span class="badge" title="Eligible for &quot;Shift mode now&quot;">mode</span>{% endif %}
+  </li>
+{% endfor %}
+</ul>
+{% else %}
+<p class="hint">Nothing active right now -- no schedule currently applies to {{ u.display_name }}.</p>
+{% endif %}
+<p class="hint">Computed live from <a href="{{ url_for('schedules') }}">Schedules</a> assigned to {{ u.display_name }} (directly, or Everyone) -- reflects any active "Shift mode now" override, not just the clock.</p>
+</div>
+
 <div class="card">
 <h2>Pause the internet</h2>
+{% if user_devices %}
 <p class="hint">
   Pauses every device assigned to {{ u.display_name }} at once ({{ user_devices|length }}
   device{{ 's' if user_devices|length != 1 else '' }}, {{ paused_device_count }} currently paused) --
@@ -1037,8 +1055,10 @@ USER_DETAIL_BODY = """
   <input type="hidden" name="user_id" value="{{ u.id }}">
   <button class="btn" type="submit">Resume</button>
 </form>
-</div>
+{% else %}
+<p class="hint">{{ u.display_name }} has no devices assigned yet -- assign one from the <a href="{{ url_for('devices') }}">Devices</a> page to pause their internet from here.</p>
 {% endif %}
+</div>
 
 <div class="card">
 <h2>Assigned sites</h2>
@@ -1120,9 +1140,13 @@ def user_detail(user_id: int):
         "SELECT id, quarantined_at FROM devices WHERE user_id = ? AND ignored = 0", (user_id,)
     ).fetchall()
     paused_device_count = sum(1 for row in user_devices if row["quarantined_at"])
+    active_schedules = schedule_eval.active_schedules_for_target(
+        conn, datetime.now(timezone.utc), user_id=user_id
+    )
     body = render_template_string(
         USER_DETAIL_BODY, u=u, assigned_domains=assigned_domains, shows=shows,
         user_devices=user_devices, paused_device_count=paused_device_count,
+        active_schedules=active_schedules,
     )
     return render("users", body)
 
@@ -2031,6 +2055,7 @@ DEVICES_BODY = """
   <tr>
     <td>{{ g.name }}</td>
     <td>
+      <a class="btn small" href="{{ url_for('group_detail', group_id=g.id) }}">Manage</a>
       <a class="btn small" href="{{ url_for('domains', group_id=g.id) }}">Manage domains</a>
       <form class="inline" method="post" action="{{ url_for('delete_group') }}">
         <input type="hidden" name="group_id" value="{{ g.id }}">
@@ -2185,6 +2210,16 @@ CATEGORIES_BODY = """
   <button class="add" type="submit">Add category</button>
 </form>
 <p class="hint">A category over {{ max_scoped }} domains (a large subscribed list) can only ever be blocked for Everyone -- AdGuard Home has no way to scope a list that size to specific people/devices. Smaller categories can be assigned however you like.</p>
+<p class="hint">
+  <strong>Subscription URL must be a raw domain-list file, not a webpage.</strong>
+  Supported formats: a bare domain on each line, a hosts file
+  (<code>0.0.0.0 example.com</code>), or an AdGuard/uBlock rule list
+  (<code>||example.com^</code>). A documentation or article page --
+  even one that lists domains in a table, like Microsoft's AI-sites
+  page -- won't parse into anything, since none of its lines are in one
+  of those three shapes. Example that works:
+  <code>https://blocklistproject.github.io/Lists/adguard/gambling-ags.txt</code>.
+</p>
 </div>
 
 {% if categories|selectattr('subscription_url')|list %}
@@ -2196,6 +2231,30 @@ CATEGORIES_BODY = """
 </form>
 </div>
 {% endif %}
+
+<div class="card">
+<h2>Find a domain across categories</h2>
+<p class="hint">Checks every category's domain list at once -- useful for spotting overlaps (e.g. facebook.com listed in both Facebook and Gambling) or confirming a domain landed where you expected after a sync.</p>
+<form method="get" action="{{ url_for('categories') }}">
+  <input type="text" name="domain" value="{{ lookup_domain or '' }}" placeholder="e.g. facebook.com" style="min-width:260px;">
+  <button class="add" type="submit">Search</button>
+</form>
+{% if lookup_domain %}
+  {% if lookup_results %}
+  <ul style="margin:.6rem 0 0; padding-left:1.2rem;">
+  {% for m in lookup_results %}
+    <li>
+      <a href="{{ url_for('category_detail', category_id=m.category.id) }}">{{ m.category.name }}</a>
+      -- matched via <code>{{ m.pattern }}</code>
+      {% if m.overridden %}<span class="badge" title="An override in this category exempts this domain -- it's a member by pattern but never actually blocked by it">exempted by override</span>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+  {% else %}
+  <p class="hint">No category currently lists <code>{{ lookup_domain }}</code> (or any parent domain of it).</p>
+  {% endif %}
+{% endif %}
+</div>
 """
 
 
@@ -2211,10 +2270,13 @@ def _category_row_context(conn, category) -> dict:
 def categories():
     conn = get_db()
     rows = conn.execute("SELECT * FROM categories ORDER BY is_global DESC, name").fetchall()
+    lookup_domain = request.args.get("domain", "").strip()
+    lookup_results = matching.find_categories_for_hostname(conn, lookup_domain) if lookup_domain else None
     body = render_template_string(
         CATEGORIES_BODY,
         categories=[_category_row_context(conn, c) for c in rows],
         max_scoped=matching.MAX_SCOPED_CATEGORY_DOMAINS,
+        lookup_domain=lookup_domain, lookup_results=lookup_results,
     )
     return render("categories", body)
 
@@ -2321,6 +2383,7 @@ CATEGORY_DETAIL_BODY = """
 <h2>Subscription</h2>
 <p class="hint"><code>{{ c.subscription_url }}</code></p>
 <p class="hint">Last synced: {{ c.last_synced_at or 'never' }}. {{ domain_count }} domain{{ 's' if domain_count != 1 else '' }} from this source (plus any manual additions below).</p>
+<p class="hint">Must be a raw domain-list file (bare domain per line, a hosts file, or an AdGuard/uBlock rule list) -- a webpage or documentation page won't parse into anything, even if it visibly lists domains.</p>
 <form method="post" action="{{ url_for('sync_category_now', category_id=c.id) }}">
   <button class="add" type="submit">Sync now</button>
 </form>
@@ -2572,6 +2635,21 @@ def sync_category_now(category_id: int):
         count = category_fetch.fetch_and_sync_category(conn, category)
     except category_fetch.CategoryFetchError as exc:
         return flash_redirect("category_detail", f"Sync failed: {exc}", error=True, category_id=category_id)
+    if count == 0:
+        # Real gap found 2026-09-06: the fetch itself can succeed
+        # against a URL that isn't actually a supported blocklist format
+        # (a webpage, a documentation page) -- parse_hostlist() then
+        # legitimately finds zero recognizable lines, which used to read
+        # as an unexplained "Synced 0 domains." with no hint anything
+        # was wrong. Almost every real subscription source has domains,
+        # so 0 is worth flagging as likely-wrong-format rather than
+        # treated the same as a normal non-zero refresh.
+        return flash_redirect(
+            "category_detail",
+            "Fetched successfully but found 0 recognizable domains -- this almost always means the URL "
+            "isn't a supported format (see the hint above), not that the list is genuinely empty.",
+            error=True, category_id=category_id,
+        )
     return flash_redirect("category_detail", f"Synced {count} domains.", category_id=category_id)
 
 
@@ -2581,7 +2659,18 @@ def sync_all_categories_now():
     conn = get_db()
     results = category_fetch.sync_all_categories(conn)
     total = sum(results.values())
-    return flash_redirect("categories", f"Synced {len(results)} categor{'y' if len(results) == 1 else 'ies'}, {total} domains total.")
+    message = f"Synced {len(results)} categor{'y' if len(results) == 1 else 'ies'}, {total} domains total."
+    # Same "0 is suspicious, not normal" flag as sync_category_now() --
+    # naming which categories came back empty here, since this route's
+    # single aggregate total would otherwise hide which specific one(s)
+    # need a closer look.
+    empty = [name for name, count in results.items() if count == 0]
+    if empty:
+        message += (
+            f" {', '.join(empty)} came back with 0 domains -- likely means that URL isn't a "
+            "supported format (see the hint on the category's own page), not that the list is empty."
+        )
+    return flash_redirect("categories", message, error=bool(empty))
 
 
 # ==========================================================
@@ -3402,6 +3491,30 @@ def resume_user():
     return flash_redirect("user_detail", f"Resumed {n} device{'s' if n != 1 else ''}.", user_id=user_id)
 
 
+@app.route("/groups/pause", methods=["POST"])
+@require_admin
+def pause_group():
+    """Same shape as pause_user() above -- added 2026-09-06, closing a
+    real gap: per-device and per-user pause both already existed, but a
+    group had no pause control at all (no group_detail page even
+    existed to put one on)."""
+    group_id = request.form.get("group_id", "")
+    conn = get_db()
+    n = _set_quarantine(conn, "group_id = ? AND ignored = 0", (group_id,), paused=True)
+    return flash_redirect(
+        "group_detail", f"Paused the internet for {n} device{'s' if n != 1 else ''}.", group_id=group_id
+    )
+
+
+@app.route("/groups/resume", methods=["POST"])
+@require_admin
+def resume_group():
+    group_id = request.form.get("group_id", "")
+    conn = get_db()
+    n = _set_quarantine(conn, "group_id = ? AND quarantined_at IS NOT NULL", (group_id,), paused=False)
+    return flash_redirect("group_detail", f"Resumed {n} device{'s' if n != 1 else ''}.", group_id=group_id)
+
+
 DEVICE_DETAIL_BODY = """
 <p><a href="{{ url_for('devices') }}">&larr; All devices</a></p>
 <h1><code>{{ d.mac_address }}</code></h1>
@@ -3559,6 +3672,116 @@ def delete_group():
     conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
     conn.commit()
     return flash_redirect("devices", "Group removed.")
+
+
+GROUP_DETAIL_BODY = """
+<p><a href="{{ url_for('devices') }}">&larr; All devices</a></p>
+<h1>{{ g.name }}</h1>
+
+<div class="card">
+<h2>Active right now</h2>
+{% if active_schedules %}
+<ul style="margin:.3rem 0 0; padding-left:1.2rem;">
+{% for s in active_schedules %}
+  <li>
+    <strong>{{ s.name }}</strong>
+    {% if s.lockout_all %}<span class="badge blocked">full lockout</span>{% else %}<span class="badge">category block</span>{% endif %}
+    {% if s.is_mode %}<span class="badge" title="Eligible for &quot;Shift mode now&quot;">mode</span>{% endif %}
+  </li>
+{% endfor %}
+</ul>
+{% else %}
+<p class="hint">Nothing active right now -- no schedule currently applies to {{ g.name }}.</p>
+{% endif %}
+<p class="hint">Computed live from <a href="{{ url_for('schedules') }}">Schedules</a> assigned to {{ g.name }} (directly, or Everyone) -- reflects any active "Shift mode now" override, not just the clock.</p>
+</div>
+
+<div class="card">
+<h2>Pause the internet</h2>
+{% if group_devices %}
+<p class="hint">
+  Pauses every device in {{ g.name }} at once ({{ group_devices|length }}
+  device{{ 's' if group_devices|length != 1 else '' }}, {{ paused_device_count }} currently paused) --
+  immediate and indefinite, until resumed. Manage an individual device's pause from the
+  <a href="{{ url_for('devices') }}">Devices</a> page instead if you only want to pause one.
+</p>
+<form class="inline" method="post" action="{{ url_for('pause_group') }}" onsubmit="return confirm('Pause the internet for every device in {{ g.name }}?');">
+  <input type="hidden" name="group_id" value="{{ g.id }}">
+  <button class="danger" type="submit">Pause {{ g.name }}'s internet</button>
+</form>
+<form class="inline" method="post" action="{{ url_for('resume_group') }}">
+  <input type="hidden" name="group_id" value="{{ g.id }}">
+  <button class="btn" type="submit">Resume</button>
+</form>
+{% else %}
+<p class="hint">No devices in {{ g.name }} yet -- assign one from the <a href="{{ url_for('devices') }}">Devices</a> page to pause it from here.</p>
+{% endif %}
+</div>
+
+<div class="card">
+<h2>Devices in this group ({{ group_devices|length }})</h2>
+<div class="table-scroll">
+<table>
+  <tr><th>MAC address</th><th>Label</th><th>Status</th></tr>
+  {% for d in group_devices %}
+  <tr>
+    <td><code>{{ d.mac_address }}</code></td>
+    <td>{{ d.label or '' }}</td>
+    <td>{% if d.quarantined_at %}<span class="badge blocked">Paused</span>{% else %}<span class="badge">Active</span>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3"><em>No devices assigned.</em></td></tr>
+  {% endfor %}
+</table>
+</div>
+</div>
+
+<div class="card">
+<h2>Assigned sites</h2>
+<div class="table-scroll">
+<table>
+  <tr><th>Domain</th><th>Mode</th></tr>
+  {% for d in assigned_domains %}
+  <tr><td><code>{{ d.pattern }}</code></td><td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td></tr>
+  {% else %}
+  <tr><td colspan="2"><em>No per-group sites assigned (still gets global sites).</em></td></tr>
+  {% endfor %}
+</table>
+</div>
+<p class="hint">Manage assignment from the <a href="{{ url_for('domains', group_id=g.id) }}">Domains</a> page -- pick the site there and check this group.</p>
+</div>
+"""
+
+
+@app.route("/groups/<int:group_id>")
+@require_admin
+def group_detail(group_id: int):
+    conn = get_db()
+    g = conn.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
+    if g is None:
+        return flash_redirect("devices", "That group no longer exists.", error=True)
+    assigned_domains = conn.execute(
+        "SELECT d.pattern, d.mode FROM domains d "
+        "JOIN group_domains gd ON gd.domain_id = d.id "
+        "WHERE gd.group_id = ? ORDER BY d.pattern", (group_id,),
+    ).fetchall()
+    # Same ignored-device exclusion as user_detail()'s user_devices query
+    # -- an ignored device can't actually be paused (BYPASS outranks
+    # QUARANTINE in classify_device()), so it shouldn't count here either.
+    group_devices = conn.execute(
+        "SELECT id, mac_address, label, quarantined_at FROM devices WHERE group_id = ? AND ignored = 0",
+        (group_id,),
+    ).fetchall()
+    paused_device_count = sum(1 for row in group_devices if row["quarantined_at"])
+    active_schedules = schedule_eval.active_schedules_for_target(
+        conn, datetime.now(timezone.utc), group_id=group_id
+    )
+    body = render_template_string(
+        GROUP_DETAIL_BODY, g=g, assigned_domains=assigned_domains,
+        group_devices=group_devices, paused_device_count=paused_device_count,
+        active_schedules=active_schedules,
+    )
+    return render("devices", body)
 
 
 # ==========================================================

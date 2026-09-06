@@ -259,3 +259,63 @@ def test_active_override_for_device_returns_none_with_no_override(conn):
     device = _insert_device(conn, "aa:bb:cc:dd:ee:15")
     now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
     assert schedule_eval.active_override_for_device(conn, device, now) is None
+
+
+# --- active_schedules_for_target() (backs the user/group detail pages' -----
+# "what's active right now" display) --------------------------------------
+
+def test_active_schedules_for_target_lists_currently_active_schedules_for_a_user(conn):
+    conn.execute(
+        "INSERT INTO users (username, display_name, password_hash, created_at) "
+        "VALUES ('kid1', 'Kid One', 'x', datetime('now'))"
+    )
+    conn.commit()
+    user_id = conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    bedtime = _insert_schedule(conn, "Bedtime", is_global=0, days="mon,tue,wed,thu,fri,sat,sun",
+                                start="21:00", end="06:00")
+    conn.execute("INSERT INTO schedule_users (schedule_id, user_id) VALUES (?, ?)", (bedtime, user_id))
+    conn.commit()
+
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)  # inside bedtime's window
+    active = schedule_eval.active_schedules_for_target(conn, now, user_id=user_id)
+    assert [row["name"] for row in active] == ["Bedtime"]
+
+    outside = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+    assert schedule_eval.active_schedules_for_target(conn, outside, user_id=user_id) == []
+
+
+def test_active_schedules_for_target_reflects_an_override(conn):
+    bedtime = _insert_schedule(conn, "Bedtime", is_mode=1, is_global=1,
+                                days="mon,tue,wed,thu,fri,sat,sun", start="21:00", end="06:00")
+    # Free Time's own clock window (08:00-20:00) deliberately does NOT
+    # cover 22:00 -- otherwise it'd already be clock-active alongside
+    # Bedtime with no override involved at all, which would prove
+    # nothing about the override actually being what forced it on.
+    free_time = _insert_schedule(conn, "Free Time", is_mode=1, is_global=1, lockout_all=0,
+                                  days="mon,tue,wed,thu,fri,sat,sun", start="08:00", end="20:00")
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:16")
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)  # normally bedtime
+
+    active = schedule_eval.active_schedules_for_target(conn, now, device_id=device["id"])
+    assert [row["name"] for row in active] == ["Bedtime"]
+
+    _insert_override(conn, free_time, minutes=60, device_id=device["id"], relative_to=now)
+    active = schedule_eval.active_schedules_for_target(conn, now, device_id=device["id"])
+    assert [row["name"] for row in active] == ["Free Time"]
+
+
+def test_active_schedules_for_target_excludes_schedules_targeting_someone_else(conn):
+    conn.execute(
+        "INSERT INTO users (username, display_name, password_hash, created_at) "
+        "VALUES ('other_kid', 'Other Kid', 'x', datetime('now'))"
+    )
+    conn.commit()
+    other_user_id = conn.execute("SELECT id FROM users WHERE username = 'other_kid'").fetchone()["id"]
+    schedule = _insert_schedule(conn, "Other Kid's Bedtime", is_global=0,
+                                 days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
+    conn.execute("INSERT INTO schedule_users (schedule_id, user_id) VALUES (?, ?)", (schedule, other_user_id))
+    conn.commit()
+
+    now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+    assert schedule_eval.active_schedules_for_target(conn, now, user_id=other_user_id) != []
+    assert schedule_eval.active_schedules_for_target(conn, now, user_id=999999) == []

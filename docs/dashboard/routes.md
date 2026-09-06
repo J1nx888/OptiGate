@@ -292,9 +292,14 @@ admin's next action is one edit + submit rather than starting from scratch:
   `user_id=` preserved.
 - `GET /users/<int:user_id>` -> `user_detail()` -- one user's assigned
   domains (read-only, via a JOIN on `user_domains`), approved
-  `user_shows`, and the add-show/change-password forms. Renders
-  `USER_DETAIL_BODY`. Redirects to `users` with an error flash if the user
-  id doesn't exist.
+  `user_shows`, and the add-show/change-password forms. Also (added
+  2026-09-06, a real feature gap found by live user testing -- there was
+  previously no way to see this at all) an "Active right now" card
+  listing every schedule currently in effect for this user, via
+  `schedule_eval.active_schedules_for_target(conn, now, user_id=...)` --
+  reflects any live "Shift mode now" override (RoadMap.md's Phase 12),
+  not just the bare clock. Renders `USER_DETAIL_BODY`. Redirects to
+  `users` with an error flash if the user id doesn't exist.
 - `POST /shows/add` -> `add_show()` -- form fields `user_id`, `url` (a
   Crunchyroll series URL), `name` (optional override). Parses the URL with
   `parse_series_url()` (module-level regex `SERIES_URL_RE`, ~line 450) to
@@ -384,11 +389,26 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
 
 - `GET /categories` -> `categories()` -- lists every category with a
   computed `domain_count`; a "Sync all subscriptions now" button appears
-  only if at least one category has a `subscription_url`. Renders
-  `CATEGORIES_BODY`.
+  only if at least one category has a `subscription_url`. Also accepts
+  an optional `?domain=` query param (added 2026-09-06, real gap found
+  by live user testing: no way to check whether a domain appears in more
+  than one category, e.g. `facebook.com` listed in both Facebook and
+  Gambling, without opening each category individually) -- when present,
+  runs `matching.find_categories_for_hostname()` and renders the
+  matching categories (each flagged if a `category_overrides` row
+  exempts that domain from that specific category despite being a
+  pattern match) inline on the same page, via a plain `GET` form so the
+  result is bookmarkable/shareable as a URL. Renders `CATEGORIES_BODY`.
 - `POST /categories/add` -> `add_category()` -- form fields `name`,
   `subscription_url` (optional -- blank means manual-only). Redirects to
-  `categories`; duplicate name -> error flash.
+  `categories`; duplicate name -> error flash. The add form (and
+  `category_detail()`'s own subscription card) carry hint text (added
+  2026-09-06) spelling out that `subscription_url` must be a raw
+  domain-list file (bare domain per line, hosts-file, or AdGuard/uBlock
+  rule syntax -- see `common/blocklist_parser.py`) with a working example
+  URL, not a webpage -- found live when an admin pointed a category at a
+  Microsoft documentation page that visibly lists domains in a table but
+  isn't in any of the three parseable shapes.
 - `POST /categories/delete` -> `delete_category()` -- form field
   `category_id`. Cascades to every `category_*` junction table.
 - `GET /categories/<int:category_id>` -> `category_detail()` -- the
@@ -419,10 +439,18 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   calls `common/category_fetch.py`'s `fetch_and_sync_category()`
   synchronously (blocks the request on the actual HTTP fetch); a
   `CategoryFetchError` flashes back to `category_detail` rather than
-  raising a 500.
+  raising a 500. **Fixed 2026-09-06** (real UX gap found by live user
+  testing): a URL that fetches successfully but isn't a supported
+  blocklist format (a webpage, say) legitimately parses to 0 domains --
+  `parse_hostlist()` doesn't raise for that, so this used to flash an
+  unexplained "Synced 0 domains." with no hint anything was wrong. A
+  `count == 0` result now gets its own distinct, actionable error flash
+  instead, since almost every real subscription source has domains.
 - `POST /categories/sync-all` -> `sync_all_categories_now()` -- calls
   `sync_all_categories()`; one failing source is skipped, never aborts
-  the rest.
+  the rest. Same 2026-09-06 fix as above: names any category that came
+  back with exactly 0 domains in the aggregate flash (`error=True` in
+  that case) rather than only reporting an undifferentiated grand total.
 
 ### Schedules (`/schedules`) -- Phase 8
 
@@ -642,8 +670,12 @@ actual captive-portal login screen itself is still Phase 4, not built).
 - `POST /users/pause` / `POST /users/resume` -> `pause_user()` /
   `resume_user()` (G6) -- form field `user_id`. Per-kid variant of the
   above, scoped to `WHERE user_id = ?` (pause also excludes `ignored`).
-  Redirects to `user_detail`. The user detail page only shows this card
-  when that user actually has at least one non-`ignored` device.
+  Redirects to `user_detail`. **Fixed 2026-09-06** (real UX bug found by
+  live user testing): this card used to be omitted entirely from
+  `USER_DETAIL_BODY` when the user had zero non-`ignored` devices,
+  making the feature look missing rather than just not yet applicable --
+  it now always renders, showing an explanatory "no devices assigned
+  yet" message (and no pause form) in that case instead of disappearing.
 - `POST /devices/cleanup` -> `cleanup_stale_devices()` -- deletes every
   device whose `last_seen_at` is older than the `device_stale_days`
   setting (see below); a device never observed at all (`last_seen_at IS
@@ -655,6 +687,25 @@ actual captive-portal login screen itself is still Phase 4, not built).
 - `POST /groups/delete` -> `delete_group()` -- form field `group_id`.
   Hard-deletes the row (`devices.group_id`/`group_domains` fall back to
   `NULL`/cascade). Redirects to `devices`.
+- `GET /groups/<int:group_id>` -> `group_detail()` (added 2026-09-06,
+  closing a real gap -- a group previously had no dedicated page at all,
+  only a "Manage domains" link straight into a filtered `/domains` view,
+  so there was nowhere to put a group-level pause control). Shows: which
+  schedules are active for this group right now
+  (`schedule_eval.active_schedules_for_target(group_id=...)`, same
+  helper `user_detail()` uses), a Pause card, the group's member devices
+  with their paused/active status, and a read-only assigned-domains
+  summary linking to the `/domains?group_id=` filtered view for actually
+  managing them. Renders `GROUP_DETAIL_BODY` under the `devices` nav tab
+  (there's no separate "Groups" nav item). Redirects to `devices` with an
+  error flash if the group id doesn't exist.
+- `POST /groups/pause` / `POST /groups/resume` -> `pause_group()` /
+  `resume_group()` (added 2026-09-06 -- the one pause granularity that
+  was entirely missing; per-device and per-user pause both already
+  existed). Form field `group_id`, same `_set_quarantine()` helper and
+  `WHERE group_id = ? AND ignored = 0` / `WHERE group_id = ? AND
+  quarantined_at IS NOT NULL` shape as the per-user routes above.
+  Redirects to `group_detail`.
 - `POST /settings/device-stale-days` -> `update_device_stale_days()` --
   form field `device_stale_days` (a whole number of days, or blank to
   disable cleanup entirely). Feeds `cleanup_stale_devices()` above.

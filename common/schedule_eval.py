@@ -81,16 +81,24 @@ def schedule_is_active(schedule_row: sqlite3.Row, now_utc: datetime) -> bool:
     return evening_leg or morning_leg
 
 
-def active_override_for_device(
-    conn: sqlite3.Connection, device: sqlite3.Row, now_utc: datetime
+def active_override_for_target(
+    conn: sqlite3.Connection, now_utc: datetime,
+    *, user_id: int | None = None, group_id: int | None = None, device_id: int | None = None,
 ) -> sqlite3.Row | None:
-    """The currently-unexpired `schedule_overrides` row targeting `device`
-    -- directly, or via its `user_id`/`group_id` -- or None if no override
-    is in effect right now. Device-level match wins over user-level, which
-    wins over group-level, on the rare chance more than one somehow
-    targets this device at once (dashboard.add_schedule_override() already
-    clears any existing override for the exact target it's about to
-    write, so this is a defensive tie-break, not the normal case).
+    """The currently-unexpired `schedule_overrides` row targeting this
+    user/group/device -- or None if no override is in effect right now.
+    Device-level match wins over user-level, which wins over group-level,
+    on the rare chance more than one somehow targets this same identity
+    at once (dashboard.add_schedule_override() already clears any
+    existing override for the exact target it's about to write, so this
+    is a defensive tie-break, not the normal case).
+
+    Pulled out of what used to be device-only active_override_for_device()
+    (2026-09-06) so a caller with only a user id in hand -- e.g. the user
+    detail page's "what's active for this kid right now" display, which
+    has no single device to check against -- doesn't need to fabricate
+    one. `schedule_is_active_for_device()` below passes all three ids
+    from a real device row; a user-only caller passes just `user_id`.
 
     `now_utc` follows schedule_is_active()'s own naive-treated-as-UTC
     convention. `expires_at` is stored the same ISO-8601-UTC way every
@@ -102,42 +110,57 @@ def active_override_for_device(
         now_utc = now_utc.replace(tzinfo=ZoneInfo("UTC"))
     now_iso = now_utc.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
 
-    if device["id"] is not None:
+    if device_id is not None:
         row = conn.execute(
             "SELECT * FROM schedule_overrides WHERE device_id = ? AND expires_at > ? "
             "ORDER BY created_at DESC LIMIT 1",
-            (device["id"], now_iso),
+            (device_id, now_iso),
         ).fetchone()
         if row is not None:
             return row
-    if device["user_id"] is not None:
+    if user_id is not None:
         row = conn.execute(
             "SELECT * FROM schedule_overrides WHERE user_id = ? AND expires_at > ? "
             "ORDER BY created_at DESC LIMIT 1",
-            (device["user_id"], now_iso),
+            (user_id, now_iso),
         ).fetchone()
         if row is not None:
             return row
-    if device["group_id"] is not None:
+    if group_id is not None:
         row = conn.execute(
             "SELECT * FROM schedule_overrides WHERE group_id = ? AND expires_at > ? "
             "ORDER BY created_at DESC LIMIT 1",
-            (device["group_id"], now_iso),
+            (group_id, now_iso),
         ).fetchone()
         if row is not None:
             return row
     return None
 
 
-def schedule_is_active_for_device(
-    conn: sqlite3.Connection, schedule_row: sqlite3.Row, device: sqlite3.Row, now_utc: datetime
+def active_override_for_device(
+    conn: sqlite3.Connection, device: sqlite3.Row, now_utc: datetime
+) -> sqlite3.Row | None:
+    """Device-shaped wrapper over active_override_for_target() -- kept as
+    the entry point is_full_lockout_active()/schedule_is_active_for_device()
+    already use, and any existing external caller."""
+    return active_override_for_target(
+        conn, now_utc, user_id=device["user_id"], group_id=device["group_id"], device_id=device["id"]
+    )
+
+
+def schedule_is_active_for_target(
+    conn: sqlite3.Connection, schedule_row: sqlite3.Row, now_utc: datetime,
+    *, user_id: int | None = None, group_id: int | None = None, device_id: int | None = None,
 ) -> bool:
-    """Device-aware wrapper around schedule_is_active() -- the one choke
+    """Target-aware wrapper around schedule_is_active() -- the one choke
     point both controller/policy_state.py (via is_full_lockout_active()
     below) and controller/adguard_sync.py's build_category_deny_rules()
     call instead of the bare clock check, so a Phase 12 override affects
     both enforcement paths (nftables lockout AND DNS-tier category
-    blocks) without either module needing its own special case.
+    blocks) without either module needing its own special case. Also
+    what active_schedules_for_target() below uses for the user detail
+    page's "what's active right now" display, generalized to accept a
+    bare user/group/device id rather than requiring a full device row.
 
     Only a schedule with `is_mode = 1` is ever affected by an override --
     see schedules.is_mode's own comment in common/db.py for why this is
@@ -146,9 +169,9 @@ def schedule_is_active_for_device(
     swappable daily modes) must never be silently lifted by someone
     shifting that kid into Free Time.
 
-    For an is_mode schedule: an active override for `device` means this
-    schedule is active only if the override names IT specifically --
-    every other is_mode schedule targeting the same device is forced
+    For an is_mode schedule: an active override for this target means
+    the schedule is active only if the override names IT specifically --
+    every other is_mode schedule targeting the same identity is forced
     INACTIVE for the override's duration, regardless of what the clock
     says (that's the "instead of", not "in addition to", semantics the
     feature exists for). No override at all falls through to the normal
@@ -156,10 +179,46 @@ def schedule_is_active_for_device(
     """
     if not schedule_row["is_mode"]:
         return schedule_is_active(schedule_row, now_utc)
-    override = active_override_for_device(conn, device, now_utc)
+    override = active_override_for_target(conn, now_utc, user_id=user_id, group_id=group_id, device_id=device_id)
     if override is not None:
         return override["schedule_id"] == schedule_row["id"]
     return schedule_is_active(schedule_row, now_utc)
+
+
+def schedule_is_active_for_device(
+    conn: sqlite3.Connection, schedule_row: sqlite3.Row, device: sqlite3.Row, now_utc: datetime
+) -> bool:
+    """Device-shaped wrapper over schedule_is_active_for_target() -- kept
+    as the entry point every existing enforcement call site
+    (controller/policy_state.py, controller/adguard_sync.py) already
+    uses."""
+    return schedule_is_active_for_target(
+        conn, schedule_row, now_utc,
+        user_id=device["user_id"], group_id=device["group_id"], device_id=device["id"],
+    )
+
+
+def active_schedules_for_target(
+    conn: sqlite3.Connection, now_utc: datetime,
+    *, user_id: int | None = None, group_id: int | None = None, device_id: int | None = None,
+) -> list[sqlite3.Row]:
+    """Every schedule that's actually in effect for this user/group/device
+    RIGHT NOW -- combines "who" (matching.schedule_applies_to_target())
+    and "when" (schedule_is_active_for_target(), override-aware) into the
+    one list the dashboard's "what's active for this kid right now"
+    display (user detail page) needs. Ordered `lockout_all DESC, name` so
+    a full lockout (the most severe/attention-grabbing state) always
+    sorts first when one applies alongside ordinary category-block
+    schedules.
+    """
+    import matching  # local import: keeps schedule_is_active() usable with zero DB dependency
+
+    active = [
+        row for row in conn.execute("SELECT * FROM schedules ORDER BY lockout_all DESC, name")
+        if matching.schedule_applies_to_target(conn, row, user_id=user_id, group_id=group_id, device_id=device_id)
+        and schedule_is_active_for_target(conn, row, now_utc, user_id=user_id, group_id=group_id, device_id=device_id)
+    ]
+    return active
 
 
 def is_full_lockout_active(conn: sqlite3.Connection, device: sqlite3.Row, now_utc: datetime) -> bool:

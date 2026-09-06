@@ -48,6 +48,7 @@ Pi-hole setup:
 | 11 | Operational event log ("Events" page) | ✅ Done, live-verified |
 | 12 | Temporary schedule overrides ("Shift mode now") | ✅ Done, live-verified |
 | 13 | SSL-Bump CA certificate management (upload/regenerate) | ✅ Done, live-verified. Dashboard HTTPS deliberately deferred to Phase 7. |
+| 14 | Live user-testing fixes: category sync feedback, cross-category search, per-user active-schedule display, per-group pause | ✅ Done, live-verified |
 
 ---
 
@@ -3622,6 +3623,118 @@ existed; uploaded a real custom CA pair generated with a different
 with its own backup of the regenerated pair; attempted uploading a
 cert with a non-matching key and confirmed it was rejected with the
 exact "don't match each other" message, files unchanged.
+
+---
+
+## Phase 14 — Live user-testing findings on the local dashboard preview (built 2026-09-06)
+
+The project owner explored a local dashboard-only preview
+(`dashboard/dev_server.py`, no proxy/AdGuard containers) and reported
+five observations. Investigated each against the real code rather than
+assuming; three turned out to be artifacts of that specific throwaway
+sandbox, two were real product gaps -- plus two more real gaps (category
+sync feedback, cross-category domain search) surfaced along the way.
+
+**Sandbox artifacts, not product bugs** (explained, not code-changed):
+- **No pre-seeded categories.** `dashboard/dev_server.py` only starts
+  the Flask app; seeding (`defaults/seed_defaults.py`) normally runs
+  from `proxy/entrypoint.sh` on container start, which never happens in
+  a dashboard-only local preview. Seeded the dev DB directly to unblock
+  further testing.
+- **Category domain lists (Adult, Drugs, etc.) were empty even after
+  seeding.** By design: seeding creates the category *rows* but never
+  fetches their domain lists -- that needs a real network fetch
+  (`category_fetch.sync_all_categories()`), which the seed script
+  deliberately doesn't do so it has zero network dependency. Ran a real
+  sync against the dev DB to confirm the fetch path itself works end to
+  end: Adult came back with 953,197 domains, Gambling 278,856, and six
+  others, all from real `blocklistproject.github.io` sources.
+- **"Check for filter updates now" gave no feedback.** The button is
+  `disabled` when AdGuard isn't configured (true in this sandbox, which
+  never started an AdGuard container) -- clicking a disabled button
+  submits nothing. An explanatory hint ("Not configured yet...") already
+  renders right below it; genuinely needs a real AdGuard instance (the
+  Beelink, or the full compose stack) to exercise, not a dashboard-only
+  preview.
+
+**Real gap, root-caused precisely**: the project owner had added
+`https://learn.microsoft.com/.../ai-microsoft-purview-supported-sites`
+as a category's subscription URL and synced it, getting an unexplained
+"Synced 0 domains." That page is HTML documentation -- `common/
+blocklist_parser.py` only understands three raw text formats (hosts-file,
+AdGuard/uBlock rule, bare domain-per-line), so it fetches successfully
+and legitimately finds zero parseable lines. (That same URL is actually
+already in this project's data, as the one-time manual snapshot behind
+the AI category's 1,195 starter domains -- documented in `docs/database/
+schema.md`, but never surfaced anywhere in the UI itself, which was the
+real gap.) Investigation also found the seeded "AI" category's own
+`subscription_url` had gotten set to that same Microsoft link (from the
+project owner's own testing before real seeding happened, since
+`INSERT OR IGNORE` correctly never clobbers an admin's own edit) --
+reset to `NULL` to match the documented "AI is manual-only" design.
+
+**Shipped**:
+- **Category sync feedback** (`dashboard/dashboard.py`): hint text on
+  the add-category form and `category_detail()`'s subscription card
+  spelling out the three supported formats with a working example URL
+  (`blocklistproject.github.io`'s own list). `sync_category_now()` and
+  `sync_all_categories_now()` now give a distinct, actionable flash when
+  a sync returns exactly 0 domains ("almost always means the URL isn't a
+  supported format"), instead of the same wording a genuine non-zero
+  refresh gets.
+- **Cross-category domain search** (`common/matching.py`'s
+  `find_categories_for_hostname()`, a new card on the Categories page):
+  checks every category's domain list at once for a given hostname
+  (subdomain-aware, same anchored-suffix matching `find_domain()`
+  already uses, including the ReDoS-bounded `_search_with_timeout()`
+  guard), flagging any match a `category_overrides` row exempts.
+  Live-verified against the real synced data: `a2e.ai` correctly came
+  back listed in both AI and Adult.
+- **Per-user "what's active right now"** (`user_detail()`): a new card
+  showing every schedule currently in effect for that kid, live,
+  including any active Phase 12 override -- there was previously no way
+  to see this at all. Required generalizing `matching.
+  schedule_applies_to_device()` and `schedule_eval.
+  schedule_is_active_for_device()`/`active_override_for_device()` into
+  target-shaped versions (`schedule_applies_to_target()`,
+  `schedule_is_active_for_target()`, `active_override_for_target()`,
+  all accepting a bare `user_id`/`group_id`/`device_id` instead of
+  requiring a full device row) -- the device-shaped functions every
+  existing enforcement call site uses are now thin wrappers over these,
+  unchanged behavior, confirmed by the full existing test suite passing
+  untouched. New `schedule_eval.active_schedules_for_target()` combines
+  both into the one list the display needs.
+- **Per-group pause, and a group detail page to put it on**
+  (`dashboard/dashboard.py`): per-device and per-user pause both already
+  existed, but a group had no pause control at all -- because a group
+  had no dedicated page at all, only a "Manage domains" link straight
+  into a filtered `/domains` view. New `group_detail()` route
+  (`GROUP_DETAIL_BODY`) mirrors `user_detail()`'s shape: active-schedules
+  card (via the same new `active_schedules_for_target()`), a Pause card,
+  member devices with paused/active status, and a read-only
+  assigned-domains summary. New `pause_group()`/`resume_group()` routes,
+  same `_set_quarantine()` shape as the per-user routes. The Devices
+  page's Groups table gained a "Manage" link alongside the existing
+  "Manage domains" one.
+- **Real UX bug fixed on `user_detail()`**: the "Pause the internet"
+  card used to be omitted entirely (`{% if user_devices %}`) whenever a
+  user had zero devices assigned, making the feature look missing
+  rather than just not yet applicable -- found because the project
+  owner tested with a user that had no devices yet. Now always renders,
+  showing "no devices assigned yet" instead of disappearing.
+
+Verified: new tests in `tests/test_matching.py` (12),
+`tests/test_schedule_eval.py` (3), and `tests/test_dashboard.py` (~20)
+covering every item above; the full refactor's existing test suite
+(schedule_eval, matching, adguard_sync, policy_state) passes completely
+unchanged, confirming the device-shaped wrappers are truly behavior-
+preserving. Full suite: 790 passed, 34 skipped. Live-verified end to end
+against the real Flask app with real data: the dev DB was actually
+seeded and actually synced (real domain counts confirmed above), the
+lookup tool found a real overlapping domain, the user/group detail pages
+rendered their new cards correctly (including the "no devices yet"
+copy), and per-group pause/resume round-tripped against real device
+rows.
 
 ---
 

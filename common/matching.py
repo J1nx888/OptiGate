@@ -261,34 +261,110 @@ def category_applies_to_device(conn: sqlite3.Connection, device: sqlite3.Row, ca
     return row is not None
 
 
-def schedule_applies_to_device(conn: sqlite3.Connection, device: sqlite3.Row, schedule: sqlite3.Row) -> bool:
-    """Whether `schedule` targets `device` -- same shape as
-    category_applies_to_device() above, checked against
-    schedule_users/schedule_groups/schedule_devices instead. Says nothing
-    about whether the schedule's time window is currently active -- see
-    common/schedule_eval.py's schedule_is_active() for that, a deliberately
-    separate concern (this is "who," that is "when")."""
+def find_categories_for_hostname(conn: sqlite3.Connection, hostname: str) -> list[dict]:
+    """Every category whose domain list currently matches `hostname` --
+    i.e. would block it, once that category is actually assigned to
+    someone (is_global, or via category_users/groups/devices; this
+    function doesn't check that part, only "is this domain a member").
+    Backs the Categories page's cross-category lookup tool (added
+    2026-09-06: an admin found the same domain, e.g. facebook.com,
+    plausibly listed in more than one category -- Facebook AND Gambling,
+    say -- and had no way to check that from the UI short of opening
+    every category one at a time).
+
+    Same anchored domain-suffix matching (`_domain_regex()` + the
+    ReDoS-bounded `_search_with_timeout()`) find_domain() above already
+    uses, applied to `category_domains` instead of `domains` -- a
+    subdomain of a listed domain counts as a match, matching real
+    enforcement semantics, not a naive substring check. Flags a match
+    that's also covered by that category's own `category_overrides` (an
+    admin-added exception -- the category's list technically includes
+    it, but it's never actually blocked by that category) rather than
+    silently omitting or including it unqualified, so the result
+    reflects what's really configured either way.
+
+    Returns one dict per matching category: {"category": <row>,
+    "pattern": <the specific category_domains pattern that matched>,
+    "overridden": <bool>}, ordered by category name. Uses id-ordered
+    iteration internally but the returned list is name-sorted for
+    display, unlike find_domain()'s first-match-wins id order -- there's
+    no "first match wins" concept here, every matching category matters.
+    """
+    hostname = (hostname or "").strip().rstrip(".").lower()
+    if not hostname:
+        return []
+    matches = []
+    for category in conn.execute("SELECT * FROM categories ORDER BY name"):
+        matched_pattern = None
+        for row in conn.execute(
+            "SELECT pattern FROM category_domains WHERE category_id = ?", (category["id"],)
+        ):
+            rx = _domain_regex(row["pattern"])
+            if rx is not None and _search_with_timeout(rx, hostname):
+                matched_pattern = row["pattern"]
+                break
+        if matched_pattern is None:
+            continue
+        overridden = False
+        for row in conn.execute(
+            "SELECT pattern FROM category_overrides WHERE category_id = ?", (category["id"],)
+        ):
+            rx = _domain_regex(row["pattern"])
+            if rx is not None and _search_with_timeout(rx, hostname):
+                overridden = True
+                break
+        matches.append({"category": category, "pattern": matched_pattern, "overridden": overridden})
+    return matches
+
+
+def schedule_applies_to_target(
+    conn: sqlite3.Connection, schedule: sqlite3.Row,
+    *, user_id: int | None = None, group_id: int | None = None, device_id: int | None = None,
+) -> bool:
+    """Whether `schedule` targets this user/group/device -- same
+    is_global-or-junction-table logic schedule_applies_to_device() below
+    used to implement directly against a device row; pulled out into its
+    own function (2026-09-06) so a caller that only has a user id (no
+    specific device in hand -- e.g. the user detail page's "what's active
+    for this kid right now" display) doesn't need to fabricate one. Says
+    nothing about whether the schedule's time window is currently active
+    -- see common/schedule_eval.py's schedule_is_active() for that, a
+    deliberately separate concern (this is "who," that is "when")."""
     if schedule["is_global"]:
         return True
-    if device["user_id"] is not None:
+    if user_id is not None:
         row = conn.execute(
             "SELECT 1 FROM schedule_users WHERE schedule_id = ? AND user_id = ?",
-            (schedule["id"], device["user_id"]),
+            (schedule["id"], user_id),
         ).fetchone()
         if row is not None:
             return True
-    if device["group_id"] is not None:
+    if group_id is not None:
         row = conn.execute(
             "SELECT 1 FROM schedule_groups WHERE schedule_id = ? AND group_id = ?",
-            (schedule["id"], device["group_id"]),
+            (schedule["id"], group_id),
         ).fetchone()
         if row is not None:
             return True
-    row = conn.execute(
-        "SELECT 1 FROM schedule_devices WHERE schedule_id = ? AND device_id = ?",
-        (schedule["id"], device["id"]),
-    ).fetchone()
-    return row is not None
+    if device_id is not None:
+        row = conn.execute(
+            "SELECT 1 FROM schedule_devices WHERE schedule_id = ? AND device_id = ?",
+            (schedule["id"], device_id),
+        ).fetchone()
+        if row is not None:
+            return True
+    return False
+
+
+def schedule_applies_to_device(conn: sqlite3.Connection, device: sqlite3.Row, schedule: sqlite3.Row) -> bool:
+    """Whether `schedule` targets `device` -- thin wrapper over
+    schedule_applies_to_target() using the device's own user_id/group_id/
+    id, kept as the device-shaped entry point every existing enforcement
+    call site (controller/policy_state.py, controller/adguard_sync.py)
+    already uses."""
+    return schedule_applies_to_target(
+        conn, schedule, user_id=device["user_id"], group_id=device["group_id"], device_id=device["id"]
+    )
 
 
 def user_has_show(conn: sqlite3.Connection, user_id: int, series_id: str) -> bool:

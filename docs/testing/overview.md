@@ -814,6 +814,49 @@ unit test would never have caught this; the fix and its regression test
 both came from the live check, not the other way around). Full suite:
 **762 passed, 34 skipped** (Windows).
 
+**2026-09-06, Phase 14 (live user-testing fixes)**: ~35 new tests
+across three files, plus a real refactor whose safety net is that every
+*existing* test kept passing unchanged. 12 in `tests/test_matching.py`:
+`schedule_applies_to_target()` (is_global, bare user id, bare group id,
+neither-set-and-not-global) and `find_categories_for_hostname()`
+(multiple categories matching the same domain, subdomain matching,
+no-match returns `[]`, an override correctly flags `overridden=True`,
+blank input short-circuits). 3 in `tests/test_schedule_eval.py`:
+`active_schedules_for_target()` lists what's actually active for a user
+right now and respects the clock window, reflects a live override
+(forces a different mode schedule on even though the original one's own
+window is what's normally active), and correctly excludes a schedule
+scoped to a different user. `matching.schedule_applies_to_device()` and
+`schedule_eval.schedule_is_active_for_device()`/
+`active_override_for_device()` were refactored into thin wrappers over
+new target-shaped versions -- confirmed non-breaking by running the
+full pre-existing `test_matching.py`/`test_schedule_eval.py`/
+`test_controller_adguard_sync.py`/`test_controller_policy_state.py`
+suites unchanged afterward (all still passed). ~20 in
+`tests/test_dashboard.py`: the user detail page's new "Active right
+now" card (shows an active schedule, shows "Nothing active right now"
+when none applies) and its fixed pause-card visibility (a real bug --
+this card used to disappear entirely for a user with zero devices,
+found by the project owner testing with an empty user, rather than
+explaining there's nothing to pause yet); a full new
+`group_detail()`/`pause_group()`/`resume_group()` suite (page renders,
+unknown id redirects with an error, empty-group messaging, pause
+affects every member device, resume clears it, an `ignored` device is
+skipped, auth is required); category sync's new 0-domains-is-suspicious
+flash (distinct from a normal non-zero result, and `sync-all` naming
+which specific categories came back empty); and the new cross-category
+lookup (`?domain=` on `/categories`) finding a domain in multiple real
+categories, a clean no-match message, and confirming the results
+section doesn't render at all with no `domain` param. Full suite:
+**790 passed, 34 skipped** (Windows). Also live-verified against the
+real Flask app with real data (not just mocks): actually ran
+`category_fetch.sync_all_categories()` against the real
+`blocklistproject.github.io` sources (Adult came back with 953,197 real
+domains), then used the new lookup tool to find a genuinely overlapping
+real domain (`a2e.ai`, present in both the AI and Adult lists) --
+confirming the whole feature end to end against real fetched data, not
+a synthetic fixture.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run
