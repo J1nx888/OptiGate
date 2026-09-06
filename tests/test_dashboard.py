@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import base64
 import importlib
+import io
+import re
+import subprocess
 
 import pytest
 
@@ -3241,3 +3244,208 @@ def test_update_safesearch_unchecked_saves_off(client, db_conn):
     resp = client.post("/settings/safesearch", data={}, headers=_auth_header())
     assert resp.status_code == 302
     assert db_mod.get_setting(db_conn, "safesearch_enabled") == "0"
+
+
+# ============================================================
+# Phase 13: SSL-Bump CA certificate management
+# ============================================================
+
+def _generate_cert_pair(tmp_path, name: str, *, is_ca: bool = True, common_name: str = "Test CA"):
+    """Generates a real self-signed cert+key pair via openssl (same tool
+    proxy/entrypoint.sh and dashboard.py's own validation/regeneration
+    use) for exercising the upload/validate path against real PEM data
+    rather than hand-rolled fakes. `is_ca=False` forces `CA:FALSE`
+    explicitly -- omitting the extension entirely is unreliable across
+    openssl versions/configs (see proxy/entrypoint.sh's own comment on
+    this), so a genuinely non-CA test cert needs it spelled out."""
+    cert_path = tmp_path / f"{name}_cert.pem"
+    key_path = tmp_path / f"{name}_key.pem"
+    constraint = "basicConstraints=critical,CA:TRUE" if is_ca else "basicConstraints=critical,CA:FALSE"
+    args = [
+        "openssl", "req", "-new", "-newkey", "rsa:2048", "-sha256", "-days", "365", "-nodes", "-x509",
+        "-keyout", str(key_path), "-out", str(cert_path),
+        "-subj", f"/O=Test/CN={common_name}",
+        "-addext", constraint,
+    ]
+    if is_ca:
+        args += ["-addext", "keyUsage=critical,keyCertSign,cRLSign"]
+    subprocess.run(args, check=True, capture_output=True)
+    return cert_path.read_bytes(), key_path.read_bytes()
+
+
+def _point_ca_paths_at(monkeypatch, tmp_path):
+    """Points dashboard.CA_CERT_PATH/CA_KEY_PATH at a throwaway directory
+    -- the real default (/config/ssl_cert/...) doesn't exist and
+    shouldn't be touched by tests. Read/written as plain module globals
+    by every route/helper this section exercises, so monkeypatching the
+    attributes directly (same pattern the dashboard_app fixture already
+    uses for db.DB_PATH) is enough -- no reload needed."""
+    import dashboard
+
+    cert_dir = tmp_path / "ssl_cert"
+    cert_dir.mkdir()
+    monkeypatch.setattr(dashboard, "CA_CERT_PATH", cert_dir / "ca_cert.pem")
+    monkeypatch.setattr(dashboard, "CA_KEY_PATH", cert_dir / "ca_key.pem")
+    return dashboard.CA_CERT_PATH, dashboard.CA_KEY_PATH
+
+
+def test_settings_shows_ca_cert_details_when_present(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, key_pem = _generate_cert_pair(tmp_path, "current", common_name="My Household CA")
+    cert_path.write_bytes(cert_pem)
+    key_path.write_bytes(key_pem)
+
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"My Household CA" in resp.data
+
+
+def test_settings_shows_a_real_fingerprint_not_a_blank_field(client, db_conn, monkeypatch, tmp_path):
+    # Regression test: live-verified 2026-09-06 that this openssl build
+    # prints "sha256 Fingerprint=" (lowercase), not "SHA256
+    # Fingerprint=" as _ca_cert_info() originally assumed -- the
+    # fingerprint silently came back blank with no error to reveal why.
+    import dashboard
+
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, key_pem = _generate_cert_pair(tmp_path, "current")
+    cert_path.write_bytes(cert_pem)
+    key_path.write_bytes(key_pem)
+
+    info = dashboard._ca_cert_info(cert_path)
+    assert info is not None
+    assert info.get("fingerprint")
+    assert re.fullmatch(r"([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}", info["fingerprint"])
+
+
+def test_settings_shows_not_generated_yet_when_absent(client, db_conn, monkeypatch, tmp_path):
+    _point_ca_paths_at(monkeypatch, tmp_path)
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Not generated yet" in resp.data
+
+
+def test_regenerate_ca_cert_writes_a_new_pair(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+
+    resp = client.post(
+        "/settings/ca-cert/regenerate",
+        data={"ca_org": "My House", "ca_common_name": "My House CA"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert cert_path.exists() and key_path.exists()
+    assert b"My House CA" in cert_path.read_bytes() or b"My House CA" in subprocess.run(
+        ["openssl", "x509", "-noout", "-subject", "-in", str(cert_path)], capture_output=True
+    ).stdout
+
+
+def test_regenerate_ca_cert_backs_up_the_previous_pair(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    old_cert, old_key = _generate_cert_pair(tmp_path, "old")
+    cert_path.write_bytes(old_cert)
+    key_path.write_bytes(old_key)
+
+    client.post("/settings/ca-cert/regenerate", data={}, headers=_auth_header())
+
+    backups = list(cert_path.parent.glob("ca_cert.*.bak.pem"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == old_cert
+    assert cert_path.read_bytes() != old_cert  # actually replaced, not just backed up
+
+
+def test_regenerate_ca_cert_rejects_slash_in_org(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    resp = client.post(
+        "/settings/ca-cert/regenerate", data={"ca_org": "My/House"}, headers=_auth_header()
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert not cert_path.exists()
+
+
+def test_regenerate_ca_cert_requires_admin_auth(client, db_conn, monkeypatch, tmp_path):
+    _point_ca_paths_at(monkeypatch, tmp_path)
+    resp = client.post("/settings/ca-cert/regenerate", data={})
+    assert resp.status_code == 401
+
+
+def test_upload_ca_cert_accepts_a_valid_matching_pair(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, key_pem = _generate_cert_pair(tmp_path, "uploaded", common_name="Uploaded CA")
+
+    resp = client.post(
+        "/settings/ca-cert/upload",
+        data={
+            "ca_cert_file": (io.BytesIO(cert_pem), "cert.pem"),
+            "ca_key_file": (io.BytesIO(key_pem), "key.pem"),
+        },
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert cert_path.read_bytes() == cert_pem
+    assert key_path.read_bytes() == key_pem
+
+
+def test_upload_ca_cert_rejects_a_mismatched_pair(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, _ = _generate_cert_pair(tmp_path, "one")
+    _, other_key_pem = _generate_cert_pair(tmp_path, "two")
+
+    resp = client.post(
+        "/settings/ca-cert/upload",
+        data={
+            "ca_cert_file": (io.BytesIO(cert_pem), "cert.pem"),
+            "ca_key_file": (io.BytesIO(other_key_pem), "key.pem"),
+        },
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert not cert_path.exists()
+    assert not key_path.exists()
+
+
+def test_upload_ca_cert_rejects_a_non_ca_certificate(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, key_pem = _generate_cert_pair(tmp_path, "leaf", is_ca=False)
+
+    resp = client.post(
+        "/settings/ca-cert/upload",
+        data={
+            "ca_cert_file": (io.BytesIO(cert_pem), "cert.pem"),
+            "ca_key_file": (io.BytesIO(key_pem), "key.pem"),
+        },
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert not cert_path.exists()
+
+
+def test_upload_ca_cert_rejects_garbage_input(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+
+    resp = client.post(
+        "/settings/ca-cert/upload",
+        data={
+            "ca_cert_file": (io.BytesIO(b"not a certificate"), "cert.pem"),
+            "ca_key_file": (io.BytesIO(b"not a key"), "key.pem"),
+        },
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert not cert_path.exists()
+
+
+def test_upload_ca_cert_requires_both_files(client, db_conn, monkeypatch, tmp_path):
+    _point_ca_paths_at(monkeypatch, tmp_path)
+    resp = client.post("/settings/ca-cert/upload", data={}, headers=_auth_header(), content_type="multipart/form-data")
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_upload_ca_cert_requires_admin_auth(client, db_conn, monkeypatch, tmp_path):
+    _point_ca_paths_at(monkeypatch, tmp_path)
+    resp = client.post("/settings/ca-cert/upload", data={}, content_type="multipart/form-data")
+    assert resp.status_code == 401

@@ -21,7 +21,9 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -44,6 +46,13 @@ import schedule_eval
 import system_events
 
 CA_CERT_PATH = Path(os.environ.get("PP_CA_CERT_PATH", "/config/ssl_cert/ca_cert.pem"))
+# Not independently configurable via its own env var in docker-compose.yml
+# today (only PP_CA_CERT_PATH is wired up there) -- derived from
+# PP_CA_CERT_PATH's own directory so the two stay colocated the same way
+# proxy/entrypoint.sh's SSL_DIR already colocates them, but still
+# independently overridable (e.g. for a test that wants both paths under
+# one throwaway tmp_path without depending on this derivation).
+CA_KEY_PATH = Path(os.environ.get("PP_CA_KEY_PATH", str(CA_CERT_PATH.parent / "ca_key.pem")))
 
 log = logging.getLogger("dashboard")
 
@@ -587,6 +596,198 @@ def ca_cert():
         CA_CERT_PATH, mimetype="application/x-x509-ca-cert",
         as_attachment=True, download_name="parental-proxy-ca.crt",
     )
+
+
+CA_CERT_RESTART_NOTICE = (
+    "Restart the proxy container (docker compose restart proxy) for Squid to actually use it -- "
+    "unlike everything else in this dashboard, cert=/key= is only read at Squid startup, not live. "
+    "Every device also needs the new certificate re-trusted; the old one no longer matches."
+)
+
+
+def _ca_cert_info(path: Path) -> dict | None:
+    """Subject/expiry/fingerprint of the current SSL-Bump CA certificate,
+    for the Settings page display. Parsed fresh from the file with
+    openssl (same tool _validate_ca_cert_pair() below uses -- see its own
+    comment on why this shells out rather than adding a Python crypto
+    dependency) every time the Settings page loads, rather than caching
+    anything, so it always reflects the file Squid will actually load.
+    Returns None if the file doesn't exist yet or openssl can't parse it
+    -- either way, nothing to show."""
+    if not path.exists():
+        return None
+    try:
+        cert_pem = path.read_bytes()
+    except OSError:
+        return None
+    result = subprocess.run(
+        ["openssl", "x509", "-noout", "-subject", "-enddate", "-fingerprint", "-sha256"],
+        input=cert_pem, capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    info: dict[str, str] = {}
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        # Case-insensitive match on the "Fingerprint=" label -- live-
+        # verified 2026-09-06 that openssl 3.5 prints "sha256
+        # Fingerprint=" (lowercase algorithm name), not the "SHA256
+        # Fingerprint=" this originally assumed, which silently left the
+        # fingerprint blank on the Settings page with no error anywhere.
+        if line.startswith("subject="):
+            info["subject"] = line[len("subject="):].strip()
+        elif line.startswith("notAfter="):
+            info["expires"] = line[len("notAfter="):].strip()
+        elif "fingerprint=" in line.lower():
+            info["fingerprint"] = line.partition("=")[2].strip()
+    return info or None
+
+
+def _public_key_der(pem_bytes: bytes, *, from_cert: bool) -> bytes | None:
+    """DER-encoded public key extracted from a cert or a private key --
+    used by _validate_ca_cert_pair() to confirm an uploaded pair actually
+    match each other, independent of key algorithm (RSA, EC, ...) rather
+    than the RSA-only `openssl x509 -modulus`/`openssl rsa -modulus`
+    comparison, since an admin's own CA could reasonably be EC-based.
+    Returns None if openssl can't extract a public key at all (already-
+    invalid input -- the caller has separately validated the input parses
+    as a cert/key at all before ever calling this)."""
+    extract = subprocess.run(
+        ["openssl", "x509", "-noout", "-pubkey"] if from_cert else ["openssl", "pkey", "-pubout"],
+        input=pem_bytes, capture_output=True,
+    )
+    if extract.returncode != 0:
+        return None
+    der = subprocess.run(
+        ["openssl", "pkey", "-pubin", "-outform", "DER"], input=extract.stdout, capture_output=True,
+    )
+    return der.stdout if der.returncode == 0 else None
+
+
+def _validate_ca_cert_pair(cert_pem: bytes, key_pem: bytes) -> str | None:
+    """Validates an uploaded CA cert+key pair before ever writing it to
+    disk -- Squid reads cert=/key= from squid.conf with zero validation
+    of its own (proxy/squid.conf.template), so a malformed or mismatched
+    pair fails ssl-bump silently, with nothing in the Report page to
+    explain why every bump-mode site suddenly shows certificate errors or
+    stops working. Shells out to openssl (same tool
+    proxy/entrypoint.sh already uses to generate the default pair)
+    rather than adding a new Python crypto dependency for one admin
+    action. Returns None if the pair is valid and usable for Squid's
+    ssl-bump, or a human-readable reason otherwise."""
+    cert_check = subprocess.run(["openssl", "x509", "-noout", "-text"], input=cert_pem, capture_output=True)
+    if cert_check.returncode != 0:
+        return "That doesn't look like a valid X.509 certificate."
+    cert_text = cert_check.stdout.decode("utf-8", "replace")
+    # Same two extensions proxy/entrypoint.sh sets explicitly when
+    # generating the default CA -- without them Squid can't mint
+    # per-site leaf certificates from this key at all.
+    if "CA:TRUE" not in cert_text:
+        return 'This isn\'t a CA certificate (missing "basicConstraints CA:TRUE") -- Squid can\'t mint per-site certificates from it.'
+    if "Certificate Sign" not in cert_text:
+        return 'This certificate\'s key usage doesn\'t allow certificate signing ("keyCertSign") -- Squid can\'t mint per-site certificates from it.'
+
+    key_check = subprocess.run(["openssl", "pkey", "-noout"], input=key_pem, capture_output=True)
+    if key_check.returncode != 0:
+        return "That doesn't look like a valid private key (or it's encrypted/password-protected -- Squid needs an unencrypted key)."
+
+    cert_pubkey = _public_key_der(cert_pem, from_cert=True)
+    key_pubkey = _public_key_der(key_pem, from_cert=False)
+    if cert_pubkey is None or key_pubkey is None or cert_pubkey != key_pubkey:
+        return "The certificate and private key don't match each other."
+
+    return None
+
+
+def _replace_ca_cert_pair(cert_pem: bytes, key_pem: bytes) -> None:
+    """Backs up the current CA cert+key (timestamped, alongside the
+    originals) before overwriting, then writes the new pair. A botched
+    cert swap makes every previously-trusted device distrust Squid's
+    bump-mode connections at once (see CA_CERT_RESTART_NOTICE) -- keeping
+    the previous pair trivially recoverable is cheap insurance against a
+    bad upload or an admin who regenerated by mistake. Does NOT restart
+    or signal the proxy container -- see CA_CERT_RESTART_NOTICE's own
+    comment on why that's a deliberate manual step for this one change,
+    unlike every other config in this dashboard."""
+    CA_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if CA_CERT_PATH.exists():
+        CA_CERT_PATH.with_name(f"{CA_CERT_PATH.stem}.{stamp}.bak{CA_CERT_PATH.suffix}").write_bytes(
+            CA_CERT_PATH.read_bytes()
+        )
+    if CA_KEY_PATH.exists():
+        CA_KEY_PATH.with_name(f"{CA_KEY_PATH.stem}.{stamp}.bak{CA_KEY_PATH.suffix}").write_bytes(
+            CA_KEY_PATH.read_bytes()
+        )
+    CA_CERT_PATH.write_bytes(cert_pem)
+    CA_KEY_PATH.write_bytes(key_pem)
+    try:
+        os.chmod(CA_KEY_PATH, 0o600)
+    except OSError:
+        pass  # e.g. Windows in local dev -- best-effort only, matches other chmod calls in this codebase
+
+
+@app.route("/settings/ca-cert/upload", methods=["POST"])
+@require_admin
+def upload_ca_cert():
+    cert_file = request.files.get("ca_cert_file")
+    key_file = request.files.get("ca_key_file")
+    if not cert_file or not cert_file.filename or not key_file or not key_file.filename:
+        return flash_redirect("settings_page", "Pick both a certificate file and a private key file.", error=True)
+
+    cert_pem = cert_file.read()
+    key_pem = key_file.read()
+    # Real CA certs/keys are a few KB -- generous cap against someone
+    # accidentally (or deliberately) picking a huge file, without needing
+    # a streaming read for what should always be a tiny upload.
+    if len(cert_pem) > 64_000 or len(key_pem) > 64_000:
+        return flash_redirect("settings_page", "That file is too large to be a certificate or key.", error=True)
+
+    error = _validate_ca_cert_pair(cert_pem, key_pem)
+    if error:
+        return flash_redirect("settings_page", error, error=True)
+
+    _replace_ca_cert_pair(cert_pem, key_pem)
+    return flash_redirect("settings_page", f"CA certificate replaced. {CA_CERT_RESTART_NOTICE}")
+
+
+@app.route("/settings/ca-cert/regenerate", methods=["POST"])
+@require_admin
+def regenerate_ca_cert():
+    """One-click 'rotate now' -- generates a fresh self-signed CA with the
+    exact same openssl invocation proxy/entrypoint.sh uses on first run
+    (RSA 2048, SHA-256, 10-year validity, the same two required
+    extensions), just admin-triggered instead of only-if-missing."""
+    org = (request.form.get("ca_org") or "Parental Proxy").strip()[:200]
+    common_name = (request.form.get("ca_common_name") or "Parental Proxy CA").strip()[:200]
+    if not org or not common_name:
+        return flash_redirect("settings_page", "Org and Common Name can't be empty.", error=True)
+    # "/" is openssl -subj's own field separator -- letting it through
+    # would let the typed value inject extra RDN fields into the subject
+    # rather than just being read as a single Org/CN value.
+    if "/" in org or "/" in common_name:
+        return flash_redirect("settings_page", "Org and Common Name can't contain \"/\".", error=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cert_path = Path(tmp) / "ca_cert.pem"
+        key_path = Path(tmp) / "ca_key.pem"
+        result = subprocess.run(
+            [
+                "openssl", "req", "-new", "-newkey", "rsa:2048", "-sha256", "-days", "3650", "-nodes", "-x509",
+                "-keyout", str(key_path), "-out", str(cert_path),
+                "-subj", f"/O={org}/CN={common_name}",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            ],
+            capture_output=True,
+        )
+        if result.returncode != 0 or not cert_path.exists() or not key_path.exists():
+            log.error("CA cert regeneration failed: %s", result.stderr.decode("utf-8", "replace"))
+            return flash_redirect(
+                "settings_page", "Certificate generation failed -- see the dashboard container logs.", error=True
+            )
+        _replace_ca_cert_pair(cert_path.read_bytes(), key_path.read_bytes())
+
+    return flash_redirect("settings_page", f"New CA certificate generated. {CA_CERT_RESTART_NOTICE}")
 
 
 BLOCKED_BODY = """
@@ -4039,9 +4240,36 @@ def health_page():
 
 SETTINGS_BODY = """
 <div class="card">
-<h2>CA certificate</h2>
+<h2>SSL-Bump CA certificate</h2>
 <p class="hint">Every device needs this certificate trusted to use bump-mode filtering (Crunchyroll, or any other domain switched to bump mode) -- same certificate for every device, no per-user certs.</p>
+{% if ca_cert_info %}
+<p class="hint"><strong>Current:</strong> {{ ca_cert_info.subject }}<br>Expires {{ ca_cert_info.expires }}<br><code style="font-size:.75em; word-break:break-all;">{{ ca_cert_info.fingerprint }}</code></p>
+{% else %}
+<p class="hint"><strong>Not generated yet</strong> -- start the proxy container first.</p>
+{% endif %}
 <a class="btn add" href="{{ url_for('ca_cert') }}">Download CA certificate</a>
+
+<details style="margin-top:1rem;">
+<summary>Regenerate (create a fresh self-signed CA)</summary>
+<form class="add-form" method="post" action="{{ url_for('regenerate_ca_cert') }}"
+      onsubmit="return confirm('This replaces the CA certificate every device currently trusts. Every device will need to re-trust the new one, and bump-mode sites will show certificate errors until they do -- the proxy container also needs a restart afterward. Continue?')">
+  <input type="text" name="ca_org" placeholder="Org" value="Parental Proxy">
+  <input type="text" name="ca_common_name" placeholder="Common name" value="Parental Proxy CA">
+  <button class="danger" type="submit">Regenerate CA certificate</button>
+</form>
+</details>
+
+<details style="margin-top:.6rem;">
+<summary>Upload your own CA certificate</summary>
+<p class="hint">Bring an existing CA cert+key pair instead of the auto-generated one -- must have CA:TRUE and keyCertSign, unencrypted key, and the two files must actually match.</p>
+<form class="add-form" method="post" action="{{ url_for('upload_ca_cert') }}" enctype="multipart/form-data"
+      onsubmit="return confirm('This replaces the CA certificate every device currently trusts. Every device will need to re-trust the new one, and bump-mode sites will show certificate errors until they do -- the proxy container also needs a restart afterward. Continue?')">
+  <label>Certificate (PEM) <input type="file" name="ca_cert_file" accept=".pem,.crt,.cer" required></label>
+  <label>Private key (PEM) <input type="file" name="ca_key_file" accept=".pem,.key" required></label>
+  <button class="danger" type="submit">Upload and replace</button>
+</form>
+</details>
+<p class="hint" style="margin-top:.6rem;"><strong>After either action:</strong> restart the proxy container (<code>docker compose restart proxy</code>) for Squid to actually use it -- cert=/key= is only read at Squid startup, not live like everything else in this dashboard.</p>
 </div>
 
 <div class="card">
@@ -4210,6 +4438,7 @@ def settings_page():
         household_time_zone=household_time_zone,
         available_time_zones=sorted(zoneinfo.available_timezones()),
         safesearch_enabled=safesearch_enabled,
+        ca_cert_info=_ca_cert_info(CA_CERT_PATH),
     )
     return render("settings", body)
 

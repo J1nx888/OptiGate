@@ -790,6 +790,30 @@ device, confirmed the "Shift mode now" card and its combobox render,
 posted a real override and confirmed it appeared correctly in "Active
 overrides" with the right target/expiry, and confirmed Cancel removed it.
 
+**2026-09-06, Phase 13 (SSL-Bump CA certificate management)**: 15 new
+tests in `tests/test_dashboard.py`, all using real `openssl`-generated
+certs/keys (`_generate_cert_pair()`, a small test helper) rather than
+hand-rolled fake PEM data, since the whole point of
+`_validate_ca_cert_pair()` is real X.509 parsing. Covers: a valid
+matching pair is accepted and written; a mismatched pair, a non-CA cert
+(`CA:FALSE` explicitly, since omitting the extension is unreliable
+across openssl builds/configs), and garbage input are all rejected with
+the target files left completely untouched; regenerate writes a fresh
+pair and backs up whatever was there before (asserting the backup's
+bytes equal the old file and the live file's bytes actually changed);
+regenerate rejects a `/` in the Org/Common-Name fields (breaks openssl
+`-subj` parsing); both routes require admin auth; the Settings page
+shows real subject/expiry/fingerprint when a cert exists and "Not
+generated yet" when it doesn't. One test is a **live-caught regression**:
+`_ca_cert_info()`'s fingerprint parsing originally matched
+`"SHA256 Fingerprint="`, but this project's openssl build (3.5.7) prints
+`"sha256 Fingerprint="` (lowercase) -- the fingerprint silently came back
+blank on the real Settings page with no error anywhere, found only by
+actually loading the page against a real generated cert (a mocked-output
+unit test would never have caught this; the fix and its regression test
+both came from the live check, not the other way around). Full suite:
+**762 passed, 34 skipped** (Windows).
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run

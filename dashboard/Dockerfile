@@ -28,8 +28,15 @@ COPY dashboard/static /app/static
 # controller/Dockerfile's own comment on this same fix for the full
 # story (a live-confirmed plain-HTTP apt fetch corruption against
 # deb.debian.org, HTTPS unaffected).
+#
+# `openssl` (added 2026-09-06, alongside libcap2-bin above): the Settings
+# page's SSL-Bump CA cert management (regenerate / validate-and-replace an
+# uploaded cert+key pair, dashboard.py's _validate_ca_cert_pair()/
+# regenerate_ca_cert()) shells out to it rather than adding a Python
+# crypto library dependency for one admin action -- same tool
+# proxy/entrypoint.sh already uses to generate the default CA pair.
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
+    && apt-get update && apt-get install -y --no-install-recommends libcap2-bin openssl \
     && rm -rf /var/lib/apt/lists/* \
     && setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(which python3)")"
 

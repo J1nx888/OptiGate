@@ -47,6 +47,7 @@ Pi-hole setup:
 | 10 | Ad-hoc "pause the internet" (G6) | ✅ Done, live-verified |
 | 11 | Operational event log ("Events" page) | ✅ Done, live-verified |
 | 12 | Temporary schedule overrides ("Shift mode now") | ✅ Done, live-verified |
+| 13 | SSL-Bump CA certificate management (upload/regenerate) | ✅ Done, live-verified. Dashboard HTTPS deliberately deferred to Phase 7. |
 
 ---
 
@@ -2816,6 +2817,16 @@ raw port forwarding — worth designing the session/auth model correctly
 from the start rather than retrofitting later, even though it's not
 needed yet.
 
+**Note added 2026-09-06 (Phase 13)**: the dashboard's HTTPS/TLS option
+belongs here, not as a standalone bolt-on. Confirmed by reading its
+source: `waitress` (the dashboard's WSGI server) has zero built-in TLS
+support at all, so adding it means either switching to a server that
+does (e.g. Werkzeug's own, which supports `ssl_context` natively but
+carries the usual "not hardened for production load" caveat) or fronting
+it with a reverse proxy — a real architectural decision that deserves to
+be made alongside the rest of this phase's session/auth/VPN design, not
+decided in isolation for one feature request.
+
 ## Phase 8 — Content categories & time-based schedules (built 2026-08-31/09-01)
 
 Requested directly: block by content category (Adult, Gambling, Weapons,
@@ -3502,6 +3513,115 @@ Flask app (`dashboard/dev_server.py`) confirming the rendered "Shift mode
 now" card, a real override round-trip (create -> shows in "Active
 overrides" with the correct target/expiry -> Cancel removes it), and the
 non-mode/unassigned-target rejection paths.
+
+---
+
+## Phase 13 — SSL-Bump CA certificate management, dashboard HTTPS assessed (built 2026-09-06)
+
+The project owner asked for two things: the ability to change the
+certificate SSL-Bump uses, and the option to serve the admin dashboard
+over HTTPS with a certificate of the admin's choosing (defaulting to
+HTTP, as today).
+
+**Investigated first, then discussed design with the project owner**
+before building, per this project's own standing practice:
+
+- The SSL-Bump CA cert/key (`/config/ssl_cert/ca_cert.pem`/`ca_key.pem`)
+  is auto-generated once by `proxy/entrypoint.sh` and never rotated;
+  Squid reads it via fixed `cert=`/`key=` paths in `squid.conf`
+  (`proxy/squid.conf.template`). No admin control existed beyond
+  downloading the public cert.
+- This project has a foundational "zero restart, every change is live"
+  design principle (`README.md`, `docs/project.md`) -- but the CA cert
+  lives in a *different container* (`proxy`) than where an admin would
+  upload a new one (`dashboard`), sharing only the `pp_config` volume and
+  the database, no command channel. A genuinely restart-free version
+  would need a new watcher process in the proxy container to detect the
+  change, clear Squid's `ssl_db` leaf-cert cache (stale certs signed by
+  the old CA), and run `squid -k reconfigure`.
+- The dashboard serves plain HTTP only via `waitress`
+  (`dashboard/dashboard.py`'s `main()`). Confirmed by reading its source
+  (not assuming): `waitress` has **zero built-in TLS support** -- no
+  `ssl_context` parameter, nothing wraps a listening socket in TLS
+  anywhere in the package. This is a known, deliberate limitation, not a
+  configuration gap.
+
+**Decisions made with the project owner**:
+1. **Manual restart is fine** for a CA cert change -- not worth adding a
+   cross-container watcher process for a rare, deliberate admin action.
+   This is the first dashboard change that isn't fully live; both routes
+   flash an explicit notice saying so.
+2. **Both** upload-your-own and one-click-regenerate, not just one.
+3. **Dashboard HTTPS is explicitly deferred** -- marked a known
+   limitation for now, to be addressed as part of the already-roadmapped
+   but not-yet-started Phase 7 (Remote Access Hardening: TLS, VPN,
+   session/auth model for off-LAN access) rather than bolted on here.
+   Nothing built this session touches how the dashboard serves traffic;
+   it stays HTTP-only, unchanged.
+
+**Shipped** (CA cert management only):
+- `dashboard/dashboard.py`: `CA_KEY_PATH` (new, alongside the existing
+  `CA_CERT_PATH`, both plain module globals pointing at the shared
+  volume). `_ca_cert_info()` (subject/expiry/fingerprint, parsed fresh
+  from the file on every Settings page load via `openssl` subprocess
+  calls -- see below on why not a Python crypto library).
+  `_validate_ca_cert_pair()`: rejects anything that isn't a real X.509
+  cert, isn't a real private key, is missing `CA:TRUE`/`keyCertSign`
+  (Squid can't mint per-site leaf certs without them -- same two
+  extensions `proxy/entrypoint.sh` sets explicitly on first-run
+  generation), or where the cert and key don't actually match each other
+  (compared via each side's DER-encoded public key, not an RSA-only
+  modulus check, since an admin's own CA could reasonably be EC-based).
+  `_replace_ca_cert_pair()`: backs up the current cert+key (timestamped)
+  before overwriting -- a botched swap makes every previously-trusted
+  device distrust Squid's bump-mode connections at once, so keeping the
+  previous pair trivially recoverable is cheap insurance.
+- Two new routes: `POST /settings/ca-cert/regenerate` (one-click rotate,
+  same `openssl` invocation as first-run generation, optional Org/Common
+  Name fields) and `POST /settings/ca-cert/upload` (multipart cert+key
+  upload, validated before ever touching disk). Both are gated behind a
+  JS `confirm()` on the Settings page spelling out the consequence
+  (every device needs to re-trust the new cert, restart required) before
+  the request is even sent.
+- **Why `openssl` subprocess calls, not a Python crypto library**: this
+  project already shells out to `openssl` for the original cert
+  generation (`proxy/entrypoint.sh`); reusing the same tool for
+  validation/regeneration in the dashboard avoided adding a new
+  dependency (`cryptography` or similar) for one admin-facing feature.
+  `dashboard/Dockerfile` now installs the `openssl` CLI alongside the
+  existing `libcap2-bin`.
+- **Real bug caught by live-verifying rather than trusting the unit
+  tests alone**: `_ca_cert_info()`'s fingerprint parsing originally
+  matched `"SHA256 Fingerprint="` (as documented in older OpenSSL
+  versions' own output), but this openssl build (3.5.7) prints `"sha256
+  Fingerprint="` -- lowercase algorithm name. The fingerprint silently
+  came back blank on the Settings page, no error anywhere to reveal why,
+  found only by actually loading the page in a browser-style check
+  against a real generated cert rather than trusting the passing unit
+  test (which had mocked/asserted around the bug, not against real
+  `openssl` output). Fixed to match `"fingerprint="` case-insensitively;
+  added a regression test asserting a real cert produces a real-looking
+  fingerprint string, not just that the route returns 200.
+
+**Deliberately not built**: no cross-container auto-reconfigure watcher
+(see decision 1 above -- manual restart is the accepted tradeoff); no
+dashboard HTTPS/TLS toggle (deferred to Phase 7).
+
+Verified: 15 new/updated tests in `tests/test_dashboard.py` (valid
+upload accepted; mismatched pair, non-CA cert, and garbage input all
+rejected with the files left untouched; regenerate writes a new pair and
+backs up the old one; both routes require admin auth; Settings page
+shows real cert details when present and "Not generated yet" when
+absent) using real `openssl`-generated certs, not hand-rolled fakes.
+Full suite (762 tests) passes. Live-verified end-to-end against the real
+Flask app (`dashboard/dev_server.py`): regenerated a cert, confirmed the
+Settings page showed the right subject/expiry/fingerprint (this is where
+the fingerprint bug above was actually caught) and a timestamped backup
+existed; uploaded a real custom CA pair generated with a different
+`openssl` invocation and confirmed it became the active one, complete
+with its own backup of the regenerated pair; attempted uploading a
+cert with a non-matching key and confirmed it was rejected with the
+exact "don't match each other" message, files unchanged.
 
 ---
 

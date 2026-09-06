@@ -780,6 +780,38 @@ the project owner asked for, not only an operational-health trail.
   the change on its own next cycle, same "dashboard writes intent,
   controller reconciles reality" split as every other AdGuard-facing
   setting on this page. Defaults `"0"` (off) on first run.
+- `POST /settings/ca-cert/regenerate` -> `regenerate_ca_cert()` (Phase
+  13, 2026-09-06) -- form fields `ca_org`, `ca_common_name` (both
+  optional, default to the same values `proxy/entrypoint.sh` uses on
+  first run). One-click "rotate now": generates a fresh self-signed CA
+  with the exact same `openssl` invocation as first-run generation
+  (RSA 2048, SHA-256, 10-year validity, `CA:TRUE`/`keyCertSign`), then
+  calls `_replace_ca_cert_pair()`. Rejects a `/` in either field (breaks
+  `openssl -subj`'s field-separator syntax).
+- `POST /settings/ca-cert/upload` -> `upload_ca_cert()` (Phase 13) --
+  multipart form fields `ca_cert_file`, `ca_key_file`. Validates with
+  `_validate_ca_cert_pair()` (real X.509/PEM parsing, `CA:TRUE` +
+  `keyCertSign` present, cert and key are an actual matching pair --
+  all via `openssl` subprocess calls, not a Python crypto dependency)
+  before ever writing anything; rejects with a specific flash error on
+  any failure, leaving the existing files untouched. On success, calls
+  the same `_replace_ca_cert_pair()` the regenerate route uses.
+- Both routes are the single most sensitive write in this app -- they
+  replace the private key Squid uses to intercept and mint per-site TLS
+  certificates for every device on the network. `_replace_ca_cert_pair()`
+  always backs up the previous cert+key (timestamped, alongside the
+  originals) before overwriting, and both routes flash
+  `CA_CERT_RESTART_NOTICE`: **this is the one dashboard change that isn't
+  live** -- Squid only reads `cert=`/`key=` at startup
+  (`proxy/squid.conf.template`), so the proxy container needs a manual
+  `docker compose restart proxy` afterward, and every device needs the
+  new certificate re-trusted since the old one no longer matches. A
+  deliberate scope decision (2026-09-05 discussion with the project
+  owner): a no-manual-restart version would need a watcher process added
+  to the proxy container to detect the change and run `squid -k
+  reconfigure` (plus clear Squid's `ssl_db` leaf-cert cache, since cached
+  certs were signed by the old CA) -- judged not worth the extra moving
+  part for a rare, deliberate admin action.
 
 ## Notable UI/UX behaviors
 
