@@ -2258,7 +2258,7 @@ CATEGORIES_BODY = """
   "Filter by category name" box above, which only filters the table by
   name and never looks inside any category's domain list.
 </p>
-<form method="get" action="{{ url_for('categories') }}">
+<form method="get" action="{{ url_for('categories') }}" onsubmit="var b=this.querySelector('button'); b.disabled=true; b.textContent='Searching…';">
   <input type="text" name="domain" value="{{ lookup_domain or '' }}" placeholder="e.g. facebook.com" style="min-width:260px;">
   <button class="add" type="submit">Search</button>
 </form>

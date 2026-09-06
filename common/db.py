@@ -207,6 +207,17 @@ CREATE TABLE IF NOT EXISTS category_domains (
     UNIQUE(category_id, pattern)
 );
 
+-- Added 2026-09-07: the UNIQUE(category_id, pattern) constraint above
+-- already indexes (category_id, pattern) together, but leads with
+-- category_id -- useless for a lookup keyed on `pattern` ALONE across
+-- every category at once, which is exactly what
+-- matching.find_categories_for_hostname()'s fast path needs (real bug
+-- fixed the same day: without this, that lookup fell back to a full
+-- Python-side linear regex scan of every category_domains row --
+-- 953,197 for the Adult category alone -- taking up to 51 seconds for
+-- a single search).
+CREATE INDEX IF NOT EXISTS idx_category_domains_pattern ON category_domains(pattern);
+
 -- Admin-added allow-exceptions within a category -- a domain matching a
 -- pattern here is never blocked by this category's own list, even though
 -- it's otherwise a member (e.g. a specific site the subscribed "Social

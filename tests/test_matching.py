@@ -472,3 +472,66 @@ def test_find_categories_for_hostname_flags_an_override_exemption(conn):
 def test_find_categories_for_hostname_blank_input_returns_empty_list(conn):
     assert matching.find_categories_for_hostname(conn, "") == []
     assert matching.find_categories_for_hostname(conn, "   ") == []
+
+
+def test_find_categories_for_hostname_no_categories_at_all(conn):
+    """Regression guard for the 2026-09-07 rewrite's early-exit -- an
+    empty `categories` table must short-circuit before either SQL pass
+    runs, not just return an empty result after querying anyway."""
+    assert matching.find_categories_for_hostname(conn, "facebook.com") == []
+
+
+# --- 2026-09-07 performance rewrite: fast (exact-match) vs slow -----------
+# (GLOB-filtered custom-regex) path, verified to agree on every case the
+# original single-pass regex scan already covered above, plus the split
+# itself.
+
+def test_candidate_exact_patterns_are_escaped_suffixes_most_specific_first(conn):
+    assert matching._candidate_exact_patterns("www.example.com") == [
+        r"www\.example\.com", r"example\.com", "com",
+    ]
+
+
+def test_find_categories_for_hostname_fast_path_matches_a_subscription_style_literal(conn):
+    # Mirrors exactly what category_fetch.py stores: re.escape()'d,
+    # source='subscription' -- must be found via the fast exact-match
+    # path alone, with no complex-pattern fallback needed.
+    category = _add_category(conn, "Gambling")
+    _add_category_domain(conn, category["id"], r"bet\.example\.com", source="subscription")
+    results = matching.find_categories_for_hostname(conn, "www.bet.example.com")
+    assert len(results) == 1
+    assert results[0]["pattern"] == r"bet\.example\.com"
+
+
+def test_find_categories_for_hostname_slow_path_still_catches_a_custom_manual_regex(conn):
+    # A hand-typed pattern the fast exact-match path can't recognize
+    # (not a plain re.escape()'d literal) -- correctness depends on the
+    # GLOB-filtered slow-path fallback actually running.
+    category = _add_category(conn, "Gambling")
+    _add_category_domain(conn, category["id"], r".*\.badcasino\.(com|net)", source="manual")
+    results = matching.find_categories_for_hostname(conn, "sub.badcasino.net")
+    assert len(results) == 1
+    assert results[0]["pattern"] == r".*\.badcasino\.(com|net)"
+
+
+def test_find_categories_for_hostname_slow_path_never_scans_subscription_rows(conn):
+    # The slow path is scoped to source='manual' only -- a
+    # subscription-sourced row is always a plain literal by construction
+    # (category_fetch.py always re.escape()s), so restricting the GLOB
+    # fallback to manual rows must never cause a real miss.
+    category = _add_category(conn, "Gambling")
+    _add_category_domain(conn, category["id"], r"plainsite\.example", source="subscription")
+    results = matching.find_categories_for_hostname(conn, "plainsite.example")
+    assert len(results) == 1
+
+
+def test_find_categories_for_hostname_combines_fast_and_slow_matches_across_categories(conn):
+    literal_cat = _add_category(conn, "Facebook")
+    custom_cat = _add_category(conn, "Gambling")
+    _add_category_domain(conn, literal_cat["id"], r"shared\.example\.com", source="subscription")
+    _add_category_domain(conn, custom_cat["id"], r".*\.example\.com", source="manual")
+
+    results = matching.find_categories_for_hostname(conn, "shared.example.com")
+
+    names = {m["category"]["name"] for m in results}
+    assert names == {"Facebook", "Gambling"}

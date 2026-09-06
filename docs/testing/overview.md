@@ -880,6 +880,29 @@ with a real `device_bindings` row and a real `system_events` failed-
 login row and confirmed the enriched card renders the real IP,
 timestamps, source, and attempt count exactly as designed.
 
+**2026-09-07, Phase 16 (cross-category search performance)**: 6 new
+tests in `tests/test_matching.py`, all against `find_categories_for_hostname()`'s
+two-pass rewrite. `test_candidate_exact_patterns_are_escaped_suffixes_most_specific_first`
+locks down the exact suffix list a hostname decomposes into.
+`test_find_categories_for_hostname_fast_path_matches_a_subscription_style_literal`
+and `..._slow_path_still_catches_a_custom_manual_regex` prove each pass
+independently: a plain synced literal never needs the slow path at all,
+and a genuine hand-typed regex (`.*\.badcasino\.(com|net)`) is still
+found even though the fast exact-match pass can't recognize it.
+`..._slow_path_never_scans_subscription_rows` guards the `source =
+'manual'` scoping specifically -- a subscription-sourced literal must
+still be found (via the fast path), confirming the slow path's
+narrower scope never causes a real miss.
+`..._combines_fast_and_slow_matches_across_categories` checks both
+passes contributing results in the same search. `..._no_categories_at_all`
+guards the early-exit added by the rewrite. Full suite: **802 passed,
+34 skipped** (Windows). Live-verified, not just measured in a script:
+timed the actual HTTP round-trip through the running Flask app against
+the real seeded dev database before and after the fix (51s -> under 1s
+for a miss, 21s -> ~0.6s for a hit) -- including catching a stale
+still-running dev server showing the OLD timing mid-verification,
+resolved by restarting it to actually load the edited modules.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run

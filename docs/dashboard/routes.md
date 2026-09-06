@@ -411,6 +411,14 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   to "Filter by category name..." with an explicit hint pointing at the
   real tool, and moving the domain-lookup card up to sit immediately
   after the categories table (it used to be the last card on the page).
+  **Second real bug fixed the same day**: the lookup itself was
+  genuinely, severely slow against this project's real seeded data (up
+  to 51 seconds for a miss against the ~953K-domain Adult category) --
+  see `matching.find_categories_for_hostname()`'s own docstring for the
+  fast-indexed-lookup rewrite that brought it under a second. The form
+  also gained an `onsubmit` handler that disables the Search button and
+  shows "Searching…" immediately, since even a sub-second wait benefits
+  from visible feedback on a plain (non-AJAX) page navigation.
 - `POST /categories/add` -> `add_category()` -- form fields `name`,
   `subscription_url` (optional -- blank means manual-only). Redirects to
   `categories`; duplicate name -> error flash. The add form (and

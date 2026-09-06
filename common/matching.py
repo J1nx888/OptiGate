@@ -261,6 +261,33 @@ def category_applies_to_device(conn: sqlite3.Connection, device: sqlite3.Row, ca
     return row is not None
 
 
+# GLOB (SQLite shell-style wildcards, not regex) matching any character
+# that only ever shows up in a hand-typed custom regex, never in a plain
+# re.escape()'d domain literal -- re.escape() only ever produces
+# alphanumerics/underscore plus escaped dots and hyphens (`\.`, `\-`),
+# so a raw (unescaped-context) `*`, `+`, `?`, `(`, `|`, or `[` is a
+# reliable signal this row is a genuine custom pattern, not a plain
+# domain. Used by find_categories_for_hostname()'s slow path below to
+# cheaply skip the overwhelming majority of rows (confirmed live
+# 2026-09-07: every category_fetch.py-synced row and every
+# seed_defaults.py-seeded row, including the AI category's 1,195-domain
+# manual snapshot, is a plain literal -- this GLOB matches none of them).
+_COMPLEX_PATTERN_GLOB = "*[*+?(|[]*"
+
+
+def _candidate_exact_patterns(hostname: str) -> list[str]:
+    """Every re.escape()'d suffix of `hostname`, most-specific first --
+    e.g. "www.example.com" -> ["www\\.example\\.com", "example\\.com",
+    "com"]. Exact string equality against one of these reproduces
+    _domain_regex()'s suffix-anchored match semantics
+    (`(?:^|\\.)(?:pattern)\\Z`) for the common case where the stored
+    pattern is a plain re.escape()'d literal domain, letting
+    find_categories_for_hostname() check it via an indexed SQL equality
+    lookup instead of compiling and running a regex per row."""
+    labels = hostname.split(".")
+    return [re.escape(".".join(labels[i:])) for i in range(len(labels))]
+
+
 def find_categories_for_hostname(conn: sqlite3.Connection, hostname: str) -> list[dict]:
     """Every category whose domain list currently matches `hostname` --
     i.e. would block it, once that category is actually assigned to
@@ -272,48 +299,93 @@ def find_categories_for_hostname(conn: sqlite3.Connection, hostname: str) -> lis
     say -- and had no way to check that from the UI short of opening
     every category one at a time).
 
-    Same anchored domain-suffix matching (`_domain_regex()` + the
-    ReDoS-bounded `_search_with_timeout()`) find_domain() above already
-    uses, applied to `category_domains` instead of `domains` -- a
-    subdomain of a listed domain counts as a match, matching real
-    enforcement semantics, not a naive substring check. Flags a match
-    that's also covered by that category's own `category_overrides` (an
-    admin-added exception -- the category's list technically includes
-    it, but it's never actually blocked by that category) rather than
-    silently omitting or including it unqualified, so the result
-    reflects what's really configured either way.
+    **Performance-rewritten 2026-09-07** (real bug found by live user
+    testing: a search against this project's actual seeded data --
+    Adult alone has 953,197 domains -- took up to 51 seconds for a
+    miss, since the original version fetched and regex-compiled/matched
+    every single `category_domains` row across every category, one at a
+    time, in Python). Now two passes instead of one linear scan:
+
+    1. **Fast path**: every candidate suffix of `hostname`
+       (`_candidate_exact_patterns()`) is re.escape()'d and checked via
+       one indexed `pattern IN (...)` SQL query across ALL categories at
+       once (`idx_category_domains_pattern`, common/db.py) -- an exact
+       string-equality lookup, not a regex, correctly reproducing
+       `_domain_regex()`'s suffix-anchored semantics for any row that's
+       a plain literal domain. This alone resolves essentially every
+       real row: every `category_fetch.py`-synced and
+       `seed_defaults.py`-seeded row (100% of this project's actual
+       data) is a plain `re.escape()`d literal.
+    2. **Slow path**, only for categories the fast path didn't already
+       match: real `_domain_regex()` + `_search_with_timeout()`
+       evaluation (the original approach), but scoped to just the rows
+       flagged by `_COMPLEX_PATTERN_GLOB` as NOT looking like a plain
+       literal -- a hand-typed custom regex the fast path can't
+       recognize via exact equality. This is a tiny fraction of rows in
+       any real deployment, so the remaining linear scan stays cheap.
+
+    Flags a match that's also covered by that category's own
+    `category_overrides` (an admin-added exception -- the category's
+    list technically includes it, but it's never actually blocked by
+    that category) rather than silently omitting or including it
+    unqualified, so the result reflects what's really configured either
+    way.
 
     Returns one dict per matching category: {"category": <row>,
     "pattern": <the specific category_domains pattern that matched>,
-    "overridden": <bool>}, ordered by category name. Uses id-ordered
-    iteration internally but the returned list is name-sorted for
-    display, unlike find_domain()'s first-match-wins id order -- there's
-    no "first match wins" concept here, every matching category matters.
+    "overridden": <bool>}, sorted by category name -- there's no "first
+    match wins" concept here, every matching category matters.
     """
     hostname = (hostname or "").strip().rstrip(".").lower()
     if not hostname:
         return []
-    matches = []
-    for category in conn.execute("SELECT * FROM categories ORDER BY name"):
-        matched_pattern = None
+
+    categories_by_id = {row["id"]: row for row in conn.execute("SELECT * FROM categories")}
+    if not categories_by_id:
+        return []
+
+    matched_pattern_by_category: dict[int, str] = {}
+
+    candidates = _candidate_exact_patterns(hostname)
+    placeholders = ",".join("?" for _ in candidates)
+    for row in conn.execute(
+        f"SELECT category_id, pattern FROM category_domains WHERE pattern IN ({placeholders})",
+        candidates,
+    ):
+        matched_pattern_by_category.setdefault(row["category_id"], row["pattern"])
+
+    still_unmatched = [cid for cid in categories_by_id if cid not in matched_pattern_by_category]
+    if still_unmatched:
+        # source = 'manual' narrows this scan further, safely: every
+        # category_fetch.py-synced ('subscription') row is always
+        # re.escape()'d by construction, so it can NEVER match the
+        # complex-pattern GLOB -- only a hand-typed manual addition
+        # ever could. Subscription rows are the huge majority of real
+        # data (Adult alone: 953,197), so skipping them here matters.
+        id_placeholders = ",".join("?" for _ in still_unmatched)
         for row in conn.execute(
-            "SELECT pattern FROM category_domains WHERE category_id = ?", (category["id"],)
+            f"SELECT category_id, pattern FROM category_domains "
+            f"WHERE category_id IN ({id_placeholders}) AND source = 'manual' AND pattern GLOB ?",
+            (*still_unmatched, _COMPLEX_PATTERN_GLOB),
         ):
+            if row["category_id"] in matched_pattern_by_category:
+                continue  # already matched by another complex row in this same category
             rx = _domain_regex(row["pattern"])
             if rx is not None and _search_with_timeout(rx, hostname):
-                matched_pattern = row["pattern"]
-                break
-        if matched_pattern is None:
-            continue
+                matched_pattern_by_category[row["category_id"]] = row["pattern"]
+
+    matches = []
+    for category_id, pattern in matched_pattern_by_category.items():
         overridden = False
         for row in conn.execute(
-            "SELECT pattern FROM category_overrides WHERE category_id = ?", (category["id"],)
+            "SELECT pattern FROM category_overrides WHERE category_id = ?", (category_id,)
         ):
             rx = _domain_regex(row["pattern"])
             if rx is not None and _search_with_timeout(rx, hostname):
                 overridden = True
                 break
-        matches.append({"category": category, "pattern": matched_pattern, "overridden": overridden})
+        matches.append({"category": categories_by_id[category_id], "pattern": pattern, "overridden": overridden})
+    matches.sort(key=lambda m: m["category"]["name"])
     return matches
 
 

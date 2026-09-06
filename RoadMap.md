@@ -50,6 +50,7 @@ Pi-hole setup:
 | 13 | SSL-Bump CA certificate management (upload/regenerate) | ✅ Done, live-verified. Dashboard HTTPS deliberately deferred to Phase 7. |
 | 14 | Live user-testing fixes: category sync feedback, cross-category search, per-user active-schedule display, per-group pause | ✅ Done, live-verified |
 | 15 | Live user-testing fixes: category search-box confusion, enriched pending-devices card with login-attempt history | ✅ Done, live-verified |
+| 16 | Cross-category domain search performance (51s → under 1s) | ✅ Done, live-verified |
 
 ---
 
@@ -3821,6 +3822,76 @@ from Phase 14), and seeded a realistic pending device with a real
 `device_bindings` row and a real `system_events` failed-login row --
 confirmed the card renders the real IP, real timestamps, real source,
 and the real attempt count with its most-recent-attempt tooltip.
+
+---
+
+## Phase 16 — Cross-category domain search: 51 seconds to under 1 (built 2026-09-07)
+
+The project owner reported the Phase 14 domain-lookup tool as "very
+very slow... appears like nothing is happening." Measured rather than
+guessed: a miss against this project's actual seeded data (Adult alone:
+953,197 domains) took **51 seconds**; a hit took **21 seconds**. This
+was a real, severe performance bug, not a perception issue -- the
+original `find_categories_for_hostname()` fetched and regex-compiled/
+matched every single `category_domains` row, one at a time in Python,
+for every category, on every search.
+
+**Root cause and fix**: `category_domains.pattern` is *usually* a plain
+`re.escape()`d literal domain -- always true for every
+`category_fetch.py`-synced row (100% of subscription data) and every
+`seed_defaults.py`-seeded row (including the AI category's 1,195-domain
+manual snapshot), and true for the overwhelming majority of hand-typed
+manual entries too. A plain literal can be checked via exact string
+equality against each dot-separated suffix of the query hostname
+instead of compiling and running a regex -- and that equality check can
+be pushed into SQL as one indexed `pattern IN (...)` query across every
+category at once, rather than a per-row Python loop. Only a genuinely
+non-literal custom regex (an admin hand-typing wildcards/alternation)
+needs real regex evaluation, and that's a tiny fraction of rows in any
+real deployment.
+
+**Shipped**:
+- `common/db.py`: new `idx_category_domains_pattern` index on
+  `category_domains(pattern)` alone -- the existing
+  `UNIQUE(category_id, pattern)` constraint already indexes that pair,
+  but leads with `category_id`, useless for a lookup keyed on `pattern`
+  across every category at once.
+- `common/matching.py`: `find_categories_for_hostname()` rewritten as
+  two passes. **Fast path**: every candidate suffix of the hostname
+  (`_candidate_exact_patterns()`, e.g. `"www.example.com"` ->
+  `["www\.example\.com", "example\.com", "com"]`) is `re.escape()`d and
+  checked via one indexed `pattern IN (...)` query -- resolves
+  essentially every real row. **Slow path**, only for categories the
+  fast path didn't already match: the original regex evaluation, but
+  scoped to rows a new `_COMPLEX_PATTERN_GLOB` SQLite `GLOB` filter
+  flags as containing a raw regex metacharacter `re.escape()` would
+  never leave bare (`*+?(|[`) -- and further scoped to `source =
+  'manual'` only, since a subscription-synced row can never be complex
+  by construction. Both passes agree with the original single-pass
+  implementation on every case the existing test suite already covered.
+- Also added visible feedback the project owner asked for regardless of
+  the speed fix: the search form's `onsubmit` now disables the button
+  and shows "Searching…" immediately, since a plain (non-AJAX) page
+  navigation gives no feedback of its own between click and page load.
+
+**Measured live, before and after, against the real seeded dev
+database** (not a synthetic benchmark): a miss went from 51s to under
+1s; a hit (`a2e.ai`, the same real overlap found in Phase 14) went from
+21s to ~0.6s through the full HTTP round-trip, ~0.2s at the Python
+function level. A stale still-running dev server (unmodified in-memory
+code from before the fix) was caught mid-verification still showing the
+old 20s timing -- restarting it to pick up the change is what actually
+confirmed the fix, a reminder that a long-running dev process doesn't
+hot-reload edited modules.
+
+Verified: 6 new tests in `tests/test_matching.py` -- the fast path
+alone resolves a subscription-style literal; the slow path alone still
+catches a genuine custom regex a literal check can't; the slow path's
+`source = 'manual'` scoping never causes a miss on a subscription row;
+fast and slow matches combine correctly across different categories in
+one search; the candidate-suffix generator's exact output; and an empty
+`categories` table short-circuits before either SQL pass runs. Full
+suite: **802 passed, 34 skipped**.
 
 ---
 
