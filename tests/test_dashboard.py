@@ -2005,6 +2005,64 @@ def test_devices_page_surfaces_a_pending_device_with_a_bypass_action(client, db_
     assert b"Bypass" in resp.data
 
 
+def test_pending_devices_show_network_info_from_device_bindings(client, db_conn):
+    # Real gap fixed 2026-09-07: devices.last_seen_at is never populated
+    # by anything, so the pending-devices card must read current IP /
+    # last seen / discovery source from device_bindings instead.
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:46")
+    db_conn.execute(
+        "INSERT INTO device_bindings (device_id, mac_address, ipv4_address, first_seen_at, last_seen_at, "
+        "source, active) SELECT id, mac_address, '192.168.1.77', '2026-08-31T00:00:00Z', "
+        "'2026-09-07T12:00:00Z', 'rtnetlink', 1 FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:46'"
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+
+    assert b"192.168.1.77" in resp.data
+    assert b"2026-09-07T12:00:00Z" in resp.data
+    assert b"rtnetlink" in resp.data
+
+
+def test_pending_devices_show_none_yet_with_no_failed_logins(client, db_conn):
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:47")
+    resp = client.get("/devices", headers=_auth_header())
+    assert b"None yet" in resp.data
+
+
+def test_pending_devices_show_a_prior_failed_login_attempt(client, db_conn):
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:48")
+    db_conn.execute(
+        "INSERT INTO system_events (ts, source, severity, message, detail) VALUES (?, ?, ?, ?, ?)",
+        ("2026-09-07T12:00:00Z", "captive_portal_login", "error",
+         "Failed login attempt from 192.168.1.1 (username: 'kid1')", "aa:bb:cc:dd:ee:48"),
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+
+    assert b"1 failed attempt" in resp.data
+    assert b"None yet" not in resp.data
+
+
+def test_pending_devices_login_attempts_dont_leak_across_devices(client, db_conn):
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:49")
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:50")
+    db_conn.execute(
+        "INSERT INTO system_events (ts, source, severity, message, detail) VALUES (?, ?, ?, ?, ?)",
+        ("2026-09-07T12:00:00Z", "captive_portal_login", "error", "x", "aa:bb:cc:dd:ee:49"),
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+    text = resp.data.decode()
+    # The device with the attempt shows a count; the other device's row
+    # still shows "None yet" -- this asserts row-level, not page-level,
+    # so pull out roughly where each MAC's row is.
+    assert "1 failed attempt" in text
+    assert "None yet" in text
+
+
 def test_devices_page_does_not_treat_an_ignored_or_bypassed_device_as_pending(client, db_conn):
     """is_authenticated=0 alone isn't enough -- ignored or bypass_login
     already exempts a device from the future portal gate, so it must
@@ -3086,6 +3144,20 @@ def test_sync_all_categories_names_which_ones_came_back_empty(client, db_conn, m
 def test_categories_page_has_supported_format_hint(client):
     resp = client.get("/categories", headers=_auth_header())
     assert b"must be a raw domain-list file" in resp.data.lower() or b"Must be a raw domain-list file" in resp.data
+
+
+def test_categories_page_distinguishes_the_two_search_boxes(client, db_conn):
+    # Real bug fixed 2026-09-07, found by live user testing: typing a
+    # domain (e.g. a2e.ai) into the client-side "Search categories..."
+    # box filtered the table by category NAME, matched nothing, and made
+    # every category disappear -- read by the user as "the [domain]
+    # lookup tool doesn't work" when it was actually a different,
+    # unrelated control. Renamed that box's placeholder and added an
+    # explicit hint distinguishing it from the real domain-lookup tool.
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    resp = client.get("/categories", headers=_auth_header())
+    assert b"Filter by category name" in resp.data
+    assert b"Type a full domain, not a category name" in resp.data
 
 
 # ============================================================

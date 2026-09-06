@@ -399,6 +399,18 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   exempts that domain from that specific category despite being a
   pattern match) inline on the same page, via a plain `GET` form so the
   result is bookmarkable/shareable as a URL. Renders `CATEGORIES_BODY`.
+  **Real bug fixed 2026-09-07**, found by live user testing: this page
+  already had an unrelated client-side "Search categories..." box
+  (`data-filter-table`, filters the visible table by category NAME only
+  -- see the shared engine's own comment in `BASE`'s `<script>`) sitting
+  right above the categories table. A domain typed into THAT box instead
+  of the real lookup form below matches no category's name, hides every
+  row, and reads exactly like "the lookup tool doesn't work" -- the two
+  controls look similar and sit on the same page about domains, which is
+  what made the mix-up likely. Fixed by renaming that box's placeholder
+  to "Filter by category name..." with an explicit hint pointing at the
+  real tool, and moving the domain-lookup card up to sit immediately
+  after the categories table (it used to be the last card on the page).
 - `POST /categories/add` -> `add_category()` -- form fields `name`,
   `subscription_url` (optional -- blank means manual-only). Redirects to
   `categories`; duplicate name -> error flash. The add form (and
@@ -580,8 +592,10 @@ get *some* real state -- `common/identity.py`'s `record_binding()` (Phase
 4's first milestone) now auto-creates a pending `devices` row
 (`is_authenticated = 0`) for a genuinely new MAC, so this page is also
 where an admin now handles the result of that: a device that showed up on
-the network on its own, gated to DNS-only until someone logs in (the
-actual captive-portal login screen itself is still Phase 4, not built).
+the network on its own, gated to DNS-only until someone logs in via the
+real captive portal (`dashboard/captive_portal_server.py`, Phase 4 --
+**stale-doc correction 2026-09-07**: this was long done, but the doc
+text here still said "not built" until now).
 
 - `GET /devices` -> `devices()` -- lists all `devices` rows (LEFT JOINed to
   `users`/`groups` for display), plus the add-device and add-group forms.
@@ -591,7 +605,18 @@ actual captive-portal login screen itself is still Phase 4, not built).
   awaiting login" card (mirroring the Report page's own `pending-card`
   convention for "Pending approval requests") lists them above the Groups
   card with a one-click **Bypass** action alongside the existing **Manage**
-  link.
+  link. **Enriched 2026-09-07** (real gap found by live user testing --
+  the card previously showed only MAC address and `created_at`, nowhere
+  near enough to act on): the query also correlates each pending MAC
+  against its most-recently-updated `device_bindings` row for
+  `current_ip`/`network_last_seen`/`binding_source` (`devices.last_seen_at`
+  itself is never populated by anything -- see that column's own schema
+  comment -- so `device_bindings` is the only place a real "last seen on
+  the network" signal actually lives), and a new `_failed_login_attempts()`
+  helper counts real captive-portal login failures for that MAC (via
+  `system_events.detail`, see below) so an admin can tell "this kid
+  already tried and got denied because nobody's assigned this device
+  yet" apart from a device nobody has touched at all.
 - `POST /devices/add` -> `add_device()` -- form fields `mac_address`
   (validated/normalized via `normalize_mac()`), `label` (optional),
   `assignment` (parsed by `_parse_device_assignment()` into a `(user_id,

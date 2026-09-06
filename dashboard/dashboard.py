@@ -2017,19 +2017,32 @@ DEVICES_BODY = """
 <div class="card pending-card">
 <h2>Devices awaiting login ({{ pending_devices|length }})</h2>
 <p class="hint">
-  Seen on the network for the first time, gated to DNS-only access until
-  someone logs in -- the captive-portal login screen itself isn't built yet
-  (RoadMap.md Phase 4). Use <strong>Bypass</strong> for a device that will
-  never log in on its own (a TV, a thermostat), or <strong>Manage</strong>
-  to assign it to a kid or group directly instead of waiting on a login.
+  Seen on the network but not yet assigned -- gated to DNS-only access
+  until someone logs in via the captive portal, or an admin acts below.
+  Use <strong>Bypass</strong> for a device that will never log in on its
+  own (a TV, a thermostat), or <strong>Manage</strong> to assign it to a
+  kid or group directly instead of waiting on a login.
 </p>
 <div class="table-scroll">
 <table>
-  <tr><th>MAC address</th><th>First seen</th><th></th></tr>
+  <tr><th>MAC address</th><th>Current IP</th><th>First seen</th><th>Last seen</th><th>Seen via</th><th>Login attempts</th><th></th></tr>
   {% for d in pending_devices %}
   <tr>
     <td><code>{{ d.mac_address }}</code></td>
+    <td>{{ d.current_ip or '&mdash;' }}</td>
     <td>{{ d.created_at }}</td>
+    <td>{{ d.network_last_seen or '&mdash;' }}</td>
+    <td>{{ d.binding_source or '&mdash;' }}</td>
+    <td>
+      {% set attempts = pending_login_attempts.get(d.mac_address) %}
+      {% if attempts %}
+      <span class="badge blocked" title="Most recent attempt: {{ attempts.last_attempt }}">
+        {{ attempts.count }} failed attempt{{ 's' if attempts.count != 1 else '' }}
+      </span>
+      {% else %}
+      <span class="hint">None yet</span>
+      {% endif %}
+    </td>
     <td>
       <a class="btn small" href="{{ url_for('device_detail', device_id=d.id) }}">Manage</a>
       <form class="inline" method="post" action="{{ url_for('bypass_login_device') }}">
@@ -2041,6 +2054,15 @@ DEVICES_BODY = """
   {% endfor %}
 </table>
 </div>
+<p class="hint">
+  "Login attempts" counts real failed captive-portal sign-ins from this
+  device (wrong/unknown username or password) -- a device that
+  successfully logs in stops appearing in this list at all (it's no
+  longer "awaiting"), so a failed-attempt count here always means
+  someone tried and couldn't get in, not that they're not trying.
+  "Current IP"/"Last seen"/"Seen via" come from the network's own
+  observation of this MAC, independent of anything an admin has entered.
+</p>
 </div>
 {% endif %}
 
@@ -2180,7 +2202,10 @@ CATEGORIES_BODY = """
   the opposite of the <a href="{{ url_for('domains') }}">Domains</a> page, which grants access.
   Domains come from a subscribed list, manual additions, or both.
 </p>
-{% if categories %}<input type="search" data-filter-table="categoriesTable" placeholder="Search categories&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
+{% if categories %}
+<input type="search" data-filter-table="categoriesTable" placeholder="Filter by category name&hellip;" style="margin-bottom:.3rem; width:100%; max-width:280px;">
+<p class="hint" style="margin:0 0 .6rem;">This box filters the list below by <strong>category name</strong> only -- to check whether a specific domain (e.g. <code>facebook.com</code>) is blocked by any category, use "Find a domain across categories" below instead.</p>
+{% endif %}
 <div class="table-scroll">
 <table id="categoriesTable">
   <tr><th>Name</th><th>Domains</th><th>Blocked for</th><th>Last synced</th><th></th></tr>
@@ -2222,19 +2247,17 @@ CATEGORIES_BODY = """
 </p>
 </div>
 
-{% if categories|selectattr('subscription_url')|list %}
-<div class="card">
-<h2>Refresh subscriptions</h2>
-<p class="hint">Re-fetches every category's subscription list right now, instead of waiting for the daily background refresh. A slow or unreachable source is skipped without affecting the others.</p>
-<form method="post" action="{{ url_for('sync_all_categories_now') }}">
-  <button class="add" type="submit">Sync all subscriptions now</button>
-</form>
-</div>
-{% endif %}
-
 <div class="card">
 <h2>Find a domain across categories</h2>
-<p class="hint">Checks every category's domain list at once -- useful for spotting overlaps (e.g. facebook.com listed in both Facebook and Gambling) or confirming a domain landed where you expected after a sync.</p>
+<p class="hint">
+  <strong>Type a full domain, not a category name</strong> (e.g.
+  <code>facebook.com</code>, not "Facebook") to check whether any
+  category currently blocks it -- useful for spotting overlaps (the same
+  domain listed in more than one category) or confirming a domain landed
+  where you expected after a sync. This is a different search than the
+  "Filter by category name" box above, which only filters the table by
+  name and never looks inside any category's domain list.
+</p>
 <form method="get" action="{{ url_for('categories') }}">
   <input type="text" name="domain" value="{{ lookup_domain or '' }}" placeholder="e.g. facebook.com" style="min-width:260px;">
   <button class="add" type="submit">Search</button>
@@ -2255,6 +2278,16 @@ CATEGORIES_BODY = """
   {% endif %}
 {% endif %}
 </div>
+
+{% if categories|selectattr('subscription_url')|list %}
+<div class="card">
+<h2>Refresh subscriptions</h2>
+<p class="hint">Re-fetches every category's subscription list right now, instead of waiting for the daily background refresh. A slow or unreachable source is skipped without affecting the others.</p>
+<form method="post" action="{{ url_for('sync_all_categories_now') }}">
+  <button class="add" type="submit">Sync all subscriptions now</button>
+</form>
+</div>
+{% endif %}
 """
 
 
@@ -3207,13 +3240,48 @@ def cancel_schedule_override():
     return flash_redirect("schedules", "Override cancelled -- normal schedule resumed.")
 
 
+def _failed_login_attempts(conn, mac_address: str) -> dict | None:
+    """How many times this MAC has failed the captive-portal kid login,
+    and when most recently -- lets the pending-devices card distinguish
+    "never tried" from "tried and got denied because nobody's assigned
+    this device yet" (added 2026-09-07, real gap found by live user
+    testing). Correlates via `system_events.detail`, which
+    `captive_portal_server.py`'s `_log_failed_login()` now stores the
+    attempting device's MAC into for the `captive_portal_login` source
+    specifically (not the separate portal admin-bypass action -- a
+    different kind of attempt). Returns None (not a zero count) when
+    there's nothing to report, so the template can cleanly show "None
+    yet" instead of a bare 0."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c, MAX(ts) AS last_ts FROM system_events "
+        "WHERE source = 'captive_portal_login' AND detail = ?",
+        (mac_address,),
+    ).fetchone()
+    if not row["c"]:
+        return None
+    return {"count": row["c"], "last_attempt": row["last_ts"]}
+
+
 @app.route("/devices")
 @require_admin
 def devices():
     conn = get_db()
     rows = conn.execute(
         "SELECT d.*, u.display_name, g.name AS group_name, "
-        "(d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending "
+        "(d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending, "
+        # devices.last_seen_at is never actually populated by anything
+        # (see common/db.py's own schema comment) -- device_bindings is
+        # where a real network-observed last-seen/current-IP/source
+        # actually lives, so the pending-devices card reads from there
+        # instead, via the most-recently-updated binding for this MAC
+        # (active or not -- a device that's gone stale is still worth
+        # showing its last-known info for, not blanking out entirely).
+        "(SELECT ipv4_address FROM device_bindings WHERE mac_address = d.mac_address "
+        " ORDER BY last_seen_at DESC LIMIT 1) AS current_ip, "
+        "(SELECT last_seen_at FROM device_bindings WHERE mac_address = d.mac_address "
+        " ORDER BY last_seen_at DESC LIMIT 1) AS network_last_seen, "
+        "(SELECT source FROM device_bindings WHERE mac_address = d.mac_address "
+        " ORDER BY last_seen_at DESC LIMIT 1) AS binding_source "
         "FROM devices d "
         "LEFT JOIN users u ON u.id = d.user_id "
         "LEFT JOIN groups g ON g.id = d.group_id "
@@ -3221,11 +3289,16 @@ def devices():
     ).fetchall()
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
+    pending_login_attempts = {
+        row["mac_address"]: _failed_login_attempts(conn, row["mac_address"])
+        for row in rows if row["pending"]
+    }
     return render(
         "devices",
         render_template_string(
             DEVICES_BODY, devices=rows, groups=all_groups,
             assignment_combo=_assignment_combo(all_users, all_groups), current="",
+            pending_login_attempts=pending_login_attempts,
         ),
     )
 

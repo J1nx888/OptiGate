@@ -857,6 +857,29 @@ real domain (`a2e.ai`, present in both the AI and Adult lists) --
 confirming the whole feature end to end against real fetched data, not
 a synthetic fixture.
 
+**2026-09-07, Phase 15 (search-box confusion + pending-device
+visibility)**: 1 new test in `tests/test_captive_portal_server.py`
+(`test_failed_login_records_the_attempting_devices_mac`) confirms a
+failed kid-login POST writes the real device's MAC into
+`system_events.detail`, not just `client_ip`/`username` as before.
+~7 new in `tests/test_dashboard.py`: the pending-devices card now
+sources current IP/last-seen/discovery-source from a real
+`device_bindings` row (not `devices.last_seen_at`, which nothing
+populates); shows "None yet" with zero failed logins and a real count
+with one; a second pending device's row is unaffected by another
+device's own recorded attempt (no cross-device leakage); and the
+Categories page's two search boxes now carry distinguishing copy
+("Filter by category name..." vs "Type a full domain, not a category
+name"). Full suite: **796 passed, 34 skipped** (Windows). Live-verified
+against the real Flask app: reproduced the exact reported search-box
+failure (typing `a2e.ai` into the client-side name filter genuinely
+hides every category row), confirmed the fix keeps both boxes working
+independently afterward and the real domain-lookup result from Phase 14
+still finds the same real overlap; seeded a realistic pending device
+with a real `device_bindings` row and a real `system_events` failed-
+login row and confirmed the enriched card renders the real IP,
+timestamps, source, and attempt count exactly as designed.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run

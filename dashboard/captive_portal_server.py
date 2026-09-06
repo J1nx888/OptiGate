@@ -120,7 +120,9 @@ _LOGIN_LIMITER = rate_limit.RateLimiter(_MAX_ATTEMPTS, _WINDOW_SECONDS)
 _LOGGED_USERNAME_MAX_LEN = 100
 
 
-def _log_failed_login(conn: sqlite3.Connection, source: str, client_ip: str, username: str) -> None:
+def _log_failed_login(
+    conn: sqlite3.Connection, source: str, client_ip: str, username: str, mac_address: str | None = None
+) -> None:
     """Writes a dashboard-visible Events-page row for a failed login/
     admin-action attempt, alongside (not instead of) the log.info/
     log.warning calls at each call site below -- same "layer, don't
@@ -128,11 +130,26 @@ def _log_failed_login(conn: sqlite3.Connection, source: str, client_ip: str, use
     established for controller/main.py's background loops. Never logs
     the attempted password, only the username and source IP -- a kid's
     (or an attacker's) mistyped password is still a real, sensitive
-    credential-adjacent string not worth persisting anywhere."""
+    credential-adjacent string not worth persisting anywhere.
+
+    `mac_address` (added 2026-09-07, real gap found by live user
+    testing): stored in `detail`, not a new column -- lets
+    dashboard.py's pending-devices card answer "has this specific device
+    already tried and been denied" via a plain `detail = ?` lookup,
+    which matters because a never-assigned device that HAS tried to log
+    in (and knows a real household username, just isn't allowed onto
+    that account's device list yet) is a different situation from one
+    that's simply never been used. Only `_handle_login()` below passes
+    this -- `_handle_admin_action()`'s own failed-credential path checks
+    admin credentials before it would resolve a device at all, so
+    there's no device in hand yet at that point without adding a lookup
+    purely for this, and that event type isn't "a device tried to log
+    in" the way this one is anyway."""
     truncated = username[:_LOGGED_USERNAME_MAX_LEN]
     system_events.log_event(
         conn, source, "error",
         f"Failed login attempt from {client_ip} (username: {truncated!r})",
+        detail=mac_address,
     )
 
 _PAGE_TEMPLATE = """\
@@ -373,7 +390,7 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
         if user is None or not auth.verify_password(password, user["password_hash"]):
             _LOGIN_LIMITER.record_failure(client_ip)
             log.info("failed login for username=%r from device %s", username, device["mac_address"])
-            _log_failed_login(conn, "captive_portal_login", client_ip, username)
+            _log_failed_login(conn, "captive_portal_login", client_ip, username, mac_address=device["mac_address"])
             self._send_html(200, _render("Incorrect username or password.", groups=_fetch_groups(conn)))
             return
 

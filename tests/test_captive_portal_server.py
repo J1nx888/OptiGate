@@ -259,6 +259,23 @@ def test_wrong_password_does_not_authenticate(server, conn):
     assert row["is_authenticated"] == 0
 
 
+def test_failed_login_records_the_attempting_devices_mac(server, conn):
+    # Real gap fixed 2026-09-07: dashboard.py's pending-devices card
+    # needs to answer "has this device already tried and been denied",
+    # which requires the failed-login event to actually be correlated
+    # to a device -- previously only client_ip/username were recorded.
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _add_user(conn, "kid1", "correcthorse")
+
+    _post(server, "kid1", "wrongpassword")
+
+    row = conn.execute(
+        "SELECT detail FROM system_events WHERE source = 'captive_portal_login' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row["detail"] == MAC_A
+
+
 def test_unknown_username_does_not_authenticate(server, conn):
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
 

@@ -480,17 +480,25 @@ successful cycle -- see `common/system_events.py`'s own docstring.
 Written by `controller/main.py`'s `on_error`/`on_success` wiring around
 its periodic loops (AdGuard sync, category subscription fetch, active
 ARP scan, device discovery, the controller↔worker heartbeat); read by
-`dashboard/dashboard.py`'s `/events` page (`docs/dashboard/routes.md`) --
-the dashboard never writes to this table itself.
+`dashboard/dashboard.py`'s `/events` page (`docs/dashboard/routes.md`).
+**Stale-doc correction 2026-09-07**: "the dashboard never writes to this
+table itself" (this section's own earlier claim) stopped being true on
+2026-09-02, when `dashboard/captive_portal_server.py`'s
+`_log_failed_login()` started writing `error` rows here for failed
+captive-portal login/admin-action attempts (source
+`captive_portal_login` / `captive_portal_admin_action`) as part of that
+day's brute-force audit -- see `common/system_events.py`'s own
+`_MAX_STORED_EVENTS` comment for the security reasoning (this table
+gained its first attacker-controlled writer that day).
 
 | Column     | Type    | Constraints |
 |---|---|---|
 | `id`       | INTEGER | PRIMARY KEY |
 | `ts`       | TEXT    | NOT NULL |
-| `source`   | TEXT    | NOT NULL -- which loop/component, e.g. `adguard_sync`, `category_fetch`, `controller_heartbeat` |
+| `source`   | TEXT    | NOT NULL -- which loop/component, e.g. `adguard_sync`, `category_fetch`, `controller_heartbeat`, `captive_portal_login` |
 | `severity` | TEXT    | NOT NULL, CHECK IN (`error`, `recovery`) |
 | `message`  | TEXT    | NOT NULL |
-| `detail`   | TEXT    | nullable -- optional longer context, unused by any call site as of this writing |
+| `detail`   | TEXT    | nullable -- optional longer context. **Used since 2026-09-07**: for `source = 'captive_portal_login'` rows specifically, `_log_failed_login()` stores the attempting device's `mac_address` here (not a new column -- reusing this existing free-text field), so `dashboard.py`'s `_failed_login_attempts()` can answer "has this specific pending device already tried and been denied" via a plain `detail = ?` lookup. Every other source still leaves this NULL. |
 
 Indexed on `ts DESC`. Nothing prunes this table automatically -- the
 dashboard's `EVENT_DISPLAY_LIMIT` only bounds what's shown, not what's

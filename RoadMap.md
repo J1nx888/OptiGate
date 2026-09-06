@@ -49,6 +49,7 @@ Pi-hole setup:
 | 12 | Temporary schedule overrides ("Shift mode now") | ✅ Done, live-verified |
 | 13 | SSL-Bump CA certificate management (upload/regenerate) | ✅ Done, live-verified. Dashboard HTTPS deliberately deferred to Phase 7. |
 | 14 | Live user-testing fixes: category sync feedback, cross-category search, per-user active-schedule display, per-group pause | ✅ Done, live-verified |
+| 15 | Live user-testing fixes: category search-box confusion, enriched pending-devices card with login-attempt history | ✅ Done, live-verified |
 
 ---
 
@@ -3735,6 +3736,91 @@ lookup tool found a real overlapping domain, the user/group detail pages
 rendered their new cards correctly (including the "no devices yet"
 copy), and per-group pause/resume round-tripped against real device
 rows.
+
+---
+
+## Phase 15 — Two more live-testing findings: search-box confusion, pending-device visibility (built 2026-09-07)
+
+Continued exploring the same local dashboard preview (Phase 14) and
+reported two more items. Both were real, and both root-caused precisely
+rather than patched on the symptom.
+
+**"The category search doesn't work -- typing a2e.ai makes every
+category disappear, and any address does that."** Investigated rather
+than assumed a backend bug (Phase 14's own lookup tool had just been
+live-verified working against real data the same day). The real cause:
+the Categories page has always had a client-side "Search categories..."
+filter box (`data-filter-table`, shared with every other list page in
+the app) sitting right above the table, which filters by row text --
+i.e. category NAME -- and hides every non-matching row. Since no
+category is ever literally *named* `a2e.ai`, typing a domain into THAT
+box (not Phase 14's actual domain-lookup form, a separate card further
+down the page) hides every row, reading exactly like "the tool doesn't
+work." The two controls look similar and sit on a page that's
+conceptually all about domains, which is what made the mix-up likely --
+confirmed by reproducing the exact failure mode against the live page.
+**Fixed**: renamed the filter box's placeholder to "Filter by category
+name..." with an explicit hint distinguishing it from the real lookup
+tool, and moved the lookup card up to sit immediately after the
+categories table (it was previously the last card on the page, several
+scrolls away).
+
+**"Devices detected but not added need a page to act on them -- as much
+info as possible, including last seen and whether they've tried the
+captive portal and been denied."** The "Devices awaiting login" card
+already existed (built during Phase 4) but showed only MAC address and
+`created_at` -- nowhere near enough to act on, and no login-attempt
+history at all. Investigated what was actually available: `devices.
+last_seen_at` is never populated by anything (confirmed by grepping for
+every `UPDATE devices SET ... last_seen_at` site in the codebase --
+zero), so real "last seen" data only ever lived in `device_bindings`.
+Failed captive-portal logins were already being recorded (`common/
+system_events.py`, from the 2026-09-02 brute-force audit) but only with
+`client_ip` -- not correlated to a specific device at all, even though
+`captive_portal_server.py`'s `_handle_login()` already had the real
+`device` row resolved at the exact point it logs a failure.
+
+**Shipped**:
+- `dashboard/captive_portal_server.py`: `_log_failed_login()` gained an
+  optional `mac_address` param, stored in `system_events.detail` (an
+  existing nullable column, not a new one) -- only for the
+  `captive_portal_login` source specifically, not the separate portal
+  admin-bypass action (which doesn't resolve a device until after its
+  own credential check succeeds, and isn't "a device tried to log in"
+  in the same sense anyway).
+- `dashboard/dashboard.py`: `devices()`'s query now correlates each
+  pending MAC against its most-recently-updated `device_bindings` row
+  (current IP, real last-seen timestamp, discovery source) and a new
+  `_failed_login_attempts()` helper counts real login failures for that
+  MAC via `system_events.detail`. The pending-devices card now shows
+  Current IP / First seen / Last seen / Seen via / Login attempts,
+  instead of just MAC + First seen -- and the attempt count distinguishes
+  "already tried and got denied" (a real, informative signal: the kid
+  knows a real household username, they're just not allowed on that
+  account's device list yet) from "never touched."
+- Fixed a stale copy bug found along the way: the pending-devices card's
+  own hint text still said "the captive-portal login screen itself isn't
+  built yet (RoadMap.md Phase 4)" -- Phase 4 has been done since
+  2026-08-31. Also caught the same staleness in `docs/dashboard/routes.md`
+  and `docs/database/schema.md` ("the dashboard never writes to this
+  table itself" -- untrue since the 2026-09-02 brute-force audit) and
+  fixed both while in the area.
+
+Verified: new tests in `tests/test_captive_portal_server.py` (the failed
+kid-login path now records the attempting device's MAC in
+`system_events.detail`) and `tests/test_dashboard.py` (~7 -- network
+info sourced from `device_bindings` not `devices.last_seen_at`, "None
+yet" with no attempts, a real attempt count shown, attempts don't leak
+across different pending devices, the two Categories-page search boxes
+carry distinguishing copy). Full suite: **796 passed, 34 skipped**.
+Live-verified against the real Flask app: re-ran the exact reported
+failure (typed `a2e.ai` into the wrong box, confirmed it used to hide
+every category, confirmed the fix keeps both boxes working
+independently and the domain lookup still finds the same real overlap
+from Phase 14), and seeded a realistic pending device with a real
+`device_bindings` row and a real `system_events` failed-login row --
+confirmed the card renders the real IP, real timestamps, real source,
+and the real attempt count with its most-recent-attempt tooltip.
 
 ---
 
