@@ -51,6 +51,7 @@ Pi-hole setup:
 | 14 | Live user-testing fixes: category sync feedback, cross-category search, per-user active-schedule display, per-group pause | ✅ Done, live-verified |
 | 15 | Live user-testing fixes: category search-box confusion, enriched pending-devices card with login-attempt history | ✅ Done, live-verified |
 | 16 | Cross-category domain search performance (51s → under 1s) | ✅ Done, live-verified |
+| 17 | Ad-blocking visibility: link out to AdGuard's own dashboard | ✅ Done, live-verified. In-dashboard stats integration noted as a future-phase need. |
 
 ---
 
@@ -3892,6 +3893,54 @@ fast and slow matches combine correctly across different categories in
 one search; the candidate-suffix generator's exact output; and an empty
 `categories` table short-circuits before either SQL pass runs. Full
 suite: **802 passed, 34 skipped**.
+
+---
+
+## Phase 17 — Ad-blocking visibility: link out to AdGuard's own dashboard (built 2026-09-07)
+
+The project owner asked how ad-blocking is actually handled, and
+whether its effect (what's blocked, how much) is visible from this
+dashboard. Answered directly rather than assuming: it's fully automatic
+today (AdGuard Home's own default filter plus the 5 curated
+uBlockOrigin/uAssets lists from the earlier "Network-wide ad blocking"
+work, all DNS-tier, zero ongoing admin action) -- but **none of it is
+surfaced in this dashboard**. AdGuard Home has its own full-featured
+admin UI with exactly this kind of view (query log, blocked-domain
+stats, per-client charts), but it's `127.0.0.1`-only by default
+(`ADGUARD_WEB_BIND`, the same secure-by-default pattern this project's
+own `DASHBOARD_BIND` uses) and nothing in this project's dashboard even
+links to it.
+
+**Decision (discussed with the project owner)**: a link-out to AdGuard's
+own dashboard now, not a rebuild of its stats inside this one -- real
+in-dashboard stats integration (pulling numbers via AdGuard's API into
+a dashboard card) is noted as a real future-phase need, explicitly not
+built this round.
+
+**Shipped**: `dashboard.py`'s `_adguard_ui_url()` + an "Open AdGuard's
+own dashboard" link on the Settings page's Ad-block card. The one
+non-obvious design point: it deliberately does NOT reuse the stored
+`adguard_url` setting's own host, which is always `127.0.0.1` under
+this project's shared `network_mode: host` setup (the
+dashboard-to-AdGuard *API* address, correct for a server-to-server
+call) -- a link built from that would send the admin's own browser to
+port 3000 on *their own machine*, not the Beelink, for anyone viewing
+the dashboard from a different device. Instead, the link combines
+`adguard_url`'s PORT with whatever HOST the browser actually used to
+reach the current dashboard page (`request.host`) -- same physical
+box, same address, different port. The link is only shown once AdGuard
+is configured, and the Settings page states outright, next to the link,
+that it also needs `ADGUARD_WEB_BIND` changed from its secure default
+to actually load from a remote browser -- rather than silently
+producing a link that fails for the common default setup.
+
+Verified: 3 new tests in `tests/test_dashboard.py` (no link when
+AdGuard isn't configured; the link's host matches the browser's own,
+not `adguard_url`'s; a differently-configured port carries through
+correctly). Full suite: **805 passed, 34 skipped**. Live-verified
+against the real Flask app: configured AdGuard connection settings,
+confirmed the rendered link and its `ADGUARD_WEB_BIND` caveat text
+both appear exactly as designed.
 
 ---
 

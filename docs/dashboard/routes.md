@@ -857,6 +857,24 @@ the project owner asked for, not only an operational-health trail.
   settings. Flashes an error (not a 500) if the settings are incomplete
   or AdGuard is unreachable; otherwise flashes how many filter lists had
   new content (0 is a normal, healthy result). Added 2026-08-30.
+- `_adguard_ui_url(adguard_url)` (added 2026-09-07, not a route -- a
+  helper `settings_page()` calls) -- builds an "Open AdGuard's own
+  dashboard" link for a quick click-through to AdGuard's own admin UI
+  (full query log, blocked-domain stats, charts; asked for explicitly as
+  a link-out, with tighter in-dashboard stats integration deferred to a
+  future phase). Deliberately does NOT reuse `adguard_url`'s own host --
+  that's the dashboard-to-AdGuard API address, always `127.0.0.1` under
+  this project's shared `network_mode: host` setup regardless of
+  `ADGUARD_WEB_BIND` (see `.env.example`), so a link built from it would
+  send the admin's own browser to their own machine, not the Beelink.
+  Instead combines the PORT from `adguard_url` with the HOST the browser
+  actually used to reach the current page (`request.host`) -- same
+  address, different port. Returns `None` (no link rendered) if
+  `adguard_url` isn't configured. Can't detect the other real
+  precondition for the link to actually load: `ADGUARD_WEB_BIND` must be
+  something other than its secure-by-default `127.0.0.1` -- the
+  Settings page states this explicitly next to the link rather than
+  silently producing a link that fails for most default setups.
 - `POST /settings/safesearch` -> `update_safesearch()` (G3, 2026-09-01) --
   one checkbox field `safesearch_enabled`. Only writes
   `settings.safesearch_enabled` (`"1"`/`"0"`) -- doesn't call AdGuard

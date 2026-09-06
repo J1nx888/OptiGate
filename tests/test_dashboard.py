@@ -1190,6 +1190,40 @@ def test_refresh_adguard_filters_without_connection_details_shows_error(client, 
     assert "error=1" in resp.headers["Location"]
 
 
+def test_settings_shows_no_adguard_ui_link_when_not_configured(client, db_conn):
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Open AdGuard" not in resp.data
+
+
+def test_settings_shows_adguard_ui_link_using_the_browsers_own_host(client, db_conn):
+    # Real feature added 2026-09-07: a quick click-through to AdGuard's
+    # own admin UI. Must NOT reuse adguard_url's own host as-is -- that's
+    # always 127.0.0.1 (the dashboard-to-AdGuard API address under this
+    # project's shared network_mode: host setup), which would send the
+    # admin's browser to their OWN machine, not the Beelink. Only the
+    # PORT comes from adguard_url; the host comes from whatever address
+    # the browser actually used to reach this page (here, the Flask test
+    # client's own default Host: localhost).
+    client.post(
+        "/settings/adguard",
+        data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "x"},
+        headers=_auth_header(),
+    )
+    resp = client.get("/settings", headers=_auth_header())
+    assert b'href="http://localhost:3000"' in resp.data
+    assert b"ADGUARD_WEB_BIND" in resp.data  # the reachability caveat is explained, not just linked
+
+
+def test_adguard_ui_link_uses_a_different_configured_port(client, db_conn):
+    client.post(
+        "/settings/adguard",
+        data={"adguard_url": "http://127.0.0.1:4000", "adguard_username": "admin", "adguard_password": "x"},
+        headers=_auth_header(),
+    )
+    resp = client.get("/settings", headers=_auth_header())
+    assert b'href="http://localhost:4000"' in resp.data
+
+
 def test_refresh_adguard_filters_calls_the_real_client_and_reports_the_count(client, db_conn, monkeypatch):
     client.post(
         "/settings/adguard",

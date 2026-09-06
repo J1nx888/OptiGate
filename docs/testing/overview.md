@@ -903,6 +903,20 @@ for a miss, 21s -> ~0.6s for a hit) -- including catching a stale
 still-running dev server showing the OLD timing mid-verification,
 resolved by restarting it to actually load the edited modules.
 
+**2026-09-07, Phase 17 (AdGuard dashboard link)**: 3 new tests in
+`tests/test_dashboard.py`. `test_settings_shows_no_adguard_ui_link_when_not_configured`
+guards the "nothing to link to yet" case. `test_settings_shows_adguard_ui_link_using_the_browsers_own_host`
+is the one that actually matters: confirms the rendered link's host is
+the Flask test client's own request host (`localhost`), NOT
+`adguard_url`'s stored host (`127.0.0.1`) -- proving the fix for the
+real bug this feature would otherwise have shipped with (a link that
+only ever works from the Beelink's own browser, never a remote one).
+`test_adguard_ui_link_uses_a_different_configured_port` confirms a
+non-default AdGuard port carries through correctly. Full suite:
+**805 passed, 34 skipped** (Windows). Live-verified against the real
+Flask app: configured real AdGuard connection settings and confirmed
+the rendered link plus its `ADGUARD_WEB_BIND` caveat text.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run

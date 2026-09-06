@@ -4583,6 +4583,13 @@ SETTINGS_BODY = """
 {% if not adguard_configured %}
 <p class="hint"><strong>Not configured yet</strong> -- set the connection details below (matching whatever ADGUARD_USERNAME/ADGUARD_PASSWORD is set to in <code>.env</code> for the <code>adguard</code> container; if ADGUARD_PASSWORD was left blank there, copy the auto-generated password from <code>docker compose logs adguard</code>).</p>
 {% endif %}
+{% if adguard_ui_url %}
+<p class="hint" style="margin-top:.6rem;">
+  <a class="btn add" href="{{ adguard_ui_url }}" target="_blank" rel="noopener">Open AdGuard's own dashboard &rarr;</a><br>
+  Its own separate admin login (not this dashboard's) -- full query log, blocked-domain stats, and charts this project doesn't duplicate. Tighter integration (pulling those numbers into this dashboard directly) is a planned future improvement, not built yet.
+  <strong>Only reachable if <code>ADGUARD_WEB_BIND</code> in <code>.env</code> is set to something other than the default <code>127.0.0.1</code></strong> (same idea as this dashboard's own <code>DASHBOARD_BIND</code>) -- otherwise this link only works from the Beelink itself, not your browser.
+</p>
+{% endif %}
 <details {{ 'open' if not adguard_configured }}>
 <summary>Connection settings</summary>
 <form class="add-form" method="post" action="{{ url_for('update_adguard_settings') }}">
@@ -4706,6 +4713,45 @@ SETTINGS_BODY = """
 """
 
 
+def _adguard_ui_url(adguard_url: str) -> str | None:
+    """Best-effort link to AdGuard Home's OWN admin UI (a separate
+    login, separate application from this dashboard) for the Settings
+    page's "Open AdGuard's dashboard" link -- added 2026-09-07 at the
+    project owner's request for a quick click-through to AdGuard's own
+    stats/query-log view (real stats integration *into* this dashboard
+    was explicitly deferred to a future phase, not built here).
+
+    Deliberately does NOT reuse the stored `adguard_url` setting's host
+    as-is: that's the dashboard-container-to-AdGuard API address, always
+    loopback (`127.0.0.1`) under this project's shared `network_mode:
+    host` setup regardless of `ADGUARD_WEB_BIND` (see `.env.example`'s
+    own comment on `ADGUARD_URL`) -- correct for a server-to-server API
+    call, but a link built from it would send the ADMIN'S OWN browser to
+    port 3000 on *their* machine, not the Beelink, which is never right
+    for a remote browser. Instead, borrows the hostname the browser
+    actually used to reach THIS page (`request.host`) -- since the
+    dashboard and AdGuard run on the same host, whatever address got you
+    here should also reach AdGuard, on its own port -- and only takes
+    the PORT from the stored `adguard_url` setting.
+
+    Returns None if `adguard_url` isn't configured yet (nothing to link
+    to). Does not and cannot confirm the link will actually load --that
+    also requires `ADGUARD_WEB_BIND` to be something other than its
+    secure-by-default `127.0.0.1` (see `.env.example`), an operator
+    decision this function has no way to detect from here.
+    """
+    if not adguard_url:
+        return None
+    try:
+        adguard_port = urlparse(adguard_url).port
+    except ValueError:
+        return None
+    if not adguard_port:
+        return None
+    browser_host = request.host.split(":")[0]
+    return f"http://{browser_host}:{adguard_port}"
+
+
 @app.route("/settings")
 @require_admin
 def settings_page():
@@ -4731,6 +4777,7 @@ def settings_page():
         stale_device_count=stale_device_count, adguard_url=adguard_url,
         adguard_username=adguard_username,
         adguard_configured=bool(adguard_url and adguard_password),
+        adguard_ui_url=_adguard_ui_url(adguard_url),
         household_time_zone=household_time_zone,
         available_time_zones=sorted(zoneinfo.available_timezones()),
         safesearch_enabled=safesearch_enabled,
