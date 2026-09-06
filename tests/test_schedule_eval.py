@@ -2,7 +2,7 @@
 plus is_full_lockout_active()'s thin DB-touching wrapper."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -135,25 +135,36 @@ def test_dst_spring_forward_transition_day_still_evaluates():
 
 # --- is_full_lockout_active() -----------------------------------------
 
-def _insert_schedule(conn, name, *, lockout_all=1, is_global=1, days="mon,tue,wed,thu,fri,sat,sun",
+def _insert_schedule(conn, name, *, lockout_all=1, is_global=1, is_mode=0, days="mon,tue,wed,thu,fri,sat,sun",
                       start="21:00", end="06:00", tz="UTC"):
     conn.execute(
         "INSERT INTO schedules (name, days_of_week, start_time, end_time, time_zone, "
-        "lockout_all, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-        (name, days, start, end, tz, int(lockout_all), int(is_global)),
+        "lockout_all, is_global, is_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+        (name, days, start, end, tz, int(lockout_all), int(is_global), int(is_mode)),
     )
     conn.commit()
     return conn.execute("SELECT id FROM schedules WHERE name = ?", (name,)).fetchone()["id"]
 
 
-def _insert_device(conn, mac, *, ignored=0):
+def _insert_device(conn, mac, *, ignored=0, user_id=None, group_id=None):
     conn.execute(
-        "INSERT INTO devices (mac_address, ignored, is_authenticated, created_at) "
-        "VALUES (?, ?, 1, datetime('now'))",
-        (mac, int(ignored)),
+        "INSERT INTO devices (mac_address, ignored, is_authenticated, user_id, group_id, created_at) "
+        "VALUES (?, ?, 1, ?, ?, datetime('now'))",
+        (mac, int(ignored), user_id, group_id),
     )
     conn.commit()
     return conn.execute("SELECT * FROM devices WHERE mac_address = ?", (mac,)).fetchone()
+
+
+def _insert_override(conn, schedule_id, *, minutes=60, user_id=None, group_id=None, device_id=None, relative_to=None):
+    reference = relative_to or datetime.now(timezone.utc)
+    expires_at = (reference + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    conn.execute(
+        "INSERT INTO schedule_overrides (schedule_id, user_id, group_id, device_id, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?, datetime('now'), ?)",
+        (schedule_id, user_id, group_id, device_id, expires_at),
+    )
+    conn.commit()
 
 
 def test_is_full_lockout_active_true_for_global_schedule_during_window(conn):
@@ -175,3 +186,76 @@ def test_is_full_lockout_active_false_when_lockout_all_is_zero(conn):
     device = _insert_device(conn, "aa:bb:cc:dd:ee:03")
     now = datetime(2026, 8, 31, 10, 0, tzinfo=timezone.utc)
     assert schedule_eval.is_full_lockout_active(conn, device, now) is False
+
+
+# --- Phase 12: schedule_overrides / schedule_is_active_for_device --------
+
+def test_override_forces_a_mode_schedule_active_outside_its_own_window(conn):
+    # Bedtime's own clock window hasn't started yet (it's noon), but an
+    # override should still force it active.
+    bedtime = _insert_schedule(conn, "Bedtime", is_mode=1, days="mon", start="21:00", end="06:00")
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:10")
+    _insert_override(conn, bedtime, device_id=device["id"])
+    now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)  # Monday noon
+    assert schedule_eval.is_full_lockout_active(conn, device, now) is True
+
+
+def test_override_suppresses_a_different_mode_schedule_during_its_own_window(conn):
+    # Bedtime's clock window IS active, but an override forcing a
+    # different mode schedule should suppress it -- "instead of", not
+    # "in addition to".
+    bedtime = _insert_schedule(conn, "Bedtime", is_mode=1, days="mon,tue,wed,thu,fri,sat,sun",
+                                start="21:00", end="06:00")
+    free_time = _insert_schedule(conn, "Free Time", is_mode=1, lockout_all=0,
+                                  days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:11")
+    _insert_override(conn, free_time, device_id=device["id"])
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)  # Monday 22:00 -- normally bedtime
+    assert schedule_eval.is_full_lockout_active(conn, device, now) is False
+
+
+def test_override_does_not_affect_a_non_mode_schedule(conn):
+    # A standing (is_mode=0) lockout schedule keeps applying by the clock
+    # regardless of any override in effect for the same device.
+    curfew = _insert_schedule(conn, "Emergency curfew", is_mode=0, days="mon,tue,wed,thu,fri,sat,sun",
+                               start="21:00", end="06:00")
+    free_time = _insert_schedule(conn, "Free Time", is_mode=1, lockout_all=0,
+                                  days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:12")
+    _insert_override(conn, free_time, device_id=device["id"])
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
+    assert schedule_eval.is_full_lockout_active(conn, device, now) is True
+
+
+def test_override_expires_and_normal_schedule_resumes(conn):
+    bedtime = _insert_schedule(conn, "Bedtime", is_mode=1, days="mon,tue,wed,thu,fri,sat,sun",
+                                start="21:00", end="06:00")
+    free_time = _insert_schedule(conn, "Free Time", is_mode=1, lockout_all=0,
+                                  days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:13")
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
+    _insert_override(conn, free_time, minutes=-5, device_id=device["id"], relative_to=now)  # already expired
+    assert schedule_eval.is_full_lockout_active(conn, device, now) is True
+
+
+def test_override_targets_via_user_id_when_device_has_no_direct_override(conn):
+    conn.execute(
+        "INSERT INTO users (username, display_name, password_hash, created_at) "
+        "VALUES ('kid1', 'Kid One', 'x', datetime('now'))"
+    )
+    conn.commit()
+    user_id = conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    bedtime = _insert_schedule(conn, "Bedtime", is_mode=1, days="mon,tue,wed,thu,fri,sat,sun",
+                                start="21:00", end="06:00")
+    free_time = _insert_schedule(conn, "Free Time", is_mode=1, lockout_all=0,
+                                  days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:14", user_id=user_id)
+    _insert_override(conn, free_time, user_id=user_id)  # targets the kid, not the device directly
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
+    assert schedule_eval.is_full_lockout_active(conn, device, now) is False
+
+
+def test_active_override_for_device_returns_none_with_no_override(conn):
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:15")
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
+    assert schedule_eval.active_override_for_device(conn, device, now) is None

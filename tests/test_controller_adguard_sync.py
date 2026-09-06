@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -70,16 +70,26 @@ def _insert_category_domains(conn, category_id: int, patterns: list[str], source
 
 
 def _insert_schedule(
-    conn, name: str, *, is_global: bool = False, lockout_all: bool = False,
+    conn, name: str, *, is_global: bool = False, lockout_all: bool = False, is_mode: bool = False,
     days: str = "mon", start: str = "00:00", end: str = "23:59",
 ) -> int:
     conn.execute(
         "INSERT INTO schedules (name, days_of_week, start_time, end_time, time_zone, "
-        "lockout_all, is_global, created_at) VALUES (?, ?, ?, ?, 'UTC', ?, ?, datetime('now'))",
-        (name, days, start, end, int(lockout_all), int(is_global)),
+        "lockout_all, is_global, is_mode, created_at) VALUES (?, ?, ?, ?, 'UTC', ?, ?, ?, datetime('now'))",
+        (name, days, start, end, int(lockout_all), int(is_global), int(is_mode)),
     )
     conn.commit()
     return conn.execute("SELECT id FROM schedules WHERE name = ?", (name,)).fetchone()["id"]
+
+
+def _insert_override(conn, schedule_id: int, *, minutes: int = 60, device_id: int) -> None:
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    conn.execute(
+        "INSERT INTO schedule_overrides (schedule_id, device_id, created_at, expires_at) "
+        "VALUES (?, ?, datetime('now'), ?)",
+        (schedule_id, device_id, expires_at),
+    )
+    conn.commit()
 
 
 # ============================================================
@@ -631,6 +641,27 @@ def test_build_category_deny_rules_schedule_gated_category_only_active_in_window
         "/(?i)(?:^|\\.)(?:games\\.example\\.com)$/"
     ]
     assert adguard_sync.build_category_deny_rules(conn, now=outside) == []
+
+
+def test_build_category_deny_rules_override_suppresses_a_mode_gating_schedule(conn):
+    # School's window is active by the clock, but an override forcing
+    # Free Time (a different is_mode schedule targeting the same device)
+    # should suppress School's category gate for the duration -- the
+    # same "instead of" semantics common/schedule_eval.py's
+    # is_full_lockout_active() tests already cover for the nftables side.
+    category = _insert_category(conn, "Gaming")
+    _insert_category_domains(conn, category, [r"games\.example\.com"])
+    device = _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:20", "192.168.1.30")
+    school = _insert_schedule(conn, "School hours", is_global=True, is_mode=True,
+                               days="mon", start="08:00", end="15:00")
+    free_time = _insert_schedule(conn, "Free Time", is_global=True, is_mode=True,
+                                  days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
+    conn.execute("INSERT INTO schedule_categories (schedule_id, category_id) VALUES (?, ?)", (school, category))
+    conn.commit()
+    _insert_override(conn, free_time, device_id=device)
+
+    during_school = datetime(2026, 8, 31, 10, 0, tzinfo=timezone.utc)  # Monday 10:00 -- School's window
+    assert adguard_sync.build_category_deny_rules(conn, now=during_school) == []
 
 
 def test_build_category_deny_rules_no_applicable_devices_contributes_nothing(conn):

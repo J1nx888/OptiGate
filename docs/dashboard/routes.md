@@ -455,6 +455,27 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   posted as a list) -- full replace of `schedule_categories` for that
   schedule, same grant-and-revoke-are-the-same-action shape as every
   other access-replace route in this file.
+- `POST /schedules/override` -> `add_schedule_override()` -- Phase 12's
+  "Shift mode now". Form fields `schedule_id`, `target` (single-select
+  combobox, `"user:<id>"`/`"group:<id>"`/`"device:<id>"`, decoded by
+  `_parse_override_target()`), `duration_minutes` (1-1440). Rejects with
+  a flash error if the schedule isn't `is_mode = 1`, or if it doesn't
+  already target the picked user/group/device (checked by
+  `_schedule_targets_selection()` -- forcing a schedule that was never
+  assigned to that target would silently do nothing at enforcement time).
+  Creating a new override for a target first deletes any existing one for
+  that exact target (`_clear_overrides_for_target()`) -- only one
+  override can be in effect per target at a time. Writes one row to
+  `schedule_overrides` with `expires_at` computed from the duration.
+- `POST /schedules/override/cancel` -> `cancel_schedule_override()` --
+  form field `override_id`. Deletes the row immediately (not a soft
+  expiry) so the normal, clock-driven schedule resumes right away.
+
+See `common/schedule_eval.py`'s `schedule_is_active_for_device()` for how
+an active override actually changes enforcement -- it's the one choke
+point both `controller/policy_state.py` (nftables lockout) and
+`controller/adguard_sync.py` (DNS-tier category blocks) read through, so
+this dashboard route never talks to either enforcement path directly.
 
 ### Report (`/report`)
 

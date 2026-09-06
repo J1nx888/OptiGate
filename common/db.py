@@ -263,6 +263,18 @@ CREATE TABLE IF NOT EXISTS category_devices (
 --       this schedule's targets while active -- controller/policy_state.py
 --       reads this, NOT schedule_categories, when it's set. 0 = a normal
 --       DNS-tier category block, using schedule_categories below.
+--   is_mode: added 2026-09-05 (Phase 12, temporary schedule overrides).
+--       1 = this schedule is one of a target's mutually-exclusive daily
+--       "modes" (e.g. School / Free Time / Bedtime) and is eligible to be
+--       manually forced active -- or forced inactive -- by a
+--       schedule_overrides row below. 0 (the default) = a standing rule
+--       (a safety-net category block, say) that no override ever touches,
+--       evaluated purely by the clock exactly as before this feature
+--       existed. See common/schedule_eval.py's schedule_is_active_for_device()
+--       for the read side -- deliberately opt-in per schedule rather than
+--       a blanket "an override suspends everything for this target",
+--       specifically so a global Adult/Gambling-style block schedule
+--       can't be silently lifted by someone shifting a kid into Free Time.
 CREATE TABLE IF NOT EXISTS schedules (
     id           INTEGER PRIMARY KEY,
     name         TEXT UNIQUE NOT NULL,
@@ -272,6 +284,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     time_zone    TEXT NOT NULL,
     lockout_all  INTEGER NOT NULL DEFAULT 0,
     is_global    INTEGER NOT NULL DEFAULT 0,
+    is_mode      INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL
 );
 
@@ -308,6 +321,46 @@ CREATE TABLE IF NOT EXISTS schedule_devices (
     device_id   INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     UNIQUE(schedule_id, device_id)
 );
+
+-- Phase 12 (2026-09-05): a manual, time-boxed "shift mode now" action --
+-- e.g. school lets out early, so a parent forces the Free Time schedule
+-- active for a kid right now instead of waiting for School's own window
+-- to end, or starts School early one day. Deliberately a one-off action,
+-- not a saved/reusable preset: created with expires_at computed from the
+-- duration picked at creation time (dashboard.add_schedule_override()),
+-- and read live (expires_at > now) with no background job needed --
+-- same "compute on read, nothing to reconcile" pattern schedules' own
+-- day/time windows already use (common/schedule_eval.py).
+--   schedule_id: which schedule to force active. Must itself have
+--       is_mode = 1 (see schedules.is_mode above) and must already
+--       target the row's own user/group/device via is_global or the
+--       schedule_users/groups/devices tables -- the dashboard route
+--       enforces both before ever inserting a row here, since a forced
+--       schedule that doesn't otherwise target this row would silently
+--       do nothing at read time (schedule_is_active_for_device() still
+--       gates on that same targeting check for every OTHER caller).
+--   user_id / group_id / device_id: exactly one is set -- same target
+--       shape as schedule_users/groups/devices, but a single ad hoc row
+--       instead of a saved many-to-many assignment. Enforced by the
+--       dashboard route, not a CHECK constraint (SQLite has no clean way
+--       to express "exactly one of these three columns is non-NULL").
+--   expires_at: when this override stops applying. Once past, a row here
+--       is simply inert -- nothing prunes it automatically (matches
+--       system_events' own "nothing prunes this yet" convention), but
+--       creating a new override for the same exact target deletes any
+--       existing one for that target first (dashboard.py), so stale rows
+--       don't silently pile up in the common case.
+CREATE TABLE IF NOT EXISTS schedule_overrides (
+    id          INTEGER PRIMARY KEY,
+    schedule_id INTEGER NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    group_id    INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+    device_id   INTEGER REFERENCES devices(id) ON DELETE CASCADE,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_overrides_expires ON schedule_overrides(expires_at);
 
 -- Phase 3 identity model (Milestone 4): every observed MAC<->IPv4
 -- pairing, feeding the interception controller's desired-state
@@ -515,6 +568,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE interception_runtime ADD COLUMN nft_last_healthy_at TEXT")
     if runtime_columns and "nft_fail_reason" not in runtime_columns:
         conn.execute("ALTER TABLE interception_runtime ADD COLUMN nft_fail_reason TEXT")
+
+    # schedule_overrides is itself a new (Phase 12) table, so CREATE TABLE
+    # IF NOT EXISTS above already covers an existing pre-Phase-9 database.
+    # This only covers the new column added to the pre-existing schedules
+    # table alongside it.
+    schedule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedules)")}
+    if schedule_columns and "is_mode" not in schedule_columns:
+        conn.execute("ALTER TABLE schedules ADD COLUMN is_mode INTEGER NOT NULL DEFAULT 0")
 
 
 # ==========================================================

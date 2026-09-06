@@ -524,9 +524,15 @@ def build_category_deny_rules(
             applies = matching.category_applies_to_device(conn, device, category)
             if not applies:
                 for schedule in gating_schedules:
-                    if schedule_eval.schedule_is_active(schedule, now) and matching.schedule_applies_to_device(
-                        conn, device, schedule
-                    ):
+                    # schedule_is_active_for_device() (not the bare
+                    # schedule_is_active()) so a Phase 12 schedule_overrides
+                    # row -- e.g. a kid manually shifted into Free Time --
+                    # can suppress an is_mode gating schedule here exactly
+                    # like it suppresses one in policy_state.py's nftables
+                    # lockout overlay. A non-mode schedule is unaffected.
+                    if schedule_eval.schedule_is_active_for_device(
+                        conn, schedule, device, now
+                    ) and matching.schedule_applies_to_device(conn, device, schedule):
                         applies = True
                         break
             if applies:
@@ -600,6 +606,16 @@ def sync_category_subscriptions(
     for category in over_threshold:
         should_enable = bool(category["is_global"])
         if not should_enable:
+            # Deliberately still the bare schedule_is_active() clock check,
+            # not schedule_is_active_for_device() -- a Phase 12 override
+            # targets one specific user/group/device, but this function
+            # can only ever enable/disable an AdGuard native filter
+            # household-wide (see this function's own docstring on why an
+            # over-threshold category can't be per-client scoped at all).
+            # There's no single device to evaluate an override against
+            # here, so a per-target override structurally cannot apply to
+            # this path -- an is_mode schedule that's also is_global with
+            # an over-threshold category is expected to stay clock-driven.
             gating_schedules = conn.execute(
                 "SELECT s.* FROM schedule_categories sc JOIN schedules s ON s.id = sc.schedule_id "
                 "WHERE sc.category_id = ? AND s.lockout_all = 0 AND s.is_global = 1",

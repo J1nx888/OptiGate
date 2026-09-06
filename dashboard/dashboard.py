@@ -2409,7 +2409,7 @@ SCHEDULES_BODY = """
   <tr><th>Name</th><th>Days</th><th>Window</th><th>Effect</th><th>Applies to</th><th></th></tr>
   {% for s in schedules %}
   <tr>
-    <td>{{ s.name }}</td>
+    <td>{{ s.name }}{% if s.is_mode %} <span class="badge" title="Eligible for &quot;Shift mode now&quot;">mode</span>{% endif %}</td>
     <td>{{ s.days_of_week }}</td>
     <td>{{ s.start_time }}&ndash;{{ s.end_time }} {{ s.time_zone }}</td>
     <td>{% if s.lockout_all %}<span class="badge blocked">full lockout</span>{% else %}{{ s.category_count }} categor{{ 'y' if s.category_count == 1 else 'ies' }}{% endif %}</td>
@@ -2440,10 +2440,65 @@ SCHEDULES_BODY = """
     {% endfor %}
   </select>
   <label><input type="checkbox" name="lockout_all"> Full lockout (no internet at all)</label>
+  <label><input type="checkbox" name="is_mode"> Mode schedule</label>
   <button class="add" type="submit">Add schedule</button>
 </form>
 <p class="hint">An end time earlier than the start time means an overnight window (like the Bedtime example above) -- it's treated as running past midnight into the next day.</p>
+<p class="hint"><strong>Mode schedule</strong> marks this as one of a kid's mutually-exclusive daily modes (e.g. School / Free Time / Bedtime) -- only mode schedules can be manually forced on or off early with "Shift mode now" below. Leave unchecked for a standing rule (a safety-net category block, say) that should never be affected by a manual shift.</p>
 </div>
+
+{% if mode_schedules %}
+<div class="card">
+<h2>Shift mode now</h2>
+<p class="hint">Force a mode schedule active for someone right now, for a set amount of time -- e.g. school let out early, so give Free Time now instead of waiting for School's window to end. Every other mode schedule normally targeting the same kid/group/device is suppressed for the duration; anything not marked "Mode schedule" is untouched.</p>
+<form class="add-form" method="post" action="{{ url_for('add_schedule_override') }}" style="flex-wrap:wrap;">
+  <div class="combobox" data-combobox data-mode="single" style="max-width:280px;">
+    <div class="combobox-current" data-combobox-current></div>
+    <input type="search" class="combobox-input" data-combobox-input placeholder="Who&hellip;">
+    <div class="combobox-results" data-combobox-results></div>
+    <input type="hidden" name="target" data-combobox-hidden value="">
+    <script type="application/json" data-combobox-items>{{ override_target_combo|tojson }}</script>
+  </div>
+  <select name="schedule_id">
+    {% for s in mode_schedules %}
+    <option value="{{ s.id }}">{{ s.name }}</option>
+    {% endfor %}
+  </select>
+  <input type="number" name="duration_minutes" value="120" min="1" max="1440" style="width:6rem;">
+  <span class="hint" style="margin:0;">minutes</span>
+  <span style="display:flex; gap:.3rem;">
+    {% for label, mins in [('30m', 30), ('1h', 60), ('2h', 120), ('4h', 240), ('rest of day', 1440)] %}
+    <button class="btn small" type="button" onclick="this.form.duration_minutes.value={{ mins }}">{{ label }}</button>
+    {% endfor %}
+  </span>
+  <button class="add" type="submit">Shift now</button>
+</form>
+</div>
+{% endif %}
+
+{% if active_overrides %}
+<div class="card">
+<h2>Active overrides ({{ active_overrides|length }})</h2>
+<div class="table-scroll">
+<table>
+  <tr><th>Forcing</th><th>For</th><th>Until</th><th></th></tr>
+  {% for o in active_overrides %}
+  <tr>
+    <td>{{ o.schedule_name }}</td>
+    <td>{{ o.user_name or o.group_name or o.device_name }}</td>
+    <td>{{ o.expires_at }}</td>
+    <td>
+      <form class="inline" method="post" action="{{ url_for('cancel_schedule_override') }}">
+        <input type="hidden" name="override_id" value="{{ o.id }}">
+        <button class="danger small" type="submit">Cancel</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+</div>
+{% endif %}
 """
 
 
@@ -2463,18 +2518,120 @@ def _valid_time(value: str) -> bool:
     return bool(re.match(r"^\d{2}:\d{2}$", value or ""))
 
 
+def _override_target_combo(all_users, all_groups, all_devices) -> list[dict]:
+    """Items for the 'Shift mode now' target combobox -- a flat list
+    across all three target kinds (a schedule_overrides row's target is a
+    single ad hoc user/group/device pick, not a saved multi-select the
+    way schedule_users/groups/devices is), id-encoded the same
+    "kind:id" way _assignment_combo() already encodes device assignment."""
+    items = [{"id": f"user:{u['id']}", "label": f"{u['display_name']} (kid)"} for u in all_users]
+    items += [{"id": f"group:{g['id']}", "label": f"{g['name']} (group)"} for g in all_groups]
+    items += [
+        {"id": f"device:{d['id']}", "label": f"{d['label'] or d['mac_address']} (device)"} for d in all_devices
+    ]
+    return items
+
+
+def _parse_override_target(value: str) -> tuple[int | None, int | None, int | None]:
+    """Decodes the 'Shift mode now' target combobox's composite value
+    ("user:5" / "group:2" / "device:9") into (user_id, group_id,
+    device_id) -- exactly one set, the other two None. Anything
+    unrecognized (empty, malformed) comes back as all-None, which the
+    caller treats as "no target picked"."""
+    kind, _, raw_id = value.partition(":")
+    if not raw_id.isdigit():
+        return None, None, None
+    entity_id = int(raw_id)
+    if kind == "user":
+        return entity_id, None, None
+    if kind == "group":
+        return None, entity_id, None
+    if kind == "device":
+        return None, None, entity_id
+    return None, None, None
+
+
+def _schedule_targets_selection(
+    conn, schedule_id: str, *, user_id: int | None, group_id: int | None, device_id: int | None
+) -> bool:
+    """Whether `schedule_id` already targets the exact user/group/device
+    picked for a 'Shift mode now' override -- same is_global-or-junction-
+    table logic as matching.schedule_applies_to_device(), just checked
+    directly against a chosen target instead of resolved from a devices
+    row (an override's target can be a user or group directly, not only a
+    single device). Required before creating an override: forcing a
+    schedule that was never assigned to this target would silently do
+    nothing at enforcement time (schedule_is_active_for_device() still
+    gates on this same targeting check for every other caller), so the
+    route rejects that case with an actionable message instead of a
+    mystery no-op."""
+    schedule = conn.execute("SELECT is_global FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
+    if schedule is None:
+        return False
+    if schedule["is_global"]:
+        return True
+    if user_id is not None and conn.execute(
+        "SELECT 1 FROM schedule_users WHERE schedule_id = ? AND user_id = ?", (schedule_id, user_id)
+    ).fetchone():
+        return True
+    if group_id is not None and conn.execute(
+        "SELECT 1 FROM schedule_groups WHERE schedule_id = ? AND group_id = ?", (schedule_id, group_id)
+    ).fetchone():
+        return True
+    if device_id is not None and conn.execute(
+        "SELECT 1 FROM schedule_devices WHERE schedule_id = ? AND device_id = ?", (schedule_id, device_id)
+    ).fetchone():
+        return True
+    return False
+
+
+def _clear_overrides_for_target(
+    conn, *, user_id: int | None, group_id: int | None, device_id: int | None
+) -> None:
+    """Deletes any existing schedule_overrides row(s) for the exact same
+    target a new override is about to be created for -- only one override
+    can be in effect per target at a time, same "grant and revoke are the
+    same action" shape as update_schedule_access()'s replace-the-whole-set
+    pattern. Also opportunistically clears out any already-expired row for
+    that target, since nothing else ever prunes those (see
+    schedule_overrides' own comment in common/db.py)."""
+    if user_id is not None:
+        conn.execute("DELETE FROM schedule_overrides WHERE user_id = ?", (user_id,))
+    elif group_id is not None:
+        conn.execute("DELETE FROM schedule_overrides WHERE group_id = ?", (group_id,))
+    elif device_id is not None:
+        conn.execute("DELETE FROM schedule_overrides WHERE device_id = ?", (device_id,))
+
+
 @app.route("/schedules")
 @require_admin
 def schedules():
     conn = get_db()
     rows = conn.execute("SELECT * FROM schedules ORDER BY is_global DESC, name").fetchall()
     household_time_zone = db.get_setting(conn, "household_time_zone", "UTC")
+    all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
+    all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
+    all_devices = conn.execute("SELECT * FROM devices ORDER BY COALESCE(label, mac_address)").fetchall()
+    active_overrides = conn.execute(
+        "SELECT so.*, s.name AS schedule_name, u.display_name AS user_name, "
+        "g.name AS group_name, COALESCE(d.label, d.mac_address) AS device_name "
+        "FROM schedule_overrides so "
+        "JOIN schedules s ON s.id = so.schedule_id "
+        "LEFT JOIN users u ON u.id = so.user_id "
+        "LEFT JOIN groups g ON g.id = so.group_id "
+        "LEFT JOIN devices d ON d.id = so.device_id "
+        "WHERE so.expires_at > ? ORDER BY so.expires_at",
+        (db.now_iso(),),
+    ).fetchall()
     body = render_template_string(
         SCHEDULES_BODY,
         schedules=[_schedule_row_context(conn, s) for s in rows],
         day_codes=_DAY_CODES, day_labels=_DAY_LABELS, selected_days=set(),
         household_time_zone=household_time_zone,
         available_time_zones=sorted(zoneinfo.available_timezones()),
+        mode_schedules=[s for s in rows if s["is_mode"]],
+        override_target_combo=_override_target_combo(all_users, all_groups, all_devices),
+        active_overrides=active_overrides,
     )
     return render("schedules", body)
 
@@ -2488,6 +2645,7 @@ def add_schedule():
     end_time = request.form.get("end_time", "")
     time_zone = request.form.get("time_zone", "UTC")
     lockout_all = 1 if request.form.get("lockout_all") else 0
+    is_mode = 1 if request.form.get("is_mode") else 0
 
     if not name:
         return flash_redirect("schedules", "Name is required.", error=True)
@@ -2502,8 +2660,8 @@ def add_schedule():
     try:
         conn.execute(
             "INSERT INTO schedules (name, days_of_week, start_time, end_time, time_zone, "
-            "lockout_all, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
-            (name, days, start_time, end_time, time_zone, lockout_all, db.now_iso()),
+            "lockout_all, is_global, is_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+            (name, days, start_time, end_time, time_zone, lockout_all, is_mode, db.now_iso()),
         )
         conn.commit()
     except Exception as exc:
@@ -2541,9 +2699,11 @@ SCHEDULE_DETAIL_BODY = """
     {% endfor %}
   </select>
   <label><input type="checkbox" name="lockout_all" {{ 'checked' if s.lockout_all }}> Full lockout (no internet at all)</label>
+  <label><input type="checkbox" name="is_mode" {{ 'checked' if s.is_mode }}> Mode schedule</label>
   <button class="add" type="submit">Save</button>
 </form>
 <p class="hint">An end time earlier than the start time runs past midnight into the next day.</p>
+<p class="hint"><strong>Mode schedule</strong>: eligible to be manually forced on or off early from the <a href="{{ url_for('schedules') }}">Schedules</a> page's "Shift mode now".</p>
 </div>
 
 <div class="card">
@@ -2629,6 +2789,7 @@ def update_schedule():
     end_time = request.form.get("end_time", "")
     time_zone = request.form.get("time_zone", "UTC")
     lockout_all = 1 if request.form.get("lockout_all") else 0
+    is_mode = 1 if request.form.get("is_mode") else 0
 
     if not days:
         return flash_redirect("schedule_detail", "Pick at least one day.", error=True, schedule_id=schedule_id)
@@ -2640,8 +2801,8 @@ def update_schedule():
     conn = get_db()
     conn.execute(
         "UPDATE schedules SET days_of_week = ?, start_time = ?, end_time = ?, time_zone = ?, "
-        "lockout_all = ? WHERE id = ?",
-        (days, start_time, end_time, time_zone, lockout_all, schedule_id),
+        "lockout_all = ?, is_mode = ? WHERE id = ?",
+        (days, start_time, end_time, time_zone, lockout_all, is_mode, schedule_id),
     )
     conn.commit()
     return flash_redirect("schedule_detail", "Saved.", schedule_id=schedule_id)
@@ -2688,6 +2849,72 @@ def update_schedule_categories():
         )
     conn.commit()
     return flash_redirect("schedule_detail", "Categories updated.", schedule_id=schedule_id)
+
+
+@app.route("/schedules/override", methods=["POST"])
+@require_admin
+def add_schedule_override():
+    """Phase 12: 'Shift mode now' -- a one-off, time-boxed action that
+    forces a specific is_mode schedule active for a single target
+    (user/group/device) for a chosen duration, superseding every other
+    is_mode schedule that would otherwise apply to that same target for
+    the window. See common/schedule_eval.py's schedule_is_active_for_device()
+    for the enforcement side; this route only ever writes one row to
+    schedule_overrides. Deliberately not a saved/reusable preset -- see
+    RoadMap.md's design discussion."""
+    schedule_id = request.form.get("schedule_id", "")
+    target = request.form.get("target", "")
+    try:
+        minutes = int(request.form.get("duration_minutes", ""))
+    except ValueError:
+        minutes = 0
+
+    conn = get_db()
+    schedule = conn.execute("SELECT * FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
+    if schedule is None:
+        return flash_redirect("schedules", "That schedule no longer exists.", error=True)
+    if not schedule["is_mode"]:
+        return flash_redirect(
+            "schedules",
+            f'"{schedule["name"]}" isn\'t a mode schedule -- check "Mode schedule" on it first.',
+            error=True,
+        )
+    if minutes <= 0 or minutes > 1440:
+        return flash_redirect("schedules", "Pick a duration between 1 minute and 24 hours.", error=True)
+
+    user_id, group_id, device_id = _parse_override_target(target)
+    if user_id is None and group_id is None and device_id is None:
+        return flash_redirect("schedules", "Pick who this applies to.", error=True)
+
+    if not _schedule_targets_selection(conn, schedule_id, user_id=user_id, group_id=group_id, device_id=device_id):
+        return flash_redirect(
+            "schedules",
+            f'"{schedule["name"]}" isn\'t assigned to that kid/group/device yet -- '
+            "assign it from the schedule's Manage page first.",
+            error=True,
+        )
+
+    _clear_overrides_for_target(conn, user_id=user_id, group_id=group_id, device_id=device_id)
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    conn.execute(
+        "INSERT INTO schedule_overrides (schedule_id, user_id, group_id, device_id, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (schedule_id, user_id, group_id, device_id, db.now_iso(), expires_at),
+    )
+    conn.commit()
+    return flash_redirect(
+        "schedules", f'"{schedule["name"]}" forced active for {minutes} minute{"s" if minutes != 1 else ""}.'
+    )
+
+
+@app.route("/schedules/override/cancel", methods=["POST"])
+@require_admin
+def cancel_schedule_override():
+    override_id = request.form.get("override_id", "")
+    conn = get_db()
+    conn.execute("DELETE FROM schedule_overrides WHERE id = ?", (override_id,))
+    conn.commit()
+    return flash_redirect("schedules", "Override cancelled -- normal schedule resumed.")
 
 
 @app.route("/devices")

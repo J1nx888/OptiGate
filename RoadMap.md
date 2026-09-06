@@ -46,6 +46,7 @@ Pi-hole setup:
 | 9 | SafeSearch & YouTube Restricted Mode (G3) | ✅ Done, live-verified |
 | 10 | Ad-hoc "pause the internet" (G6) | ✅ Done, live-verified |
 | 11 | Operational event log ("Events" page) | ✅ Done, live-verified |
+| 12 | Temporary schedule overrides ("Shift mode now") | ✅ Done, live-verified |
 
 ---
 
@@ -3400,6 +3401,107 @@ tracking stays correctly independent between two different loops
 hitting the same underlying outage at the same time, exactly as the
 unit tests already proved, now against a real failure instead of a
 mocked one. Cleaned up (`DELETE FROM system_events`) afterward.
+
+---
+
+## Phase 12 — Temporary schedule overrides ("Shift mode now", built 2026-09-05)
+
+The project owner asked: does the scheduling feature support temporarily
+assigning a different schedule -- e.g. kids finish school early, so give
+them Free Time now instead of waiting for School's window to end, or
+give more free time instead of Bedtime. Investigated first rather than
+assuming: Phase 8's `schedules` are recurring day-of-week/time-window
+rules that **stack** (any number can be active on a device at once, each
+independently blocking its own categories or doing a full lockout) --
+there was no lever to manually override that clock-driven behavior at
+all, only the Phase 10 "pause the internet" control (`quarantined_at`),
+which is one-directional (block, not grant) and indefinite (manual
+resume only, not a duration).
+
+**Design discussion with the project owner** (this session) landed on a
+narrower, more specific model than "one grant-freedom button": the
+project owner clarified they're already running `schedules` as
+mutually-exclusive daily **modes** per kid (School / Free Time / Bedtime)
+whose windows don't normally overlap, and what they actually needed was
+the ability to manually shift which mode is in effect right now, for a
+set amount of time, before the clock would otherwise do it -- "activate
+Free Time before School's window ends" or "start School early" -- not a
+generic always-lift-everything override.
+
+Two design questions this surfaced and how they were resolved:
+- **Does the category-block model already support "block video games in
+  School mode, allow them in Free Time mode"?** Yes, already true, zero
+  code changes needed -- confirmed by reading `controller/adguard_sync.py`'s
+  `build_category_deny_rules()`: a category is blocked for a device via
+  an **OR** of (a) a permanent assignment (`category_users`/`is_global`)
+  or (b) any *currently-active* schedule referencing it through
+  `schedule_categories`. So attaching "Video Games" to School's
+  `schedule_categories` already means it's blocked only during School's
+  window and untouched during Free Time's -- this only breaks down if two
+  mode windows overlap in the clock, which is exactly the gap this
+  feature closes.
+- **Should an override suspend every schedule targeting a kid, or only
+  some?** Rejected "suspend everything" -- it would silently lift a
+  standing safety-net category block (Adult, Gambling) just because
+  someone shifted a kid into Free Time. Landed on an opt-in `is_mode`
+  flag on `schedules`: only schedules marked as one of a kid's swappable
+  daily modes are ever affected by an override; anything else keeps
+  running purely on the clock, exactly as before this feature existed.
+
+**Shipped**:
+- `common/db.py`: `schedules.is_mode` column (migration for existing
+  databases); new `schedule_overrides` table (`schedule_id`, one of
+  `user_id`/`group_id`/`device_id`, `created_at`, `expires_at`) -- see
+  `docs/database/schema.md` for the full column-level writeup.
+- `common/schedule_eval.py`: `active_override_for_device()` (finds the
+  live, unexpired override for a device, checked directly then via its
+  user/group) and `schedule_is_active_for_device()` (the device-aware
+  wrapper both enforcement paths now call instead of the bare clock
+  check -- only `is_mode` schedules are affected; a matching override
+  forces its named schedule active and every *other* `is_mode` schedule
+  for that target inactive, "instead of" rather than "in addition to";
+  no override at all falls through to the unchanged clock check).
+  `is_full_lockout_active()` updated to call it.
+- `controller/adguard_sync.py`: `build_category_deny_rules()`'s
+  schedule-gating check updated to the same device-aware wrapper, so a
+  DNS-tier category block responds to an override exactly like the
+  nftables lockout overlay does -- one choke point, no special-casing in
+  either module. `sync_category_subscriptions()` (native AdGuard filter
+  subscriptions for over-threshold categories) deliberately left on the
+  bare clock check -- it can only enable/disable a filter household-wide,
+  so a per-target override structurally cannot apply there.
+- `dashboard/dashboard.py`: a "Mode schedule" checkbox on the schedule
+  add/edit forms; a "Shift mode now" card on the Schedules page (pick a
+  target via the same single-select combobox pattern as device
+  assignment, pick which mode schedule to force, pick a duration via a
+  number field with 30m/1h/2h/4h/rest-of-day quick-set buttons); an
+  "Active overrides" table with a Cancel action. `add_schedule_override()`
+  rejects a non-`is_mode` schedule, and rejects a target the schedule
+  doesn't already reach (via `is_global` or its own `schedule_users`/
+  `groups`/`devices` assignment) with an actionable error, rather than
+  silently creating a no-op override -- forcing a schedule that was never
+  assigned to a target wouldn't do anything at enforcement time either,
+  same targeting check `schedule_is_active_for_device()` itself relies
+  on. Creating a new override for a target first clears any existing one
+  for that exact target -- only one is ever in effect per target at a
+  time, no accumulation. No background job: expiry is a plain
+  `expires_at > now` check at read time, same "compute on read" pattern
+  the schedules' own day/time windows already use.
+
+**Deliberately not built** (per the project owner's own answers during
+design): not a saved/reusable preset -- each shift is a one-off action,
+not a named template you re-trigger; no separate end-time picker -- a
+duration relative to "now" is all that's exposed, since that's what both
+worked examples (early dismissal, starting school early) actually need.
+
+Verified: full test suite (`common/schedule_eval.py`'s override-suppression/
+forcing/expiry/user-vs-device-targeting cases, `controller/adguard_sync.py`'s
+DNS-tier suppression case, and `dashboard/dashboard.py`'s route-level
+validation/replace/cancel cases) plus a live smoke test against the real
+Flask app (`dashboard/dev_server.py`) confirming the rendered "Shift mode
+now" card, a real override round-trip (create -> shows in "Active
+overrides" with the correct target/expiry -> Cancel removes it), and the
+non-mode/unassigned-target rejection paths.
 
 ---
 

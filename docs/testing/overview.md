@@ -764,6 +764,32 @@ currently-unreachable cosmetic inaccuracy noted but left alone
 (dashboard.py's "awaiting login" display doesn't check
 `quarantined_at`, but nothing can set that column yet).
 
+**2026-09-05, Phase 12 (temporary schedule overrides)**: 13 new tests.
+6 in `tests/test_schedule_eval.py` for `schedule_is_active_for_device()`/
+`active_override_for_device()`/the updated `is_full_lockout_active()`:
+an override forces its named mode schedule active outside its own clock
+window, suppresses a *different* mode schedule during that schedule's
+own active window ("instead of", not "in addition to"), never affects a
+non-`is_mode` schedule, stops applying once `expires_at` is in the past
+(normal schedule resumes), and can target a device indirectly via its
+`user_id` when no override names the device directly. 1 in
+`tests/test_controller_adguard_sync.py` proves the same suppression
+reaches the DNS-tier category-block path (`build_category_deny_rules()`),
+not just the nftables lockout overlay -- confirming both enforcement
+paths really do share the one `schedule_is_active_for_device()` choke
+point rather than needing independent coverage. 6 in `tests/test_dashboard.py`
+cover the `/schedules/override` route end to end: a valid shift writes
+the row, a non-`is_mode` schedule is rejected, a schedule that doesn't
+already target the picked user/group/device is rejected (with no row
+written), a second override for the same target replaces the first
+rather than stacking, and `/schedules/override/cancel` deletes a row
+immediately. All 749 tests pass locally (Windows, `AF_UNIX`-only files
+skipped as usual). Also live-verified against the real Flask app via
+`dashboard/dev_server.py`: added a real `is_mode` schedule and a real
+device, confirmed the "Shift mode now" card and its combobox render,
+posted a real override and confirmed it appeared correctly in "Active
+overrides" with the right target/expiry, and confirmed Cancel removed it.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run

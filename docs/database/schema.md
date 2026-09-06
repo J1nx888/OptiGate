@@ -570,7 +570,18 @@ apply to its assigned users/groups/devices.
 | `time_zone`     | TEXT    | NOT NULL -- IANA name, e.g. `"America/Chicago"`; stored per-schedule so a later change to the household default never moves an existing schedule's meaning |
 | `lockout_all`   | INTEGER | NOT NULL DEFAULT 0 -- 1 = full nftables-tier lockout (see `controller/policy_state.py`'s QUARANTINE overlay), `schedule_categories` ignored; 0 = a normal DNS-tier category block |
 | `is_global`     | INTEGER | NOT NULL DEFAULT 0 |
+| `is_mode`       | INTEGER | NOT NULL DEFAULT 0 -- added 2026-09-05 (Phase 12). See `schedule_overrides` below. |
 | `created_at`    | TEXT    | NOT NULL |
+
+**`is_mode`**: marks a schedule as one of a target's mutually-exclusive
+daily "modes" (e.g. School / Free Time / Bedtime) — eligible to be
+manually forced active, or forced inactive, by a `schedule_overrides` row.
+Deliberately opt-in per schedule rather than "an override suspends
+*every* schedule for this target": a standing safety-net category block
+(Adult, Gambling, etc.) should never be silently lifted just because
+someone shifted a kid into Free Time. `0` (the default) means a schedule
+is evaluated purely by the clock, exactly as before this feature existed
+— see `common/schedule_eval.py`'s `schedule_is_active_for_device()`.
 
 ### `schedule_categories`
 Which categories are blocked while a (non-`lockout_all`) schedule is
@@ -581,6 +592,58 @@ UNIQUE(`schedule_id`, `category_id`).
 ### `schedule_users` / `schedule_groups` / `schedule_devices`
 Same shape as `category_users`/`category_groups`/`category_devices`
 above — who a schedule applies to.
+
+### `schedule_overrides`
+Added 2026-09-05 (Phase 12): a manual, time-boxed "shift mode now" action
+— e.g. school lets out early, so a parent forces the Free Time schedule
+active for a kid right now instead of waiting for School's own window to
+end, or starts School early one day. Deliberately a one-off action, not a
+saved/reusable preset — see RoadMap.md's design discussion for the
+alternatives considered.
+
+| Column        | Type    | Constraints |
+|---|---|---|
+| `id`           | INTEGER | PRIMARY KEY |
+| `schedule_id`  | INTEGER | NOT NULL REFERENCES `schedules(id)` ON DELETE CASCADE -- the schedule being forced active. Must itself have `is_mode = 1` and must already target the row's own user/group/device (via `is_global` or the junction tables above); `dashboard.add_schedule_override()` enforces both before ever inserting a row here. |
+| `user_id`      | INTEGER | REFERENCES `users(id)` ON DELETE CASCADE, nullable |
+| `group_id`     | INTEGER | REFERENCES `groups(id)` ON DELETE CASCADE, nullable |
+| `device_id`    | INTEGER | REFERENCES `devices(id)` ON DELETE CASCADE, nullable |
+| `created_at`   | TEXT    | NOT NULL |
+| `expires_at`   | TEXT    | NOT NULL |
+
+Exactly one of `user_id`/`group_id`/`device_id` is set — same target
+shape as `schedule_users`/`schedule_groups`/`schedule_devices`, but a
+single ad hoc row instead of a saved many-to-many assignment. Enforced by
+the dashboard route, not a CHECK constraint (SQLite has no clean way to
+express "exactly one of these three columns is non-NULL", unlike
+`devices`' own two-column `CHECK (user_id IS NULL OR group_id IS NULL)`).
+
+Read live (`expires_at > now`) by `common/schedule_eval.py`'s
+`active_override_for_device()` — no background job needed, the same
+"compute on read, nothing to reconcile" pattern the schedules' own
+day/time windows already use. Once past `expires_at` a row here is simply
+inert; nothing prunes it automatically (same "nothing prunes this yet"
+convention as `system_events`), but `dashboard.add_schedule_override()`
+deletes any existing override for the exact same target before writing a
+new one, so stale rows don't pile up in the common case — only one
+override is ever in effect per target at a time.
+
+**How an override changes enforcement**: `schedule_is_active_for_device()`
+is a device-aware wrapper around `schedule_is_active()` that both
+`controller/policy_state.py` (the nftables `lockout_all` overlay) and
+`controller/adguard_sync.py`'s `build_category_deny_rules()` (DNS-tier
+category blocks) call instead of the bare clock check — one choke point,
+so an override affects both enforcement paths without either module
+needing its own special case. For an `is_mode` schedule: an active
+override for a device means that schedule is active only if the override
+names it specifically; every *other* `is_mode` schedule targeting the
+same device is forced inactive for the override's duration, regardless of
+the clock ("instead of", not "in addition to"). A non-`is_mode` schedule
+is never affected. `controller/adguard_sync.py`'s
+`sync_category_subscriptions()` (native AdGuard filter subscriptions for
+over-threshold categories) is the one exception — it can only ever
+enable/disable a filter household-wide, so a per-target override
+structurally cannot apply there; it stays on the bare clock check.
 
 **Scale note** (`common/matching.py`'s `MAX_SCOPED_CATEGORY_DOMAINS = 5000`):
 real category blocklists range from tens to ~953K domains

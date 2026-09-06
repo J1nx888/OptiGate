@@ -3054,6 +3054,141 @@ def test_update_schedule_access_sets_global_and_targets(client, db_conn):
     assert db_conn.execute("SELECT is_global FROM schedules WHERE id = ?", (schedule_id,)).fetchone()["is_global"] == 1
 
 
+def test_update_schedule_saves_is_mode(client, db_conn):
+    client.post(
+        "/schedules/add",
+        data={"name": "Free Time", "days": ["mon"], "start_time": "00:00", "end_time": "23:59", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Free Time'").fetchone()["id"]
+    assert db_conn.execute("SELECT is_mode FROM schedules WHERE id = ?", (schedule_id,)).fetchone()["is_mode"] == 0
+
+    client.post(
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "00:00", "end_time": "23:59",
+            "time_zone": "UTC", "is_mode": "on",
+        },
+        headers=_auth_header(),
+    )
+    assert db_conn.execute("SELECT is_mode FROM schedules WHERE id = ?", (schedule_id,)).fetchone()["is_mode"] == 1
+
+
+# ============================================================
+# Phase 12: Schedule overrides ("Shift mode now")
+# ============================================================
+
+def _add_mode_schedule(client, db_conn, name: str, *, is_global: bool = True) -> int:
+    client.post(
+        "/schedules/add",
+        data={"name": name, "days": ["mon"], "start_time": "00:00", "end_time": "23:59", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = ?", (name,)).fetchone()["id"]
+    client.post(
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "00:00", "end_time": "23:59",
+            "time_zone": "UTC", "is_mode": "on",
+        },
+        headers=_auth_header(),
+    )
+    if is_global:
+        client.post("/schedules/access", data={"schedule_id": schedule_id, "is_global": "on"}, headers=_auth_header())
+    return schedule_id
+
+
+def _add_device(db_conn, mac: str) -> int:
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, is_authenticated, created_at) VALUES (?, 1, datetime('now'))", (mac,)
+    )
+    db_conn.commit()
+    return db_conn.execute("SELECT id FROM devices WHERE mac_address = ?", (mac,)).fetchone()["id"]
+
+
+def test_add_schedule_override_forces_target_active(client, db_conn):
+    schedule_id = _add_mode_schedule(client, db_conn, "Free Time")
+    device_id = _add_device(db_conn, "aa:bb:cc:dd:ee:30")
+
+    resp = client.post(
+        "/schedules/override",
+        data={"schedule_id": schedule_id, "target": f"device:{device_id}", "duration_minutes": "60"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    row = db_conn.execute(
+        "SELECT * FROM schedule_overrides WHERE schedule_id = ? AND device_id = ?", (schedule_id, device_id)
+    ).fetchone()
+    assert row is not None
+
+
+def test_add_schedule_override_rejects_a_non_mode_schedule(client, db_conn):
+    client.post(
+        "/schedules/add",
+        data={"name": "Adult block", "days": ["mon"], "start_time": "00:00", "end_time": "23:59", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Adult block'").fetchone()["id"]
+    device_id = _add_device(db_conn, "aa:bb:cc:dd:ee:31")
+
+    resp = client.post(
+        "/schedules/override",
+        data={"schedule_id": schedule_id, "target": f"device:{device_id}", "duration_minutes": "60"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM schedule_overrides").fetchone() is None
+
+
+def test_add_schedule_override_rejects_a_target_the_schedule_doesnt_reach(client, db_conn):
+    schedule_id = _add_mode_schedule(client, db_conn, "Free Time", is_global=False)
+    device_id = _add_device(db_conn, "aa:bb:cc:dd:ee:32")
+
+    resp = client.post(
+        "/schedules/override",
+        data={"schedule_id": schedule_id, "target": f"device:{device_id}", "duration_minutes": "60"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM schedule_overrides").fetchone() is None
+
+
+def test_add_schedule_override_replaces_existing_override_for_same_target(client, db_conn):
+    free_time = _add_mode_schedule(client, db_conn, "Free Time")
+    bedtime = _add_mode_schedule(client, db_conn, "Bedtime")
+    device_id = _add_device(db_conn, "aa:bb:cc:dd:ee:33")
+
+    client.post(
+        "/schedules/override",
+        data={"schedule_id": free_time, "target": f"device:{device_id}", "duration_minutes": "60"},
+        headers=_auth_header(),
+    )
+    client.post(
+        "/schedules/override",
+        data={"schedule_id": bedtime, "target": f"device:{device_id}", "duration_minutes": "30"},
+        headers=_auth_header(),
+    )
+    rows = db_conn.execute("SELECT * FROM schedule_overrides WHERE device_id = ?", (device_id,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["schedule_id"] == bedtime
+
+
+def test_cancel_schedule_override_removes_it(client, db_conn):
+    schedule_id = _add_mode_schedule(client, db_conn, "Free Time")
+    device_id = _add_device(db_conn, "aa:bb:cc:dd:ee:34")
+    client.post(
+        "/schedules/override",
+        data={"schedule_id": schedule_id, "target": f"device:{device_id}", "duration_minutes": "60"},
+        headers=_auth_header(),
+    )
+    override_id = db_conn.execute("SELECT id FROM schedule_overrides WHERE device_id = ?", (device_id,)).fetchone()["id"]
+
+    resp = client.post("/schedules/override/cancel", data={"override_id": override_id}, headers=_auth_header())
+    assert resp.status_code == 302
+    assert db_conn.execute("SELECT * FROM schedule_overrides WHERE id = ?", (override_id,)).fetchone() is None
+
+
 # ============================================================
 # Phase 8: Settings household time zone
 # ============================================================
