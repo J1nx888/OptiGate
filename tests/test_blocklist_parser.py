@@ -1,6 +1,8 @@
 """Phase 8: common/blocklist_parser.py -- pure text extraction from the
 three real formats confirmed live against
-https://github.com/blocklistproject/Lists (see that module's docstring)."""
+https://github.com/blocklistproject/Lists, plus a fourth (full URL per
+line, added 2026-09-08) confirmed live against a real social-networking-
+sites list of that shape (see that module's docstring)."""
 from __future__ import annotations
 
 import blocklist_parser
@@ -74,3 +76,37 @@ def test_empty_input_returns_empty_list():
 def test_whitespace_only_lines_and_crlf_handled():
     text = "example.com\r\n   \r\nother.example.org\r\n"
     assert blocklist_parser.parse_hostlist(text) == ["example.com", "other.example.org"]
+
+
+# --- full-URL-per-line format (added 2026-09-08) --------------------------
+
+def test_full_url_per_line():
+    text = "http://example.com\nhttps://other.example.org\n"
+    assert blocklist_parser.parse_hostlist(text) == ["example.com", "other.example.org"]
+
+
+def test_full_url_with_path_and_query_extracts_just_the_host():
+    text = "https://example.com/some/path?query=1&other=2\n"
+    assert blocklist_parser.parse_hostlist(text) == ["example.com"]
+
+
+def test_full_url_is_case_insensitive_scheme_and_host():
+    text = "HTTP://ANobii.com\n"
+    assert blocklist_parser.parse_hostlist(text) == ["anobii.com"]
+
+
+def test_full_url_real_world_edge_cases():
+    # Confirmed live 2026-09-08 against the actual file that surfaced this
+    # gap: a query string glued directly onto the bare hostname with no
+    # "/" separator, and a bare "#" fragment marker with nothing after it.
+    text = (
+        "http://bebo.com#\n"
+        "http://www.bolt.com?p=tgraph&r=home_home\n"
+        "http://43things.com\n"
+    )
+    assert blocklist_parser.parse_hostlist(text) == ["bebo.com", "www.bolt.com", "43things.com"]
+
+
+def test_full_url_deduplicates_with_other_formats_for_the_same_host():
+    text = "http://example.com\nexample.com\n||example.com^\n"
+    assert blocklist_parser.parse_hostlist(text) == ["example.com"]

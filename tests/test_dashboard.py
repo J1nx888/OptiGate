@@ -3109,6 +3109,123 @@ def test_update_category_access_still_allows_global_on_an_oversized_category(cli
     assert db_conn.execute("SELECT is_global FROM categories WHERE id = ?", (category_id,)).fetchone()["is_global"] == 1
 
 
+# ============================================================
+# Editing a category's subscription URL (real gap fixed 2026-09-08:
+# previously the only way to change it was delete-and-recreate the whole
+# category, losing access assignments/manual domains/overrides)
+# ============================================================
+
+def test_update_category_subscription_sets_url_on_a_manual_only_category(client, db_conn):
+    client.post("/categories/add", data={"name": "AI"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'AI'").fetchone()["id"]
+
+    resp = client.post(
+        f"/categories/{category_id}/subscription",
+        data={"subscription_url": "https://blocklistproject.github.io/Lists/adguard/gambling-ags.txt"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    row = db_conn.execute("SELECT subscription_url FROM categories WHERE id = ?", (category_id,)).fetchone()
+    assert row["subscription_url"] == "https://blocklistproject.github.io/Lists/adguard/gambling-ags.txt"
+
+
+def test_update_category_subscription_changes_an_existing_url_and_drops_old_synced_domains(client, db_conn):
+    client.post(
+        "/categories/add",
+        data={"name": "Gambling", "subscription_url": "https://example.invalid/old.txt"},
+        headers=_auth_header(),
+    )
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    db_conn.executemany(
+        "INSERT INTO category_domains (category_id, pattern, source, created_at) VALUES (?, ?, ?, datetime('now'))",
+        [(category_id, r"old\.example\.com", "subscription"), (category_id, r"kept\.example\.com", "manual")],
+    )
+    db_conn.execute("UPDATE categories SET last_synced_at = '2026-09-01T00:00:00Z' WHERE id = ?", (category_id,))
+    db_conn.commit()
+
+    resp = client.post(
+        f"/categories/{category_id}/subscription",
+        data={"subscription_url": "https://example.invalid/new.txt"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT subscription_url, last_synced_at FROM categories WHERE id = ?", (category_id,)).fetchone()
+    assert row["subscription_url"] == "https://example.invalid/new.txt"
+    assert row["last_synced_at"] is None
+    remaining = {r["pattern"] for r in db_conn.execute(
+        "SELECT pattern FROM category_domains WHERE category_id = ?", (category_id,)
+    )}
+    assert remaining == {r"kept\.example\.com"}  # old subscription row gone, manual row untouched
+
+
+def test_update_category_subscription_can_clear_it_to_manual_only(client, db_conn):
+    client.post(
+        "/categories/add",
+        data={"name": "Gambling", "subscription_url": "https://example.invalid/list.txt"},
+        headers=_auth_header(),
+    )
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+
+    resp = client.post(
+        f"/categories/{category_id}/subscription", data={"subscription_url": ""}, headers=_auth_header()
+    )
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT subscription_url FROM categories WHERE id = ?", (category_id,)).fetchone()
+    assert row["subscription_url"] is None
+
+
+def test_update_category_subscription_rejects_an_invalid_url(client, db_conn):
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+
+    resp = client.post(
+        f"/categories/{category_id}/subscription",
+        data={"subscription_url": "http://127.0.0.1/internal"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    row = db_conn.execute("SELECT subscription_url FROM categories WHERE id = ?", (category_id,)).fetchone()
+    assert row["subscription_url"] is None
+
+
+def test_update_category_subscription_no_change_is_a_no_op(client, db_conn):
+    client.post(
+        "/categories/add",
+        data={"name": "Gambling", "subscription_url": "https://example.invalid/list.txt"},
+        headers=_auth_header(),
+    )
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    db_conn.execute("UPDATE categories SET last_synced_at = '2026-09-01T00:00:00Z' WHERE id = ?", (category_id,))
+    db_conn.commit()
+
+    client.post(
+        f"/categories/{category_id}/subscription",
+        data={"subscription_url": "https://example.invalid/list.txt"},
+        headers=_auth_header(),
+    )
+    row = db_conn.execute("SELECT last_synced_at FROM categories WHERE id = ?", (category_id,)).fetchone()
+    assert row["last_synced_at"] == "2026-09-01T00:00:00Z"  # untouched -- nothing actually changed
+
+
+def test_update_category_subscription_requires_admin_auth(client, db_conn):
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    resp = client.post(f"/categories/{category_id}/subscription", data={"subscription_url": "https://example.invalid/x.txt"})
+    assert resp.status_code == 401
+
+
+def test_category_detail_always_shows_subscription_card(client, db_conn):
+    # Real UX fix 2026-09-08: this card used to be omitted entirely for
+    # a manual-only category, so there was no way to see it was even an
+    # option to add one without already knowing the route existed.
+    client.post("/categories/add", data={"name": "Weapons"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Weapons'").fetchone()["id"]
+    resp = client.get(f"/categories/{category_id}", headers=_auth_header())
+    assert b"Subscription" in resp.data
+    assert b"Manual-only" in resp.data
+
+
 def test_sync_category_now_reports_failure_cleanly(client, db_conn, monkeypatch):
     import category_fetch
 

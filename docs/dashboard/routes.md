@@ -471,6 +471,24 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   the rest. Same 2026-09-06 fix as above: names any category that came
   back with exactly 0 domains in the aggregate flash (`error=True` in
   that case) rather than only reporting an undifferentiated grand total.
+- `POST /categories/<int:category_id>/subscription` ->
+  `update_category_subscription()` (added 2026-09-08, real gap found by
+  live user testing: previously the only way to change a category's
+  `subscription_url` once set was to delete and recreate the whole
+  category, losing its access assignments/manual domains/overrides).
+  Form field `subscription_url` (blank clears it, making the category
+  manual-only). Validated with the same `_validate_subscription_url()`
+  `add_category()` uses. A no-op (same URL resubmitted) short-circuits
+  without touching anything. On an actual change, deletes the
+  category's existing `source = 'subscription'` rows and clears
+  `last_synced_at` -- the old synced domains and timestamp described a
+  source that's no longer configured, same "replace, don't accumulate"
+  rule a real sync already applies; `source = 'manual'` rows are never
+  touched. `category_detail()`'s Subscription card was also changed to
+  always render (it used to be omitted entirely for a manual-only
+  category, `{% if c.subscription_url %}`), so this route -- and the
+  option to add a subscription to a previously-manual category at all --
+  is actually discoverable.
 
 ### Schedules (`/schedules`) -- Phase 8
 

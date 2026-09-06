@@ -917,6 +917,29 @@ non-default AdGuard port carries through correctly. Full suite:
 Flask app: configured real AdGuard connection settings and confirmed
 the rendered link plus its `ADGUARD_WEB_BIND` caveat text.
 
+**2026-09-08, Phase 18 (editable subscriptions + 4th blocklist format)**:
+5 new tests in `tests/test_blocklist_parser.py` for the full-URL-per-
+line format -- bare `http`/`https` URL, path+query extraction, case-
+insensitive scheme/host, the real reported file's own edge cases
+reproduced directly (a query string glued straight onto the bare
+hostname with no `/`, a bare trailing `#` fragment), and dedup against
+the other three formats for the same host. 7 new in
+`tests/test_dashboard.py` for `update_category_subscription()`: sets a
+URL on a previously manual-only category; changing an existing URL
+drops its old `source='subscription'` rows and `last_synced_at` while a
+`source='manual'` row on the same category survives untouched; clearing
+it back to manual-only; an invalid (private-IP) URL is rejected with
+nothing written; resubmitting the identical URL is a true no-op
+(`last_synced_at` provably untouched); admin auth is required; and the
+Subscription card renders even for a manual-only category (a real UX
+fix -- it used to be omitted entirely). Full suite: **817 passed, 34
+skipped** (Windows). Live-verified against the real Flask app using the
+exact URL the project owner reported as not importing: added a test
+category, set its subscription to that real gist link, clicked Sync,
+got "Synced 196 domains" (matching a direct-script count of the same
+file exactly), and confirmed the category page displayed real parsed
+domain names from it.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run

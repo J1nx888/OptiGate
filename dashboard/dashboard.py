@@ -2238,11 +2238,12 @@ CATEGORIES_BODY = """
 <p class="hint">
   <strong>Subscription URL must be a raw domain-list file, not a webpage.</strong>
   Supported formats: a bare domain on each line, a hosts file
-  (<code>0.0.0.0 example.com</code>), or an AdGuard/uBlock rule list
-  (<code>||example.com^</code>). A documentation or article page --
+  (<code>0.0.0.0 example.com</code>), an AdGuard/uBlock rule list
+  (<code>||example.com^</code>), or a full URL on each line
+  (<code>http://example.com</code>). A documentation or article page --
   even one that lists domains in a table, like Microsoft's AI-sites
   page -- won't parse into anything, since none of its lines are in one
-  of those three shapes. Example that works:
+  of those four shapes. Example that works:
   <code>https://blocklistproject.github.io/Lists/adguard/gambling-ags.txt</code>.
 </p>
 </div>
@@ -2411,17 +2412,27 @@ CATEGORY_DETAIL_BODY = """
 <p><a href="{{ url_for('categories') }}">&larr; All categories</a></p>
 <h1>{{ c.name }}</h1>
 
-{% if c.subscription_url %}
 <div class="card">
 <h2>Subscription</h2>
+{% if c.subscription_url %}
 <p class="hint"><code>{{ c.subscription_url }}</code></p>
 <p class="hint">Last synced: {{ c.last_synced_at or 'never' }}. {{ domain_count }} domain{{ 's' if domain_count != 1 else '' }} from this source (plus any manual additions below).</p>
-<p class="hint">Must be a raw domain-list file (bare domain per line, a hosts file, or an AdGuard/uBlock rule list) -- a webpage or documentation page won't parse into anything, even if it visibly lists domains.</p>
 <form method="post" action="{{ url_for('sync_category_now', category_id=c.id) }}">
   <button class="add" type="submit">Sync now</button>
 </form>
-</div>
+{% else %}
+<p class="hint">Manual-only -- no subscription set. Add one below, or keep curating this category's domains by hand.</p>
 {% endif %}
+<p class="hint">Must be a raw domain-list file: a bare domain on each line, a hosts file (<code>0.0.0.0 example.com</code>), an AdGuard/uBlock rule list (<code>||example.com^</code>), or a full URL per line (<code>http://example.com</code>) -- a webpage or documentation page won't parse into anything, even if it visibly lists domains.</p>
+<details {{ 'open' if not c.subscription_url }} style="margin-top:.6rem;">
+<summary>{{ 'Change' if c.subscription_url else 'Add' }} subscription URL</summary>
+<form class="add-form" method="post" action="{{ url_for('update_category_subscription', category_id=c.id) }}">
+  <input type="text" name="subscription_url" value="{{ c.subscription_url or '' }}" placeholder="Leave blank to make this category manual-only" style="flex:1; min-width:320px;">
+  <button class="add" type="submit">Save</button>
+</form>
+<p class="hint">Changing or clearing the URL drops this category's currently-synced (not manually-added) domains -- click "Sync now" afterward to fetch the new source.</p>
+</details>
+</div>
 
 <div class="card">
 <h2>Blocked for</h2>
@@ -2684,6 +2695,53 @@ def sync_category_now(category_id: int):
             error=True, category_id=category_id,
         )
     return flash_redirect("category_detail", f"Synced {count} domains.", category_id=category_id)
+
+
+@app.route("/categories/<int:category_id>/subscription", methods=["POST"])
+@require_admin
+def update_category_subscription(category_id: int):
+    """Real gap fixed 2026-09-08: previously the only way to change a
+    category's subscription_url once set was to delete and recreate the
+    whole category (losing its access assignments, manual domains, and
+    overrides in the process) -- add_category() could set it, but
+    nothing could ever edit it. Also covers going the other direction
+    (manual-only -> subscribed) or clearing it entirely (subscribed ->
+    manual-only), from the same one field."""
+    raw_url = request.form.get("subscription_url", "").strip()
+    conn = get_db()
+    category = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    if category is None:
+        return flash_redirect("categories", "That category no longer exists.", error=True)
+
+    new_url = None
+    if raw_url:
+        new_url, error = _validate_subscription_url(raw_url)
+        if error:
+            return flash_redirect("category_detail", error, error=True, category_id=category_id)
+
+    if new_url == category["subscription_url"]:
+        return flash_redirect("category_detail", "No change.", category_id=category_id)
+
+    # The old subscription-sourced domains belong to whatever source WAS
+    # configured, not what's configured now -- same "replace, don't
+    # accumulate" rule fetch_and_sync_category() already applies on every
+    # real sync, just triggered here instead of by a fetch. Manual rows
+    # (source='manual') are never touched, matching that same convention.
+    # last_synced_at is cleared too so the page doesn't keep describing a
+    # sync that happened against a source that's no longer configured.
+    conn.execute(
+        "DELETE FROM category_domains WHERE category_id = ? AND source = 'subscription'", (category_id,)
+    )
+    conn.execute(
+        "UPDATE categories SET subscription_url = ?, last_synced_at = NULL WHERE id = ?",
+        (new_url, category_id),
+    )
+    conn.commit()
+    message = (
+        'Subscription URL updated -- click "Sync now" to fetch it.' if new_url
+        else "Subscription removed -- this category is manual-only now. Existing manually-added domains are untouched."
+    )
+    return flash_redirect("category_detail", message, category_id=category_id)
 
 
 @app.route("/categories/sync-all", methods=["POST"])

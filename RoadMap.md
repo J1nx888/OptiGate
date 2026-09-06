@@ -52,6 +52,7 @@ Pi-hole setup:
 | 15 | Live user-testing fixes: category search-box confusion, enriched pending-devices card with login-attempt history | ✅ Done, live-verified |
 | 16 | Cross-category domain search performance (51s → under 1s) | ✅ Done, live-verified |
 | 17 | Ad-blocking visibility: link out to AdGuard's own dashboard | ✅ Done, live-verified. In-dashboard stats integration noted as a future-phase need. |
+| 18 | Editable category subscription URLs; 4th blocklist format (full URL per line) | ✅ Done, live-verified |
 
 ---
 
@@ -3941,6 +3942,70 @@ correctly). Full suite: **805 passed, 34 skipped**. Live-verified
 against the real Flask app: configured AdGuard connection settings,
 confirmed the rendered link and its `ADGUARD_WEB_BIND` caveat text
 both appear exactly as designed.
+
+---
+
+## Phase 18 — Editable category subscriptions; a fourth blocklist format (built 2026-09-08)
+
+Two related findings from the same round of live testing.
+
+**"I can only delete a category when the subscription doesn't import
+anything -- I need to be able to change the URL."** True: `add_category()`
+could set `subscription_url` at creation time, but nothing could ever
+edit it afterward -- the only way to fix a bad URL or switch sources was
+deleting and recreating the whole category, losing its access
+assignments, manual domains, and overrides in the process.
+
+**Shipped**: `dashboard.py`'s new `update_category_subscription()`
+route (form field `subscription_url`, blank clears it back to
+manual-only), validated with the same `_validate_subscription_url()`
+`add_category()` already uses. Changing the URL deletes the category's
+old `source = 'subscription'` rows and clears `last_synced_at` -- both
+described a source that's no longer configured, same "replace, don't
+accumulate" rule a real sync already applies -- while `source =
+'manual'` rows are always left untouched. `category_detail()`'s
+Subscription card, previously omitted entirely (`{% if
+c.subscription_url %}`) for a manual-only category, now always renders,
+so adding a subscription to a category that started manual-only is
+actually discoverable too, not just editing an existing one.
+
+**"This URL does a good job of listing sites, can we modify the code to
+accept it?"** -- a real link
+(`.../karlcow/8644377/raw/.../list.uri`), confirmed live: 196 real
+lines, every one a full URL (`http://example.com`, some with a query
+string glued directly onto the bare hostname with no `/`, a couple with
+a bare trailing `#`). None of the three formats `common/
+blocklist_parser.py` supported (hosts-file, AdGuard/uBlock rule, bare
+domain) recognize a line with a URL scheme on it at all -- every line
+fell through unmatched, same root failure shape as the earlier
+Microsoft-docs-page finding, except this time the format is genuinely
+real and worth supporting rather than fundamentally unparseable.
+
+**Shipped**: a fourth format, full-URL-per-line, extracted via
+`urlparse(line).hostname` -- correctly handles a bare scheme+host, a
+path, a query string (with or without a `/` before it), and a trailing
+fragment marker with nothing after it. Verified against the real file:
+all 196 entries parsed correctly. Dashboard hint text (add-category
+form, category detail's Subscription card) updated to mention the new
+fourth shape with the same example URL style as the other three.
+
+Verified: 5 new tests in `tests/test_blocklist_parser.py` (bare
+URL-per-line, path+query extraction, case-insensitive scheme/host, the
+real file's actual edge cases reproduced directly, dedup against the
+other three formats for the same host) and 7 new in
+`tests/test_dashboard.py` for the subscription-editing route (set on a
+manual-only category, change an existing URL and confirm old synced
+domains are dropped while manual ones survive, clear to manual-only,
+reject an invalid URL, a same-URL resubmit is a true no-op, admin auth
+required, the Subscription card always renders). Full suite: **817
+passed, 34 skipped**. Live-verified end-to-end against the real Flask
+app and the real reported URL: added a test category, set its
+subscription to the exact gist link, clicked Sync, got "Synced 196
+domains" (matching the direct-script count exactly), confirmed the
+category page showed the real count and real domains, confirmed the
+edit form pre-fills the current URL, and confirmed a manual-only
+category now shows an inviting "Add one below" state instead of no
+Subscription card at all.
 
 ---
 
