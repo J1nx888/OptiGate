@@ -3100,15 +3100,18 @@ SCHEDULE_DETAIL_BODY = """
 <div class="card">
 <h2>Categories blocked during this window</h2>
 <p class="hint">Ignored while "Full lockout" is checked above -- a full lockout blocks everything, categories included.</p>
+<p class="hint">Every category is listed below -- check the ones to block while this schedule is active, uncheck the rest. Categories are a short, fixed list you set up once (unlike kids/groups/devices, which can grow large), so this shows everything at a glance instead of a search-to-find picker.</p>
 <form method="post" action="{{ url_for('update_schedule_categories') }}">
   <input type="hidden" name="schedule_id" value="{{ s.id }}">
-  <div class="combobox" data-combobox data-mode="multi" data-field="category_ids" data-empty="No categories yet.">
-    <div class="combobox-tags" data-combobox-tags></div>
-    <input type="search" class="combobox-input" data-combobox-input placeholder="Search categories&hellip;">
-    <div class="combobox-results" data-combobox-results></div>
-    <script type="application/json" data-combobox-items>{{ all_categories_combo|tojson }}</script>
-    <script type="application/json" data-combobox-selected>{{ preselected_category_ids|list|tojson }}</script>
+  {% if all_categories %}
+  <div style="display:flex; flex-wrap:wrap; gap:.4rem 1.4rem; margin:.5rem 0;">
+  {% for cat in all_categories %}
+    <label><input type="checkbox" name="category_ids" value="{{ cat.id }}" {{ 'checked' if cat.id in preselected_category_ids }}> {{ cat.name }}</label>
+  {% endfor %}
   </div>
+  {% else %}
+  <p class="hint">No categories yet -- add one from the <a href="{{ url_for('categories') }}">Categories</a> page first.</p>
+  {% endif %}
   <button class="add" type="submit" style="margin-top:.8rem;">Save</button>
 </form>
 </div>
@@ -3135,7 +3138,7 @@ def schedule_detail(schedule_id: int):
         all_users_combo=_entity_combo(all_users, lambda u: u["display_name"]),
         all_groups_combo=_entity_combo(all_groups, lambda g: g["name"]),
         all_devices_combo=_entity_combo(all_devices, lambda dev: dev["label"] or dev["mac_address"]),
-        all_categories_combo=_entity_combo(all_categories, lambda cat: cat["name"]),
+        all_categories=all_categories,
         preselected_user_ids={
             row["user_id"] for row in conn.execute(
                 "SELECT user_id FROM schedule_users WHERE schedule_id = ?", (schedule_id,)

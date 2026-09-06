@@ -188,7 +188,7 @@ containing just the inner page content (no `<html>`/`<nav>` -- that's
 | `CATEGORIES_BODY` | `categories()` | Phase 8. All categories table, "Add category" form, "Sync all subscriptions now" button (shown only if any category has a `subscription_url`). |
 | `CATEGORY_DETAIL_BODY` | `category_detail()` | Phase 8. Subscription info + "Sync now" (if `subscription_url` set), Blocked-for card (`BLOCK_ACCESS_SELECTS`, or a plain Everyone-only checkbox once over the scoping threshold), domains table + manual-add form, overrides table + add form. |
 | `SCHEDULES_BODY` | `schedules()` | Phase 8. All schedules table, "Add schedule" form (days/time/time-zone/lockout). |
-| `SCHEDULE_DETAIL_BODY` | `schedule_detail()` | Phase 8. When/window edit form, Blocked-for card, categories multi-select card (omitted entirely when `lockout_all` is set). |
+| `SCHEDULE_DETAIL_BODY` | `schedule_detail()` | Phase 8. When/window edit form, Blocked-for card, categories checkbox-list card (plain checkboxes, not a combobox -- see 2026-09-08 note below; omitted entirely when `lockout_all` is set). |
 
 All of these live in the same file as their route handlers, directly above
 them (e.g. `USERS_BODY` is defined right before `users()`/`add_user()`).
@@ -506,10 +506,9 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   `schedule_id`. Cascades to every `schedule_*` junction table.
 - `GET /schedules/<int:schedule_id>` -> `schedule_detail()` -- the
   when/window edit form, the Access (`BLOCK_ACCESS_SELECTS`) card, and a
-  category multi-select card that's **omitted entirely** (not just
-  disabled) when `lockout_all` is set, since a full lockout blocks
-  everything regardless of any category assignment. Renders
-  `SCHEDULE_DETAIL_BODY`.
+  categories card that's **omitted entirely** (not just disabled) when
+  `lockout_all` is set, since a full lockout blocks everything
+  regardless of any category assignment. Renders `SCHEDULE_DETAIL_BODY`.
 - `POST /schedules/update` -> `update_schedule()` -- same field set/
   validation as `add_schedule()`, applied to an existing row.
 - `POST /schedules/access` -> `update_schedule_access()` -- same shape
@@ -517,10 +516,22 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   schedule's own target set has no domain-count concept itself; that
   check lives on the category side).
 - `POST /schedules/categories` -> `update_schedule_categories()` --
-  form fields `schedule_id`, `category_ids` (multi-select combobox,
-  posted as a list) -- full replace of `schedule_categories` for that
-  schedule, same grant-and-revoke-are-the-same-action shape as every
-  other access-replace route in this file.
+  form fields `schedule_id`, `category_ids` (posted as a list) -- full
+  replace of `schedule_categories` for that schedule, same grant-and-
+  revoke-are-the-same-action shape as every other access-replace route
+  in this file. **Real UX bug fixed 2026-09-08**, found by live user
+  testing: the picker used to be the shared type-to-reveal combobox
+  (`data-combobox`), which only shows its full list on focus below
+  `SHOW_ALL_THRESHOLD` (8) items -- past that, nothing renders until you
+  type a name you'd already have to know. This project seeds 10
+  categories by default, so the combobox was *always* past the
+  threshold out of the box. Categories are a short, fixed,
+  admin-curated list (unlike users/groups/devices, which the combobox
+  pattern exists to scale to), so `SCHEDULE_DETAIL_BODY` now renders a
+  plain checkbox per category instead -- every one visible at once,
+  checked = blocked by this schedule. No backend change was needed: the
+  route already accepted `category_ids` as a plain list of checked
+  values.
 - `POST /schedules/override` -> `add_schedule_override()` -- Phase 12's
   "Shift mode now". Form fields `schedule_id`, `target` (single-select
   combobox, `"user:<id>"`/`"group:<id>"`/`"device:<id>"`, decoded by

@@ -940,6 +940,20 @@ got "Synced 196 domains" (matching a direct-script count of the same
 file exactly), and confirmed the category page displayed real parsed
 domain names from it.
 
+**2026-09-08, Phase 19 (schedule-categories checkbox list)**: 2 new
+tests in `tests/test_dashboard.py`.
+`test_schedule_detail_shows_every_category_as_a_checkbox_no_typing_needed`
+is the one that actually proves the fix: seeds 12 categories
+(deliberately past the combobox engine's old `SHOW_ALL_THRESHOLD` of 8)
+and asserts every single name appears directly in the rendered page
+HTML, plus that a previously-saved selection shows checked and an
+unrelated category doesn't. `test_schedule_detail_categories_empty_state`
+covers zero categories configured at all. Full suite: **819 passed, 34
+skipped** (Windows). Live-verified against the real dev database's real
+10 seeded categories (the exact scale that triggered the reported bug):
+all 10 rendered as checkboxes with no typing required, and checking one
+and saving round-tripped correctly on reload.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
 skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run

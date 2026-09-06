@@ -3467,6 +3467,50 @@ def test_update_schedule_categories_assigns_them(client, db_conn):
     ).fetchone() is not None
 
 
+def test_schedule_detail_shows_every_category_as_a_checkbox_no_typing_needed(client, db_conn):
+    # Real UX bug fixed 2026-09-08: this used to be a type-to-reveal
+    # combobox (SHOW_ALL_THRESHOLD = 8 in the shared JS engine) -- with
+    # more than 8 categories configured (this project seeds 10 by
+    # default), nothing rendered until you typed a name you'd have to
+    # already know. Categories are a small, fixed, admin-curated list
+    # (unlike users/groups/devices), so this is now a plain checkbox
+    # list showing every one regardless of count.
+    client.post(
+        "/schedules/add",
+        data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'School hours'").fetchone()["id"]
+    names = [f"Category {i}" for i in range(12)]  # more than the old SHOW_ALL_THRESHOLD of 8
+    for name in names:
+        client.post("/categories/add", data={"name": name}, headers=_auth_header())
+    checked_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Category 3'").fetchone()["id"]
+    client.post(
+        "/schedules/categories", data={"schedule_id": schedule_id, "category_ids": [str(checked_id)]},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/schedules/{schedule_id}", headers=_auth_header())
+
+    for name in names:
+        assert name.encode() in resp.data  # every category rendered directly in the HTML, not hidden behind a search
+    # The previously-saved category is checked; an unrelated one isn't.
+    unchecked_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Category 4'").fetchone()["id"]
+    assert f'value="{checked_id}" checked'.encode() in resp.data
+    assert f'value="{unchecked_id}" checked'.encode() not in resp.data
+
+
+def test_schedule_detail_categories_empty_state(client, db_conn):
+    client.post(
+        "/schedules/add",
+        data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'School hours'").fetchone()["id"]
+    resp = client.get(f"/schedules/{schedule_id}", headers=_auth_header())
+    assert b"No categories yet" in resp.data
+
+
 def test_update_schedule_access_sets_global_and_targets(client, db_conn):
     client.post(
         "/schedules/add",

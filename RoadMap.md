@@ -53,6 +53,7 @@ Pi-hole setup:
 | 16 | Cross-category domain search performance (51s → under 1s) | ✅ Done, live-verified |
 | 17 | Ad-blocking visibility: link out to AdGuard's own dashboard | ✅ Done, live-verified. In-dashboard stats integration noted as a future-phase need. |
 | 18 | Editable category subscription URLs; 4th blocklist format (full URL per line) | ✅ Done, live-verified |
+| 19 | Schedule-categories picker: combobox → checkbox list | ✅ Done, live-verified |
 
 ---
 
@@ -4006,6 +4007,46 @@ category page showed the real count and real domains, confirmed the
 edit form pre-fills the current URL, and confirmed a manual-only
 category now shows an inviting "Add one below" state instead of no
 Subscription card at all.
+
+---
+
+## Phase 19 — Schedule-categories picker: combobox → checkbox list (built 2026-09-08)
+
+The project owner reported: adding a category to a schedule required
+typing the category's name first for anything to appear at all,
+meaning they'd have to already have every category memorized.
+
+**Root cause**: the picker was the shared `data-combobox` widget (the
+same type-to-reveal engine used everywhere a user/group/device gets
+picked, built for GH #8 specifically so those lists stay usable as they
+grow past a handful of entries). Its own documented behavior: below
+`SHOW_ALL_THRESHOLD` (8) items the full list shows on focus with no
+typing needed; past that, nothing renders until you type a match. This
+project seeds 10 categories by default (Adult, Gambling, Drugs, Fraud &
+Scams, Facebook, TikTok, Twitter/X, WhatsApp, AI, Weapons) -- so the
+schedule-categories picker was past the no-typing threshold before an
+admin ever added a single category of their own.
+
+**The real fix, not a threshold tweak**: categories are a short, fixed,
+admin-curated list -- the opposite growth profile from users/groups/
+devices, which is what the combobox pattern exists to scale to in the
+first place. Raising `SHOW_ALL_THRESHOLD` would have papered over this
+one instance while leaving the underlying mismatch (a "will this ever
+have hundreds of entries" widget applied to a list that never will) in
+place. `SCHEDULE_DETAIL_BODY`'s categories card is now a plain checkbox
+per category -- every one visible at once, checked = blocked while this
+schedule is active. No backend change was needed at all:
+`update_schedule_categories()` already accepted `category_ids` as a
+plain list of checked values; only the markup changed.
+
+Verified: 2 new tests in `tests/test_dashboard.py` -- one seeds 12
+categories (deliberately past the old threshold of 8) and confirms
+every single one renders directly in the page HTML with correct
+checked/unchecked state, the other confirms the empty-categories state.
+Full suite: **819 passed, 34 skipped**. Live-verified against the real
+dev database's real 10 seeded categories: all 10 rendered as checkboxes
+with no typing, checking one and saving persisted and round-tripped
+correctly on reload.
 
 ---
 
