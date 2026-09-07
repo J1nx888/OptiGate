@@ -103,14 +103,34 @@ def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, tim
     domains = parse_hostlist(text)
 
     now = db.now_iso()
-    conn.execute("DELETE FROM category_domains WHERE category_id = ? AND source = 'subscription'", (category["id"],))
-    conn.executemany(
-        "INSERT OR IGNORE INTO category_domains (category_id, pattern, source, created_at) "
-        "VALUES (?, ?, 'subscription', ?)",
-        [(category["id"], re.escape(domain), now) for domain in domains],
-    )
-    conn.execute("UPDATE categories SET last_synced_at = ? WHERE id = ?", (now, category["id"]))
-    conn.commit()
+    # Explicit transaction, fixed 2026-09-07 (RoadMap.md's dated entry) --
+    # a real, severe performance bug found live the first time this ever
+    # ran against real subscription data at real scale (~953K domains for
+    # the largest list): `conn` opens with isolation_level=None
+    # (common/db.py), so without this, every single row of the executemany
+    # below would autocommit -- and fsync -- individually. What looked
+    # like a hang (one sync taking over 20 minutes, then colliding with
+    # another writer and raising "database is locked") was actually just
+    # hundreds of thousands of separate disk syncs. Same fix shape as
+    # common/identity.py's record_binding() -- BEGIN IMMEDIATE acquires
+    # the write lock up front rather than deferring to the first write
+    # inside, and makes the whole delete+insert+update one atomic unit
+    # (a category never ends up with a stale last_synced_at next to a
+    # half-replaced domain list if something fails partway through).
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM category_domains WHERE category_id = ? AND source = 'subscription'", (category["id"],))
+        conn.executemany(
+            "INSERT OR IGNORE INTO category_domains (category_id, pattern, source, created_at) "
+            "VALUES (?, ?, 'subscription', ?)",
+            [(category["id"], re.escape(domain), now) for domain in domains],
+        )
+        conn.execute("UPDATE categories SET last_synced_at = ? WHERE id = ?", (now, category["id"]))
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.commit()
     return len(domains)
 
 

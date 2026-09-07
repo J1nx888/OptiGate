@@ -114,6 +114,57 @@ def test_fetch_and_sync_category_raises_without_subscription_url(conn):
         category_fetch.fetch_and_sync_category(conn, category)
 
 
+def test_sync_is_one_atomic_transaction_not_thousands_of_autocommits(monkeypatch, conn):
+    """Regression for a real, severe performance bug found live
+    2026-09-07 (RoadMap.md's dated entry): `conn` opens with
+    isolation_level=None (common/db.py), so without an explicit
+    transaction, every row of the executemany INSERT autocommits (and
+    fsyncs) individually -- for the real ~953K-domain Adult list, that
+    took over 20 minutes and then collided with another writer
+    ("database is locked"). Proven here via the rollback path: a
+    mid-transaction failure must leave category_domains and
+    last_synced_at completely untouched, not partially replaced --
+    which is only possible if the delete+insert+update are genuinely
+    one atomic unit, not each committing as they go."""
+    category = _insert_category(conn, "Gambling", "https://example.invalid/gambling.txt")
+    conn.execute(
+        "INSERT INTO category_domains (category_id, pattern, source, created_at) VALUES (?, ?, 'subscription', ?)",
+        (category["id"], r"old\.example\.com", db.now_iso()),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(
+        category_fetch._OPENER, "open",
+        lambda request, timeout=None: FakeResponse(b"||bet.example.com^\n||wager.example.org^\n"),
+    )
+
+    # sqlite3.Connection's own methods are read-only on the real C type
+    # (can't monkeypatch executemany itself, on the instance or the
+    # class) -- failing inside the DELETE-to-INSERT window a different
+    # way instead: re.escape() raising partway through building the rows
+    # to insert, which happens after the real DELETE has already run
+    # (inside the transaction) but before executemany or the UPDATE ever
+    # get a chance to.
+    def boom(domain):
+        raise ValueError("simulated failure mid-transaction")
+
+    monkeypatch.setattr(category_fetch.re, "escape", boom)
+
+    with pytest.raises(ValueError):
+        category_fetch.fetch_and_sync_category(conn, category)
+
+    # The DELETE that ran before the simulated failure must have been
+    # rolled back too, along with the old row still being there --
+    # proving this, not just "the new rows never landed."
+    rows = conn.execute(
+        "SELECT pattern FROM category_domains WHERE category_id = ?", (category["id"],)
+    ).fetchall()
+    assert [r["pattern"] for r in rows] == [r"old\.example\.com"]
+    assert conn.execute(
+        "SELECT last_synced_at FROM categories WHERE id = ?", (category["id"],)
+    ).fetchone()["last_synced_at"] is None
+
+
 def test_size_cap_exceeded_raises(monkeypatch, conn):
     category = _insert_category(conn, "Huge", "https://example.invalid/huge.txt")
     monkeypatch.setattr(category_fetch, "MAX_RESPONSE_BYTES", 10)
