@@ -3651,7 +3651,13 @@ def resume_group():
 
 DEVICE_DETAIL_BODY = """
 <p><a href="{{ url_for('devices') }}">&larr; All devices</a></p>
-<h1><code>{{ d.mac_address }}</code></h1>
+<h1>{{ d.label or 'Unnamed device' }}</h1>
+<table>
+  <tr><th>MAC address</th><td><code>{{ d.mac_address }}</code></td></tr>
+  <tr><th>Current IP</th><td>{{ d.current_ip or '&mdash;' }}</td></tr>
+  <tr><th>Last seen</th><td>{{ d.network_last_seen or 'never' }}</td></tr>
+  <tr><th>Seen via</th><td>{{ d.binding_source or '&mdash;' }}</td></tr>
+</table>
 
 {% if not d.ignored %}
 <div class="card">
@@ -3717,7 +3723,24 @@ DEVICE_DETAIL_BODY = """
 @require_admin
 def device_detail(device_id: int):
     conn = get_db()
-    d = conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+    # Same correlated-subquery pattern as devices()'s own list query --
+    # devices.last_seen_at is never actually populated by anything (see
+    # common/db.py's own schema comment), so IP/last-seen/discovery
+    # source all come from device_bindings instead. Fixed 2026-09-07:
+    # this page used to show only the bare MAC address, forcing anyone
+    # troubleshooting a specific device back to the list page (Ctrl+F on
+    # 50+ rows) just to find its current IP.
+    d = conn.execute(
+        "SELECT d.*, "
+        "(SELECT ipv4_address FROM device_bindings WHERE mac_address = d.mac_address "
+        " ORDER BY last_seen_at DESC LIMIT 1) AS current_ip, "
+        "(SELECT last_seen_at FROM device_bindings WHERE mac_address = d.mac_address "
+        " ORDER BY last_seen_at DESC LIMIT 1) AS network_last_seen, "
+        "(SELECT source FROM device_bindings WHERE mac_address = d.mac_address "
+        " ORDER BY last_seen_at DESC LIMIT 1) AS binding_source "
+        "FROM devices d WHERE d.id = ?",
+        (device_id,),
+    ).fetchone()
     if d is None:
         return flash_redirect("devices", "That device no longer exists.", error=True)
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
@@ -3868,6 +3891,24 @@ GROUP_DETAIL_BODY = """
   {% endfor %}
 </table>
 </div>
+<p class="hint">
+  Add several at once below instead of opening each device individually --
+  this moves every device picked here into {{ g.name }} (clearing any
+  previous user assignment, same as picking this group from a single
+  device's own assignment dropdown), without touching its label or any
+  other setting.
+</p>
+<form class="add-form" method="post" action="{{ url_for('bulk_add_to_group') }}">
+  <input type="hidden" name="group_id" value="{{ g.id }}">
+  <div class="combobox" data-combobox data-mode="multi" data-field="device_ids" data-empty="No other devices to add.">
+    <div class="combobox-tags" data-combobox-tags></div>
+    <input type="search" class="combobox-input" data-combobox-input placeholder="Search devices&hellip;">
+    <div class="combobox-results" data-combobox-results></div>
+    <script type="application/json" data-combobox-items>{{ addable_devices_combo|tojson }}</script>
+    <script type="application/json" data-combobox-selected>[]</script>
+  </div>
+  <button class="add" type="submit">Add to {{ g.name }}</button>
+</form>
 </div>
 
 <div class="card">
@@ -3910,12 +3951,51 @@ def group_detail(group_id: int):
     active_schedules = schedule_eval.active_schedules_for_target(
         conn, datetime.now(timezone.utc), group_id=group_id
     )
+    # Excludes devices already in this group -- nothing useful about
+    # re-picking one that's already here, and it keeps the list shorter
+    # for a household with 50+ devices.
+    addable_devices = conn.execute(
+        "SELECT id, mac_address, label FROM devices WHERE group_id IS NULL OR group_id != ? "
+        "ORDER BY label IS NULL, label, mac_address",
+        (group_id,),
+    ).fetchall()
     body = render_template_string(
         GROUP_DETAIL_BODY, g=g, assigned_domains=assigned_domains,
         group_devices=group_devices, paused_device_count=paused_device_count,
         active_schedules=active_schedules,
+        addable_devices_combo=_entity_combo(addable_devices, lambda dev: dev["label"] or dev["mac_address"]),
     )
     return render("devices", body)
+
+
+@app.route("/groups/add-devices", methods=["POST"])
+@require_admin
+def bulk_add_to_group():
+    group_id = request.form.get("group_id", "")
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+    conn = get_db()
+    g = conn.execute("SELECT name FROM groups WHERE id = ?", (group_id,)).fetchone()
+    if g is None:
+        return flash_redirect("devices", "That group no longer exists.", error=True)
+    if not device_ids:
+        return flash_redirect("group_detail", "No devices selected.", error=True, group_id=group_id)
+    # Mirrors update_device()'s own "group:<id>" assignment exactly --
+    # user_id/group_id stay mutually exclusive (see
+    # _parse_device_assignment's own doc comment), and ignored is
+    # cleared since picking a real group is an explicit un-ignore, same
+    # as the single-device form already does. Label/bump_enabled/
+    # bypass_login deliberately untouched -- this only ever changes the
+    # assignment, nothing else about a device already set up.
+    conn.executemany(
+        "UPDATE devices SET user_id = NULL, group_id = ?, ignored = 0 WHERE id = ?",
+        [(group_id, device_id) for device_id in device_ids],
+    )
+    conn.commit()
+    return flash_redirect(
+        "group_detail",
+        f"Added {len(device_ids)} device{'s' if len(device_ids) != 1 else ''} to {g['name']}.",
+        group_id=group_id,
+    )
 
 
 # ==========================================================

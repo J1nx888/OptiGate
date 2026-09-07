@@ -65,15 +65,36 @@ class PeriodicTask:
             self._thread.join(timeout=self._interval * 5 + 1)
 
     def _run(self) -> None:
+        # Runs once immediately, THEN waits `interval` between every
+        # later call -- fixed 2026-09-07 (RoadMap.md's dated section,
+        # "categories not pre-seeded"): every caller of this class used
+        # to wait a full `interval` before its very first cycle ever ran
+        # (`while not self._stop.wait(interval): task()` never calls
+        # task() until the first wait elapses). Harmless at a 5s
+        # reconciliation interval, but common/category_fetch.py's own
+        # 86400s (24h) default meant category subscriptions could never
+        # actually populate until this process had been running
+        # continuously for a full day -- something that had never
+        # actually happened on the real production box, since every
+        # session so far only brought `controller` up for short test
+        # windows. The `_stop.is_set()` guard covers stop() racing in
+        # before this thread's first tick (start() returns immediately;
+        # nothing otherwise stops a stop-before-first-tick sequence from
+        # still running one cycle it shouldn't).
+        if not self._stop.is_set():
+            self._tick()
         while not self._stop.wait(self._interval):
-            try:
-                self._task()
-            except Exception as exc:  # noqa: BLE001 -- deliberately broad: any
-                # failure here must not kill the loop silently: it gets
-                # reported via on_error and the loop keeps ticking so a
-                # transient failure doesn't permanently stop the task.
-                if self._on_error is not None:
-                    self._on_error(exc)
-            else:
-                if self._on_success is not None:
-                    self._on_success()
+            self._tick()
+
+    def _tick(self) -> None:
+        try:
+            self._task()
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad: any
+            # failure here must not kill the loop silently: it gets
+            # reported via on_error and the loop keeps ticking so a
+            # transient failure doesn't permanently stop the task.
+            if self._on_error is not None:
+                self._on_error(exc)
+        else:
+            if self._on_success is not None:
+                self._on_success()

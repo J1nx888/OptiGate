@@ -28,6 +28,59 @@ def test_task_runs_on_the_given_thread_name():
     assert seen_name.get("name") == "my-custom-task"
 
 
+def test_task_runs_immediately_not_after_waiting_a_full_interval():
+    """Regression for a real bug (RoadMap.md, "categories not
+    pre-seeded"): every PeriodicTask consumer used to wait a full
+    `interval` before its very first cycle -- harmless at a 5s
+    reconciliation interval, but common/category_fetch.py's own 86400s
+    default meant category subscriptions could never populate until
+    controller had run continuously for a full day, which had never
+    actually happened. A long interval proves this isn't just "the
+    first tick happened to land inside the sleep window" -- it can only
+    pass if the first call happens near-instantly."""
+    calls = []
+    lock = threading.Lock()
+
+    def task():
+        with lock:
+            calls.append(time.monotonic())
+
+    started_at = time.monotonic()
+    pt = PeriodicTask(3600.0, task)
+    pt.start()
+    time.sleep(0.05)
+    pt.stop()
+
+    with lock:
+        count = len(calls)
+        first_call_at = calls[0] if calls else None
+    assert count == 1, f"expected exactly one immediate call within 50ms, got {count}"
+    assert first_call_at is not None and (first_call_at - started_at) < 1.0, (
+        "expected the first call within ~1s of start(), not after waiting the full 3600s interval"
+    )
+
+
+def test_stop_before_start_never_runs_the_task_at_all():
+    """The _stop.is_set() guard on the immediate call: calling stop()
+    before start() (already-covered as "safe" by lease.py's own tests,
+    for the no-thread-to-join case) sets the same Event a later start()
+    would otherwise race against -- without the guard, the new
+    immediate-first-tick behavior would run the task once anyway,
+    despite being told to stop first."""
+    calls = []
+
+    def task():
+        calls.append(1)
+
+    pt = PeriodicTask(0.02, task)
+    pt.stop()  # before start() -- see lease.py's own "stop before start is safe" coverage
+    pt.start()
+    time.sleep(0.05)
+    pt.stop()
+
+    assert calls == [], f"expected the task to never run at all, got {len(calls)} call(s)"
+
+
 def test_task_calls_repeatedly_until_stopped():
     calls = []
     lock = threading.Lock()

@@ -54,6 +54,7 @@ Pi-hole setup:
 | 17 | Ad-blocking visibility: link out to AdGuard's own dashboard | ✅ Done, live-verified. In-dashboard stats integration noted as a future-phase need. |
 | 18 | Editable category subscription URLs; 4th blocklist format (full URL per line) | ✅ Done, live-verified |
 | 19 | Schedule-categories picker: combobox → checkbox list | ✅ Done, live-verified |
+| 20 | Live post-soak-test fixes: per-device info page, bulk-add devices to a group, `PeriodicTask` immediate-first-run fix (category sync) | ✅ Done, live-verified |
 
 ---
 
@@ -1759,6 +1760,74 @@ not something exercised by ordinary bypass traffic.
 
 Soak test not yet resumed as of this section -- resuming it is the
 natural next step once the project owner is ready.
+
+### Live post-soak-test fixes (2026-09-07)
+
+Six more real issues found live while the household kept using the
+dashboard during today's investigation, worked through with Bark Home
+back on (none of these need real ARP interception to build or verify):
+
+1. **Per-device info page showed only the bare MAC address.** `/devices/<id>`
+   never queried `device_bindings` at all, unlike the devices *list*
+   page (which already had current-IP/last-seen/source from Phase 15).
+   Fixed by reusing that exact same correlated-subquery pattern, plus
+   showing the device's label as the page's own heading instead of the
+   raw MAC.
+2. **No way to bulk-add devices to a group** -- assigning many devices
+   meant opening each one individually. Added a multi-select combobox
+   (the existing shared `data-combobox` widget, `data-mode="multi"`,
+   same pattern `ACCESS_SELECTS` already uses for domain access) to the
+   group detail page, plus a new `/groups/add-devices` route that
+   updates every selected device's `user_id`/`group_id`/`ignored` in
+   one batch -- mirrors `update_device()`'s own "group:&lt;id&gt;"
+   assignment semantics exactly, without touching label/bump/
+   bypass_login on devices that already have those set.
+3. **Categories still showing no real data except AI, again** ("I
+   thought we fixed that last time"). Root cause this time was
+   different from every prior categories fix: the categories themselves
+   *were* correctly pre-seeded (10 rows, real subscription URLs) --
+   `category_fetch.sync_all_categories()` had simply never run, not
+   even once, because it's ONLY driven by `controller`'s own periodic
+   loop, default interval 86400s (24h), and `controller` has never
+   actually run continuously for a full day since this feature was
+   built -- every session so far only brought it up for short test
+   windows. Traced to a real, generic bug in `controller/periodic.py`'s
+   `PeriodicTask`: `while not self._stop.wait(interval): task()` never
+   calls `task()` until the FIRST wait elapses, meaning literally every
+   consumer of this class (category fetch, AdGuard rule sync,
+   discovery's periodic snapshot, active scan) was waiting a full
+   interval before doing anything useful even once. Fixed at the right
+   depth -- in `PeriodicTask` itself, not a category-fetch-specific
+   workaround -- so every consumer now runs once immediately on
+   `start()`, then waits `interval` between subsequent calls; a
+   `_stop.is_set()` guard covers `stop()` racing in before the first
+   tick. Live-verified: triggered a real `sync-all` against the
+   production box's actual subscription URLs (blocklistproject.github.io)
+   after the fix landed, confirming real domains actually populate.
+4. **AdGuard Home not reachable on the LAN IP.** `DASHBOARD_BIND` and
+   `ADGUARD_WEB_BIND` were both still `127.0.0.1` (the secure-by-default
+   setting) on the production box -- the project owner explicitly asked
+   for LAN-wide admin access instead, given the household's other
+   management devices. Set `DASHBOARD_BIND=0.0.0.0` on the box directly
+   (a deliberate, informed choice -- flagged first that this dashboard
+   has no TLS yet, so Basic Auth now travels in cleartext to anything on
+   the LAN, not just admin devices). `ADGUARD_WEB_BIND` addressed
+   separately once its own link-out feature (Phase 17) is revisited.
+5. Bulk-registered several more real household devices found live
+   (Orbi satellite as infrastructure alongside the gateway, a home
+   alarm system explicitly chosen as fully-excluded given its
+   safety-critical nature, two more Wyze cameras, a video doorbell, two
+   smart lightbulbs, two GE appliances) -- see the proactive-IoT-sweep
+   note above for the pattern used.
+6. Labels were missing on every device added during today's live sweep
+   -- added after the fact, once noticed.
+
+**Still open, deliberately deferred**: the "mystery domains showing as
+Everyone" visibility gap and a bulk domain-categorization tool -- real,
+substantive features that need their own design pass, not squeezed in
+alongside the above. The `optigate.home` memorable-URL + device-status
+page feature (needed before go-live, so users losing connectivity have
+somewhere to be pointed) is also still to build.
 
 ### New database tables planned
 
