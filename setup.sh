@@ -82,15 +82,61 @@ else
       ;;
   esac
 
+  # Generated silently, not asked about: this is AdGuard Home's OWN admin
+  # account (separate login surface from the dashboard above), not
+  # something used day-to-day. Real bug found live 2026-09-07 (RoadMap.md,
+  # "Soak test paused after ~15 minutes"): leaving this blank is
+  # documented as "safe, a random one gets generated" -- true for
+  # adguard/entrypoint.sh's own first-run bootstrap, but that generated
+  # value only ever lands in the adguard container's own logs, never in
+  # .env, so controller has no way to know it once the interception
+  # profile starts (its argparse just refuses to start:
+  # "--adguard-url requires --adguard-username and --adguard-password").
+  # Generating it here instead, before any container ever exists, means
+  # every service reads the exact same value from .env from the very
+  # first `docker compose up` -- no propagation gap, nothing to grep out
+  # of a log and paste back in by hand later.
+  if command -v openssl >/dev/null 2>&1; then
+    adguard_pass="$(openssl rand -base64 15)"
+  else
+    adguard_pass="$(head -c 15 /dev/urandom | base64)"
+  fi
+
   cat > .env << EOF
 LOCAL_NETWORK=${local_network}
 DASHBOARD_USER=${dash_user}
 DASHBOARD_PASSWORD=${dash_pass}
 DASHBOARD_BIND=${dash_bind}
 DASHBOARD_URL=${dashboard_url}
+ADGUARD_USERNAME=admin
+ADGUARD_PASSWORD=${adguard_pass}
 EOF
   echo
   echo "Wrote .env"
+fi
+
+# Runs regardless of whether .env was just created above or already
+# existed -- covers an existing install made before this check existed
+# (like the real production box that surfaced this bug), not just a
+# brand new one. Idempotent: only ever fills in a value that's
+# currently blank, never touches one you've since set or changed
+# (including from the dashboard's own Settings page -- this only ever
+# looks at .env, never the database).
+if grep -qE '^ADGUARD_PASSWORD=\s*$' .env 2>/dev/null; then
+  if command -v openssl >/dev/null 2>&1; then
+    adguard_pass="$(openssl rand -base64 15)"
+  else
+    adguard_pass="$(head -c 15 /dev/urandom | base64)"
+  fi
+  tmp_env="$(mktemp)"
+  sed "s|^ADGUARD_PASSWORD=.*|ADGUARD_PASSWORD=${adguard_pass}|" .env > "$tmp_env"
+  mv "$tmp_env" .env
+  if ! grep -qE '^ADGUARD_USERNAME=' .env; then
+    echo "ADGUARD_USERNAME=admin" >> .env
+  fi
+  echo "Generated a random ADGUARD_PASSWORD in .env (was blank) -- fixes a real"
+  echo "bug where controller couldn't authenticate to AdGuard once the"
+  echo "interception profile starts. See RoadMap.md's 2026-09-07 entry."
 fi
 
 echo

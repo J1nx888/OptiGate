@@ -246,7 +246,7 @@ the dashboard container).
 | `CA_ORG` | proxy (`entrypoint.sh`) | Organization name (`/O=`) baked into the generated CA certificate's subject. Not present in `.env.example`; set it directly in `docker-compose.yml`'s proxy environment block or as a shell-exported var if you want to override it. | `Parental Proxy` |
 | `CA_COMMON_NAME` | proxy (`entrypoint.sh`) | Common name (`/CN=`) baked into the generated CA certificate's subject. Same override mechanism as `CA_ORG`. | `Parental Proxy CA` |
 | `ADGUARD_USERNAME` | adguard (first-run bootstrap) + dashboard (seeds a matching DB setting, only consumed once) | AdGuard Home's own admin login username -- a separate account from this project's dashboard. | `admin` |
-| `ADGUARD_PASSWORD` | adguard (first-run bootstrap) + dashboard (seeds a matching DB setting, only consumed once) | AdGuard Home's own admin login password. If left blank, a random one is generated and printed to the adguard container's own logs (`docker compose logs adguard`) -- the dashboard won't know it either in that case; paste it into the dashboard's Settings page by hand. Must also match whatever `controller/main.py --adguard-password` is later run with. | (blank → auto-generated) |
+| `ADGUARD_PASSWORD` | adguard (first-run bootstrap), dashboard (seeds a matching DB setting, only consumed once), and controller (`interception` profile -- calls AdGuard's own API) | AdGuard Home's own admin login password. `./setup.sh` generates a real value here before anything ever starts (also self-heals an existing `.env` with this left blank -- see RoadMap.md's 2026-09-07 entry for the real bug this fixes). If you're filling in `.env` by hand instead of using `./setup.sh`, set a real value yourself -- leaving it blank still lets `adguard` boot (it self-generates one), but `controller` will then refuse to start once the interception profile is enabled, since it has no way to learn that generated value. | (blank → `./setup.sh` fills it in; genuinely blank otherwise) |
 | `ADGUARD_WEB_BIND` | adguard (`adguard/entrypoint.sh`, first run only) | Which address AdGuard Home's own admin UI binds to. `127.0.0.1` = this machine only; `0.0.0.0` = reachable from any device on the LAN. Independent of `DASHBOARD_BIND` -- this gates a second, separate admin login surface. | `127.0.0.1` |
 | `ADGUARD_SKIP_EXTRA_BLOCKLISTS` | adguard (`adguard/entrypoint.sh`, first run only) | Set to `1` to skip subscribing to the curated uBlockOrigin/uAssets domain-blocking lists (added 2026-08-30) and keep only AdGuard Home's own default filter (enabled automatically, no action needed for that part). See RoadMap.md's live-verification section for exactly which lists and why. | (blank -> lists added) |
 | `ADGUARD_FILTERS_UPDATE_INTERVAL_HOURS` | adguard (`adguard/entrypoint.sh`, first run only) | How often AdGuard itself re-checks every subscribed filter list, in hours -- `168` = once a week (AdGuard's own "Once a week" UI preset). Independent of the dashboard's "Check for filter updates now" button, which works on demand regardless. | `168` |
@@ -455,6 +455,14 @@ container's startup output (i.e. from its first-ever start — if you've
 restarted the container many times since, you may need `docker compose
 logs dashboard --since <time>` or scroll further back to find the original
 first-run output).
+
+The same applies to `docker compose logs adguard` for AdGuard Home's own
+admin login if you used Option B (manual `docker-compose`, no `./setup.sh`)
+and left `ADGUARD_PASSWORD` blank — but note that leaving it blank there
+also means `controller` will refuse to start once you enable the
+`interception` profile (see `ADGUARD_PASSWORD`'s own row in
+[Environment variables](#environment-variables)); `./setup.sh` avoids this
+scenario entirely by generating a real value up front.
 
 ### Full backup / moving to another machine
 
