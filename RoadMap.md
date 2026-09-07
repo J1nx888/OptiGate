@@ -5057,6 +5057,32 @@ unchecking re-hides both.
 `tests/test_dashboard.py`. 891 → 900 passed, 34 skipped, zero
 regressions.
 
+**Deployed to production same day -- found and fixed a second real bug
+along the way.** The new volume mount alone wasn't enough:
+`AdGuardHome.yaml` is created `root:root` mode 600, and the dashboard
+container's own non-root `proxy` user had zero access to it --
+`os.access()` confirmed `False` for both read and write immediately
+after deploying. Added a `chown root:13 + chmod 660` step to
+`adguard/entrypoint.sh`. **First attempt at that fix didn't actually
+work**: running it once and then `exec`-ing straight into the AdGuard
+binary got silently undone, confirmed via the real container's own
+startup log --
+`permcheck: changed permissions type=file path=.../AdGuardHome.yaml` --
+AdGuard Home has a built-in "permcheck" feature that unconditionally
+hardens its own config file's permissions back to `600 root:root` on
+every single startup, by design, before its own control API even comes
+up. Fixed properly by backgrounding the process and polling
+`/control/status` first in all three entrypoint code paths (matching
+the existing first-boot flow's own readiness-polling technique) before
+applying the chown/chmod, so it always runs strictly after AdGuard's
+own permcheck pass, not racing it. **Fully live-verified afterward**:
+`os.access()` now reports `True`/`True` for the real dashboard
+container, and an actual `sync_adguard_credentials()` call from inside
+that running container, against a safe copy of the real
+`AdGuardHome.yaml`, produced a hash that verified correctly -- the
+complete pipeline confirmed working end-to-end, not just each half
+independently.
+
 ---
 
 ## Cross-cutting: security-by-design
