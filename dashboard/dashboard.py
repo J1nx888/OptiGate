@@ -1156,10 +1156,24 @@ USER_DETAIL_BODY = """
 </div>
 <form class="add-form" method="post" action="{{ url_for('add_show') }}">
   <input type="hidden" name="user_id" value="{{ u.id }}">
-  <input type="url" name="url" placeholder="https://www.crunchyroll.com/series/GYE5K0XVR/ace-attorney" required style="flex:1; min-width:280px;">
+  {% if all_approved_shows %}
+  <div class="combobox" data-combobox data-mode="single" data-empty="No other shows approved yet." style="max-width:320px;">
+    <div class="combobox-current" data-combobox-current></div>
+    <input type="search" class="combobox-input" data-combobox-input placeholder="Already approved for someone else&hellip;">
+    <div class="combobox-results" data-combobox-results></div>
+    <input type="hidden" name="existing_series_id" data-combobox-hidden value="">
+    <script type="application/json" data-combobox-items>{{ all_approved_shows|tojson }}</script>
+  </div>
+  <span class="hint" style="margin:0;">&mdash; or &mdash;</span>
+  {% endif %}
+  <input type="url" name="url" placeholder="Paste a new Crunchyroll series URL" style="flex:1; min-width:280px;">
   <input type="text" name="name" placeholder="Name (auto-filled, editable)">
   <button class="add" type="submit">Approve show</button>
 </form>
+<p class="hint">
+  Picking one already approved for someone else skips typing/re-resolving
+  the URL -- if both a picked show and a URL are given, the picked one wins.
+</p>
 </div>
 
 <div class="card">
@@ -1200,10 +1214,22 @@ def user_detail(user_id: int):
     active_schedules = schedule_eval.active_schedules_for_target(
         conn, datetime.now(timezone.utc), user_id=user_id
     )
+    # Real live-testing feedback (RoadMap.md's dated entry): approving a
+    # show for a second kid meant re-pasting/re-resolving the exact same
+    # Crunchyroll URL a first kid had already been approved for. Every
+    # OTHER user's already-approved show (deduped by series_id, excluding
+    # this user's own -- no point offering to "re-approve" what's already
+    # here) becomes a pickable option, skipping the URL entirely; see
+    # add_show()'s own handling of the resulting existing_series_id field.
+    all_approved_shows = conn.execute(
+        "SELECT DISTINCT series_id AS id, series_name FROM user_shows "
+        "WHERE user_id != ? ORDER BY series_name", (user_id,)
+    ).fetchall()
     body = render_template_string(
         USER_DETAIL_BODY, u=u, assigned_domains=assigned_domains, shows=shows,
         user_devices=user_devices, paused_device_count=paused_device_count,
         active_schedules=active_schedules, global_domains=_global_domains(conn),
+        all_approved_shows=_entity_combo(all_approved_shows, lambda s: s["series_name"]),
     )
     return render("users", body)
 
@@ -1211,14 +1237,31 @@ def user_detail(user_id: int):
 @app.route("/shows/add", methods=["POST"])
 @require_admin
 def add_show():
+    """Two ways in: paste a Crunchyroll URL (parsed below, as always), or
+    pick a show already approved for a DIFFERENT user (existing_series_id,
+    from user_detail()'s own all_approved_shows combobox -- real
+    live-testing feedback, RoadMap.md's dated entry, that approving the
+    same show for a second kid meant re-pasting/re-resolving the exact
+    same URL). The picked show wins if both are somehow submitted at
+    once -- an exact match on an already-known series_id needs no URL
+    parsing or title lookup at all."""
     user_id = request.form.get("user_id", "")
-    url = request.form.get("url", "")
-    override_name = request.form.get("name", "").strip()
-    series_id, suggested_name = parse_series_url(url)
-    if series_id is None:
-        return flash_redirect("user_detail", suggested_name, error=True, user_id=user_id)
-    name = override_name or cr_api.series_title(series_id) or suggested_name
+    existing_series_id = request.form.get("existing_series_id", "").strip()
     conn = get_db()
+    if existing_series_id:
+        existing = conn.execute(
+            "SELECT series_name FROM user_shows WHERE series_id = ? LIMIT 1", (existing_series_id,)
+        ).fetchone()
+        if existing is None:
+            return flash_redirect("user_detail", "That show is no longer on record.", error=True, user_id=user_id)
+        series_id, name = existing_series_id, existing["series_name"]
+    else:
+        url = request.form.get("url", "")
+        override_name = request.form.get("name", "").strip()
+        series_id, suggested_name = parse_series_url(url)
+        if series_id is None:
+            return flash_redirect("user_detail", suggested_name, error=True, user_id=user_id)
+        name = override_name or cr_api.series_title(series_id) or suggested_name
     conn.execute(
         "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?,?,?) "
         "ON CONFLICT(user_id, series_id) DO UPDATE SET series_name = excluded.series_name",
@@ -1415,6 +1458,16 @@ DOMAINS_BODY = """
   <span class="badge mode-bump">bump</span> fully decrypted, path/show rules apply &nbsp;
   <span class="badge mode-trusted">trusted</span> always passed through, unchecked
 </p>
+{% if domains %}
+<details id="domainBulkAccess">
+<summary id="domainBulkAccessSummary">Bulk-assign access &mdash; check domains below to act on several at once.</summary>
+<p class="hint">Pick who gets the checked domains here, then apply -- replaces the ENTIRE access grant for every one checked (same as editing each one's own Manage page, just all at once).</p>
+<form id="bulkDomainAccessForm" class="add-form" method="post" action="{{ url_for('bulk_update_domain_access') }}">
+""" + ACCESS_SELECTS + """
+  <button class="add" type="submit" disabled>Apply to checked domains</button>
+</form>
+</details>
+{% endif %}
 {% if domains %}<input type="search" data-filter-table="domainsTable" placeholder="Search domains&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
 <table id="domainsTable">
@@ -1445,11 +1498,33 @@ DOMAINS_BODY = """
 <script>
 (function () {
   var selectAll = document.getElementById("domainSelectAll");
+  var summary = document.getElementById("domainBulkAccessSummary");
+
+  // Same "start disabled, enable once something's checked" pattern as
+  // the Devices page's own toolbar -- see that page's comment (RoadMap.md's
+  // dated entry, referencing Microsoft Entra's admin console).
+  function updateBulkAccessState() {
+    var n = document.querySelectorAll(".bulk-domain-check:checked").length;
+    var applyBtn = document.querySelector("#bulkDomainAccessForm button[type=submit]");
+    if (applyBtn) applyBtn.disabled = n === 0;
+    if (summary) {
+      summary.textContent = n === 0
+        ? "Bulk-assign access — check domains below to act on several at once."
+        : "Bulk-assign access — " + n + " domain" + (n === 1 ? "" : "s") + " selected.";
+    }
+  }
+
   if (selectAll) {
     selectAll.addEventListener("change", function () {
       document.querySelectorAll(".bulk-domain-check").forEach(function (box) { box.checked = selectAll.checked; });
+      updateBulkAccessState();
     });
   }
+  document.querySelectorAll(".bulk-domain-check").forEach(function (box) {
+    box.addEventListener("change", updateBulkAccessState);
+  });
+  updateBulkAccessState();
+
   var bulkForm = document.getElementById("bulkDomainAccessForm");
   if (bulkForm) {
     bulkForm.addEventListener("submit", function (event) {
@@ -1476,17 +1551,6 @@ DOMAINS_BODY = """
 })();
 </script>
 </div>
-
-{% if domains %}
-<div class="card">
-<h2>Bulk-assign access</h2>
-<p class="hint">Check domains in the table above, pick who gets them here, then apply -- replaces the ENTIRE access grant for every domain checked (same as editing each one's own Manage page, just all at once).</p>
-<form id="bulkDomainAccessForm" class="add-form" method="post" action="{{ url_for('bulk_update_domain_access') }}">
-""" + ACCESS_SELECTS + """
-  <button class="add" type="submit">Apply to checked domains</button>
-</form>
-</div>
-{% endif %}
 
 <div class="card">
 <h2>Add a domain</h2>
@@ -2287,6 +2351,22 @@ DEVICES_BODY = """
   this list small and deliberate. Everything else will get that domain's
   whole-domain treatment instead. Nothing here is enforced yet.
 </p>
+{% if devices %}
+<div class="toolbar" id="deviceBulkToolbar">
+  <form id="bulkDeviceGroupForm" class="inline" method="post" action="{{ url_for('bulk_assign_devices_to_group') }}">
+    <select name="group_id" required {{ 'disabled' if not groups }}>
+      <option value="" selected disabled>Assign to group&hellip;</option>
+      {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+    </select>
+    <button class="btn small" type="submit" disabled {{ 'title="Add a group first"' if not groups }}>Assign</button>
+  </form>
+  <form id="bulkDeviceDeleteForm" class="inline" method="post" action="{{ url_for('bulk_delete_devices') }}"
+        onsubmit="return confirm('Delete every checked device? This cannot be undone.');">
+    <button class="danger small" type="submit" disabled>Delete</button>
+  </form>
+  <span class="hint" id="deviceBulkCount" style="margin:0;">Check devices below to act on several at once.</span>
+</div>
+{% endif %}
 {% if devices %}<input type="search" data-filter-table="devicesTable" placeholder="Search devices&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
 <table id="devicesTable">
@@ -2347,11 +2427,37 @@ DEVICES_BODY = """
 <script>
 (function () {
   var selectAll = document.getElementById("deviceSelectAll");
+  var countLabel = document.getElementById("deviceBulkCount");
+  var toolbar = document.getElementById("deviceBulkToolbar");
+
+  // Real live-testing feedback (RoadMap.md's dated entry, referencing
+  // Microsoft Entra's own admin console as the model): moved the bulk
+  // actions here, above the table, from a separate card below it --
+  // and the action buttons now start disabled, enabling only once
+  // something's actually checked, same "greyed out until a selection
+  // exists" pattern Entra's own device/user lists use.
+  function updateToolbarState() {
+    if (!toolbar) return;
+    var n = document.querySelectorAll(".bulk-device-check:checked").length;
+    toolbar.querySelectorAll("button[type=submit]").forEach(function (btn) { btn.disabled = n === 0; });
+    if (countLabel) {
+      countLabel.textContent = n === 0
+        ? "Check devices below to act on several at once."
+        : n + " device" + (n === 1 ? "" : "s") + " selected.";
+    }
+  }
+
   if (selectAll) {
     selectAll.addEventListener("change", function () {
       document.querySelectorAll(".bulk-device-check").forEach(function (box) { box.checked = selectAll.checked; });
+      updateToolbarState();
     });
   }
+  document.querySelectorAll(".bulk-device-check").forEach(function (box) {
+    box.addEventListener("change", updateToolbarState);
+  });
+  updateToolbarState();
+
   function wireBulkForm(formId) {
     var form = document.getElementById(formId);
     if (!form) return;
@@ -2382,25 +2488,6 @@ DEVICES_BODY = """
 })();
 </script>
 </div>
-
-{% if devices %}
-<div class="card">
-<h2>Bulk actions</h2>
-<p class="hint">Check devices in the table above, then act on all of them at once.</p>
-<form id="bulkDeviceGroupForm" class="add-form" method="post" action="{{ url_for('bulk_assign_devices_to_group') }}">
-  <select name="group_id" required>
-    <option value="" selected disabled>Assign to group&hellip;</option>
-    {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
-  </select>
-  <button class="add" type="submit" {{ 'disabled' if not groups }}>Assign checked devices</button>
-</form>
-{% if not groups %}<p class="hint">No groups yet -- add one above first.</p>{% endif %}
-<form id="bulkDeviceDeleteForm" class="add-form" method="post" action="{{ url_for('bulk_delete_devices') }}"
-      onsubmit="return confirm('Delete every checked device? This cannot be undone.');">
-  <button class="danger" type="submit">Delete checked devices</button>
-</form>
-</div>
-{% endif %}
 
 <div class="card">
 <h2>Add a device</h2>
@@ -4408,6 +4495,16 @@ REPORT_BODY = """
 
 <div class="card">
 <h2>Recent activity</h2>
+<p class="hint">
+  "Device" shows the resolved device (label + MAC) when known; for a
+  domain that was never assigned to a recognized device, it falls back
+  to the raw source IP address instead -- use that to track down which
+  physical device it was (check your router's client list) and decide
+  whether to add it or leave it offline. IP capture currently only
+  covers the DNS-tier block page; a device already going through the
+  Squid proxy tier will show its resolved identity as before, or a bare
+  dash for a very old row from before this was added.
+</p>
 <div class="table-scroll">
 <table>
   <tr><th>Time (UTC)</th><th>User</th><th>Device</th><th>Domain</th><th>Show / Path</th><th>Result</th><th></th></tr>
@@ -4418,6 +4515,10 @@ REPORT_BODY = """
     <td>
       {% if row.device_id %}
       <a href="{{ url_for('device_detail', device_id=row.device_id) }}">{{ row.device_label or row.device_mac or ('#' ~ row.device_id) }}</a>
+      {% if row.device_mac %}<br><code class="hint" style="font-size:.8em;">{{ row.device_mac }}</code>{% endif %}
+      {% elif row.ip_address %}
+      <code>{{ row.ip_address }}</code>
+      <br><a class="hint" style="font-size:.8em;" href="{{ url_for('devices') }}">Not a known device -- add it?</a>
       {% else %}&mdash;{% endif %}
     </td>
     <td><code>{{ row.domain }}</code></td>
@@ -5039,9 +5140,31 @@ SETTINGS_BODY = """
   Its own separate admin login (not this dashboard's) -- full query log, blocked-domain stats, and charts this project doesn't duplicate. Tighter integration (pulling those numbers into this dashboard directly) is a planned future improvement, not built yet.
   <strong>Only reachable if <code>ADGUARD_WEB_BIND</code> in <code>.env</code> is set to something other than the default <code>127.0.0.1</code></strong> (same idea as this dashboard's own <code>DASHBOARD_BIND</code>) -- otherwise this link only works from the Beelink itself, not your browser.
 </p>
+{% if adguard_password %}
+<p class="hint">
+  Log in there with <strong>{{ adguard_username }}</strong> / <code>{{ adguard_password }}</code>.
+  This is a completely separate login from this dashboard's own admin
+  password above -- changing one never changes the other (a real,
+  known gap; see the connection settings below to change AdGuard's own
+  credentials here, which updates what THIS dashboard uses to talk to
+  it, but does not by itself change AdGuard's actual stored password --
+  see the hint on that field).
+</p>
+{% endif %}
 {% endif %}
 <details {{ 'open' if not adguard_configured }}>
 <summary>Connection settings</summary>
+<p class="hint">
+  Tells THIS dashboard what to use when it talks to AdGuard's API --
+  it does NOT change AdGuard's own actual stored password (AdGuard
+  Home has no API to do that; the real value lives in its own config
+  file, only ever set at first boot). Enter AdGuard's REAL current
+  username/password here to match it, not a new one you want it to
+  become -- entering the wrong value here just breaks every
+  AdGuard-dependent feature (filter updates, SafeSearch, category
+  blocking, this project's own domain-blocking sync) until it's fixed
+  back.
+</p>
 <form class="add-form" method="post" action="{{ url_for('update_adguard_settings') }}">
   <input type="text" name="adguard_url" value="{{ adguard_url }}" placeholder="http://127.0.0.1:3000" style="flex:1; min-width:280px;">
   <input type="text" name="adguard_username" value="{{ adguard_username }}" placeholder="Username">
@@ -5338,7 +5461,7 @@ def settings_page():
         SETTINGS_BODY, local_network=local_network, admin_username=admin_username,
         block_page_mode=block_page_mode, device_stale_days=device_stale_days,
         stale_devices=stale_devices, adguard_url=adguard_url,
-        adguard_username=adguard_username,
+        adguard_username=adguard_username, adguard_password=adguard_password,
         adguard_configured=bool(adguard_url and adguard_password),
         adguard_ui_url=_adguard_ui_url(adguard_url),
         household_time_zone=household_time_zone,

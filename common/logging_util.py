@@ -40,6 +40,7 @@ def log_access(
     series_id: str | None = None,
     series_name: str | None = None,
     device_id: int | None = None,
+    ip_address: str | None = None,
 ) -> None:
     """device_id (added 2026-08-31, see RoadMap.md's dated entry): which
     `devices` row made this request, when known -- lets the Report page
@@ -51,6 +52,17 @@ def log_access(
     the dedupe window should still collapse the same way it always has;
     device_id is purely a stored column on whichever row wins the dedupe
     check, not a new dimension of "is this a new event".
+
+    ip_address (added 2026-09-07, RoadMap.md's dated entry): the raw
+    source IP, independent of whether device_id resolved to anything --
+    real live-testing feedback was that a row for a genuinely never-seen
+    device gave an admin nothing to track it down by. Optional and
+    defaults to None so every existing caller keeps working unchanged;
+    not yet threaded through every call site (see common/db.py's own
+    schema comment for which ones currently pass it). Same "descriptive
+    metadata on the row, not a new dedupe dimension" treatment as
+    device_id -- a device's IP moving between requests within the dedupe
+    window still collapses the same way it always has.
     """
     cutoff_iso = iso_secs_ago(DEDUPE_WINDOW_SECONDS)
     # series_id is part of the dedupe key (SQLite's `IS` is null-safe, so two
@@ -72,8 +84,8 @@ def log_access(
         return
     conn.execute(
         "INSERT INTO access_log "
-        "(ts, user_id, username, domain, path, series_id, series_name, allowed, reason, device_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(ts, user_id, username, domain, path, series_id, series_name, allowed, reason, device_id, ip_address) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             now_iso(),
             user_id,
@@ -85,5 +97,6 @@ def log_access(
             1 if allowed else 0,
             reason,
             device_id,
+            ip_address,
         ),
     )

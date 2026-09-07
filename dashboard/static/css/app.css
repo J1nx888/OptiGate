@@ -281,6 +281,26 @@ form.inline { display: inline; }
   flex-wrap: wrap;
   align-items: center;
 }
+/* A row of bulk-action controls sitting above a checkbox-driven list --
+   Entra/Intune-style toolbar (project owner's own reference, RoadMap.md's
+   dated entry): grouped visually, buttons start disabled until a row is
+   checked (each page's own inline <script> toggles that). */
+.toolbar {
+  display: flex;
+  gap: .6rem;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: .5rem .7rem;
+  margin-bottom: .6rem;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.toolbar form.inline { display: flex; gap: .4rem; align-items: center; }
+/* Global -- a disabled button anywhere in this app (not just the
+   toolbar above) should visibly look inert; this was silently missing
+   before, including on the pre-existing "Clean up now" button. */
+button[disabled], .btn[disabled] { opacity: .5; cursor: not-allowed; }
 input[type=text], input[type=url], input[type=password], input[type=search], input[type=number], select {
   padding: .5rem .65rem;
   border: 1px solid var(--border);

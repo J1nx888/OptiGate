@@ -155,6 +155,7 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
             logging_util.log_access(
                 conn, user_id=user_id, username=username, domain=host, path=None,
                 allowed=False, reason="dns_tier_denied", device_id=device_id,
+                ip_address=self.client_address[0],
             )
             conn.commit()
         except Exception:

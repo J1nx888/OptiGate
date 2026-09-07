@@ -512,7 +512,18 @@ CREATE TABLE IF NOT EXISTS access_log (
     -- Set when the kid-facing /blocked page's "Request approval" button is
     -- used against this row; cleared again once an admin acts on it via
     -- approve_from_report(). NULL = no outstanding request.
-    approval_requested_at TEXT
+    approval_requested_at TEXT,
+    -- Added 2026-09-07 (RoadMap.md's dated entry): the raw source IP,
+    -- captured independently of device_id -- real live-testing feedback
+    -- was that a row for a genuinely never-seen device (device_id NULL,
+    -- no device_bindings match at request time) gave an admin nothing at
+    -- all to track it down by, which is exactly the case where "add it
+    -- or keep it offline" matters most. Populated best-effort (see
+    -- common/logging_util.py's log_access() -- optional kwarg, every
+    -- existing caller keeps working unchanged); not currently wired into
+    -- every log_access() call site (see that module's own comment on
+    -- which ones are covered so far).
+    ip_address  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_log_ts ON access_log(ts DESC);
@@ -553,6 +564,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE access_log ADD COLUMN approval_requested_at TEXT")
     if "device_id" not in columns:
         conn.execute("ALTER TABLE access_log ADD COLUMN device_id INTEGER")
+    if "ip_address" not in columns:
+        conn.execute("ALTER TABLE access_log ADD COLUMN ip_address TEXT")
 
     device_columns = {row["name"] for row in conn.execute("PRAGMA table_info(devices)")}
     if "last_seen_at" not in device_columns:

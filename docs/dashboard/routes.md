@@ -303,16 +303,31 @@ admin's next action is one edit + submit rather than starting from scratch:
   note) -- the Users list's own "N assigned" count already included
   these, but this page used to show nothing for a brand-new user beyond
   a vague aside; see that template constant's own comment in
-  `dashboard.py`. Renders `USER_DETAIL_BODY`. Redirects to
+  `dashboard.py`. **Also since 2026-09-07**: computes `all_approved_shows`
+  -- every OTHER user's already-approved Crunchyroll shows (`user_shows`,
+  deduped by `series_id`, excluding this user's own), fed to a combobox
+  next to the add-show form so approving the same show for a second kid
+  doesn't require re-pasting/re-resolving the same URL (see `/shows/add`
+  below). Renders `USER_DETAIL_BODY`. Redirects to
   `users` with an error flash if the user id doesn't exist.
-- `POST /shows/add` -> `add_show()` -- form fields `user_id`, `url` (a
-  Crunchyroll series URL), `name` (optional override). Parses the URL with
-  `parse_series_url()` (module-level regex `SERIES_URL_RE`, ~line 450) to
-  extract a series id + slug-derived name; on parse failure, flashes the
-  parse error back to `user_detail`. On success, looks up the real title via
-  `cr_api.series_title(series_id)` (falls back to the slug-derived name, or
-  the admin's override if given), then upserts into `user_shows` (`ON
-  CONFLICT(user_id, series_id) DO UPDATE SET series_name = excluded.series_name`).
+- `POST /shows/add` -> `add_show()` -- form fields `user_id`, plus EITHER
+  `existing_series_id` OR `url` (a Crunchyroll series URL) + `name`
+  (optional override). **`existing_series_id` added 2026-09-07
+  (RoadMap.md's dated entry)** -- real live-testing feedback that
+  approving the same show for a second kid meant re-pasting/re-resolving
+  the exact same URL a first kid was already approved for; set from
+  `user_detail()`'s own combobox of every OTHER user's already-approved
+  shows. When present, looks up that `series_id`'s existing
+  `series_name` directly from `user_shows` (error-flashed if it's no
+  longer on record) and skips URL parsing/`cr_api` entirely -- wins over
+  a submitted `url` if somehow both are present. Otherwise parses `url`
+  with `parse_series_url()` (module-level regex `SERIES_URL_RE`, ~line
+  450) to extract a series id + slug-derived name; on parse failure,
+  flashes the parse error back to `user_detail`. On success, looks up
+  the real title via `cr_api.series_title(series_id)` (falls back to the
+  slug-derived name, or the admin's override if given). Either path
+  upserts into `user_shows` (`ON CONFLICT(user_id, series_id) DO UPDATE
+  SET series_name = excluded.series_name`).
 - `POST /shows/remove` -> `remove_show()` -- form fields `user_id`,
   `series_id`. Deletes from `user_shows`. Redirects to `user_detail`.
 
@@ -588,7 +603,16 @@ this dashboard route never talks to either enforcement path directly.
   involved, even though `device_id` was already being written
   (2026-08-31, GH #9). `LEFT` (not `INNER`) so a since-deleted device's
   historical rows still show, just without the extra column filled in.
-  Renders `REPORT_BODY`.
+  **Same-day follow-up**: when `device_id` is genuinely `NULL` (never
+  resolved to any `devices` row at all, not just a deleted one -- the
+  case that actually matters most for "should I add this device or
+  leave it offline"), the Device column falls back to
+  `access_log.ip_address` (new column, see `docs/database/schema.md`)
+  instead of a bare dash. That column is populated best-effort via
+  `logging_util.log_access()`'s new optional `ip_address` kwarg --
+  currently only `dashboard/block_page_server.py` passes it; Squid's own
+  helpers are a tracked follow-up, not wired in yet (RoadMap.md's dated
+  entry). Renders `REPORT_BODY`.
   - `?status=` (`blocked`/`allowed`) -- unchanged.
   - **Who/what filter, reworked 2026-08-31 (GH #9)**: the plain
     `<select name="user">` was replaced with the same shared combobox
@@ -990,6 +1014,23 @@ the project owner asked for, not only an operational-health trail.
   something other than its secure-by-default `127.0.0.1` -- the
   Settings page states this explicitly next to the link rather than
   silently producing a link that fails for most default setups.
+  **Since 2026-09-07** (real live-testing feedback -- "the AdGuard link
+  works, but I don't know the username/password to use"): the same card
+  reveals the actual stored `adguard_username`/`adguard_password`
+  plainly next to the link -- the plaintext password was already sitting
+  in that setting the whole time (needed to replay as HTTP Basic Auth
+  against AdGuard's own API, see `common/adguard_client.py`), just never
+  shown back to the admin. Also clarifies explicitly that this is a
+  SEPARATE login from the dashboard's own admin password -- changing one
+  never changes the other. Investigated live against the real production
+  AdGuard instance (v0.107.79) whether a real unification was possible:
+  fetched AdGuard's own OpenAPI spec and confirmed `PUT /control/
+  profile/update`'s `ProfileInfo` schema has no password field at all --
+  AdGuard Home's REST API genuinely cannot change its own password; only
+  editing `AdGuardHome.yaml`'s bcrypt hash directly (plus a restart) can,
+  same as the earlier `ADGUARD_WEB_BIND` fix. Full unification (the
+  dashboard writing that file directly, plus a coordinated AdGuard
+  restart) is tracked as a future item, not built here.
 - `POST /settings/optigate-hostname` -> `update_optigate_hostname()`
   (added 2026-09-07, RoadMap.md's dated entry -- the `optigate.home`
   memorable-URL feature) -- form field `optigate_hostname_prefix`,

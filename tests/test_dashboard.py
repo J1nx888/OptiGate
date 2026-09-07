@@ -645,7 +645,27 @@ def test_report_page_shows_which_device_a_blocked_row_came_from(client, db_conn)
 
     assert resp.status_code == 200
     assert b"Kitchen Tablet" in resp.data
+    assert b"aa:bb:cc:dd:ee:60" in resp.data
     assert f'href="/devices/{device_id}"'.encode() in resp.data
+
+
+def test_report_page_falls_back_to_raw_ip_for_a_never_recognized_device(client, db_conn):
+    """Same live-testing feedback as the test above -- the OTHER half:
+    when device_id is NULL (never resolved to any devices row at all,
+    not just a deleted one), the raw source IP (RoadMap.md's dated
+    entry, access_log.ip_address) is the only thing left to track the
+    device down by."""
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, ip_address) "
+        "VALUES (datetime('now'), NULL, '(unauthenticated)', 'netflix.com', NULL, 0, 'dns_tier_denied', ?)",
+        ("192.168.1.77",),
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"192.168.1.77" in resp.data
 
 
 def test_report_page_shows_dash_for_a_row_with_no_device(client, db_conn):
@@ -867,6 +887,93 @@ def test_add_show_uses_cr_api_title_when_mocked(client, db_conn, monkeypatch):
     )
     row = db_conn.execute("SELECT * FROM user_shows WHERE user_id = ?", (user_id,)).fetchone()
     assert row["series_name"] == "Real CR Title"
+
+
+def test_user_detail_lists_shows_approved_for_other_users_as_pickable(client, db_conn):
+    """Real live-testing feedback (RoadMap.md's dated entry): approving a
+    show for a second kid meant re-pasting/re-resolving the exact same
+    Crunchyroll URL a first kid had already been approved for."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    client.post("/users/add", data={"username": "kid2", "password": "pw"}, headers=_auth_header())
+    kid1 = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    kid2 = db_conn.execute("SELECT id FROM users WHERE username = 'kid2'").fetchone()["id"]
+    client.post(
+        "/shows/add",
+        data={"user_id": kid1, "url": "https://www.crunchyroll.com/series/GYE5K0XVR/ace-attorney", "name": "Ace Attorney"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/users/{kid2}", headers=_auth_header())
+    assert b"Ace Attorney" in resp.data
+    assert b"GYE5K0XVR" in resp.data
+
+    # kid1's own page must NOT offer their own already-approved show back
+    # to themselves as a "pick an existing one" option -- with no OTHER
+    # user's show to offer, the picker doesn't render at all (still shows
+    # GYE5K0XVR in their OWN approved-shows table above, just not as a
+    # pickable combobox item).
+    resp = client.get(f"/users/{kid1}", headers=_auth_header())
+    assert b"Already approved for someone else" not in resp.data
+
+
+def test_add_show_via_existing_series_id_skips_url_parsing_entirely(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    client.post("/users/add", data={"username": "kid2", "password": "pw"}, headers=_auth_header())
+    kid1 = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    kid2 = db_conn.execute("SELECT id FROM users WHERE username = 'kid2'").fetchone()["id"]
+    client.post(
+        "/shows/add",
+        data={"user_id": kid1, "url": "https://www.crunchyroll.com/series/GYE5K0XVR/ace-attorney", "name": "Ace Attorney"},
+        headers=_auth_header(),
+    )
+
+    resp = client.post(
+        "/shows/add", data={"user_id": kid2, "existing_series_id": "GYE5K0XVR"}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT * FROM user_shows WHERE user_id = ?", (kid2,)).fetchone()
+    assert row["series_id"] == "GYE5K0XVR"
+    assert row["series_name"] == "Ace Attorney"
+
+
+def test_add_show_existing_series_id_wins_over_a_submitted_url(client, db_conn):
+    """Real UX guard: if both fields somehow arrive together, the exact
+    already-known match wins -- no ambiguity about which one "really"
+    got approved."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    client.post("/users/add", data={"username": "kid2", "password": "pw"}, headers=_auth_header())
+    kid1 = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    kid2 = db_conn.execute("SELECT id FROM users WHERE username = 'kid2'").fetchone()["id"]
+    client.post(
+        "/shows/add",
+        data={"user_id": kid1, "url": "https://www.crunchyroll.com/series/GYE5K0XVR/ace-attorney", "name": "Ace Attorney"},
+        headers=_auth_header(),
+    )
+
+    client.post(
+        "/shows/add",
+        data={
+            "user_id": kid2, "existing_series_id": "GYE5K0XVR",
+            "url": "https://www.crunchyroll.com/series/ZZZZZZZZ/some-other-show",
+        },
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT * FROM user_shows WHERE user_id = ?", (kid2,)).fetchone()
+    assert row["series_id"] == "GYE5K0XVR"
+
+
+def test_add_show_unknown_existing_series_id_shows_error(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+
+    resp = client.post(
+        "/shows/add", data={"user_id": user_id, "existing_series_id": "NOTREAL1"}, headers=_auth_header()
+    )
+
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM user_shows WHERE user_id = ?", (user_id,)).fetchone() is None
 
 
 def test_remove_show_deletes_row(client, db_conn):
@@ -1369,6 +1476,28 @@ def test_update_adguard_settings_saves_url_username_password(client, db_conn):
     assert db_mod.get_setting(db_conn, "adguard_url") == "http://127.0.0.1:3000"
     assert db_mod.get_setting(db_conn, "adguard_username") == "admin"
     assert db_mod.get_setting(db_conn, "adguard_password") == "hunter2"
+
+
+def test_settings_page_reveals_the_actual_adguard_credentials(client, db_conn):
+    """Real live-testing feedback (RoadMap.md's dated entry): "the
+    AdGuard link works, but I don't know the username/password to use"
+    -- the plaintext password was already stored (needed to replay as
+    HTTP Basic Auth against AdGuard's own API), just never shown back to
+    the admin who forgot it."""
+    import db as db_mod
+    db_mod.set_setting(db_conn, "adguard_url", "http://127.0.0.1:3000")
+    db_mod.set_setting(db_conn, "adguard_username", "admin")
+    db_mod.set_setting(db_conn, "adguard_password", "s3cr3t-pw")
+    db_conn.commit()
+
+    resp = client.get("/settings", headers=_auth_header())
+
+    assert b"s3cr3t-pw" in resp.data
+
+
+def test_settings_page_omits_adguard_credentials_when_not_configured(client, db_conn):
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Log in there with" not in resp.data
 
 
 def test_update_adguard_settings_blank_password_keeps_current(client, db_conn):

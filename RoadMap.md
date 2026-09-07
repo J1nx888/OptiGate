@@ -4857,6 +4857,119 @@ alongside the above:
 
 ---
 
+## Live-testing round 3: AdGuard credentials, IP tracing, Crunchyroll show reuse, bulk-actions toolbars (2026-09-07)
+
+Continued the same day, from screenshots of Microsoft Entra's own admin
+console (project owner's own reference for item 3 below) plus more real
+use of the dashboard itself:
+
+1. **"The AdGuard link works, but I don't know the username/password...
+   changing the dashboard password didn't change AdGuard's."**
+   Investigated live against the real production AdGuard instance
+   (v0.107.79) whether the two logins could genuinely be unified: fetched
+   AdGuard's own OpenAPI spec for that exact version and confirmed
+   `PUT /control/profile/update`'s `ProfileInfo` schema has only
+   `name`/`language`/`theme` -- **no password field exists in AdGuard's
+   REST API at all**. A real password change is only possible by editing
+   `AdGuardHome.yaml`'s bcrypt hash directly and restarting the container
+   (confirmed via `docker exec`, same technique used for the earlier
+   `ADGUARD_WEB_BIND` fix) -- genuine unification would need the
+   dashboard container to have write access to that config volume plus a
+   coordinated restart, real infrastructure work, not a quick patch (see
+   "tracked for later" below). Shipped the achievable part now instead:
+   the Settings page reveals the actual stored AdGuard username/password
+   plainly next to the "Open AdGuard's own dashboard" link -- the
+   plaintext value was already sitting in the `adguard_password` setting
+   the whole time (needed to replay as HTTP Basic Auth against AdGuard's
+   API), just never shown back to the admin who forgot it -- plus an
+   explicit hint on the connection-settings form clarifying it updates
+   what THIS dashboard uses to authenticate, never AdGuard's actual
+   stored credential.
+2. **Report page's new Device column (round 2, above) showed empty for
+   the row the project owner was actually looking at** -- traced to that
+   one row genuinely having `device_id IS NULL` (my own test traffic
+   from a loopback curl during round 2's own live verification, which
+   has no `device_bindings` match). Real gap this surfaced: `access_log`
+   had no raw-IP column at all, so a genuinely never-recognized device
+   left literally nothing to trace it by -- exactly the case the project
+   owner said mattered most ("help track down the failing device to make
+   a decision on adding it or keeping it offline"). Added
+   `access_log.ip_address` (new migration in `common/db.py`'s
+   `_migrate()`), a new optional `ip_address` kwarg on
+   `common/logging_util.py`'s `log_access()` (default `None`, every
+   existing call site keeps working unchanged, not part of the dedupe
+   key -- same treatment as `device_id`), wired into
+   `dashboard/block_page_server.py`'s `_log_block()` for now (the DNS-
+   tier path most likely to represent a truly unrecognized device). The
+   Report page's Device column now shows the resolved device's label+MAC
+   when known, or falls back to the raw IP with an "add it?" link when
+   not. **Not yet wired into every `log_access()` call site** -- Squid's
+   `authz_helper.py`/`sni_helper.py` (13 call sites combined) are live,
+   traffic-decision-critical-path files this pass deliberately didn't
+   touch under time pressure; tracked below.
+3. **Crunchyroll show approval required re-pasting/re-resolving the same
+   URL for every kid.** `user_detail()` now also lists every OTHER
+   user's already-approved shows (deduped by `series_id`, excluding this
+   user's own) as a pickable combobox option alongside the existing
+   paste-a-URL form; picking one sends `existing_series_id` instead,
+   which `add_show()` resolves directly against the existing
+   `user_shows` row (name and all) with no URL parsing or `cr_api`
+   lookup needed at all. The picked show wins if both are somehow
+   submitted together.
+4. **Devices/Domains bulk actions moved above their tables**, matching
+   the project owner's own Microsoft Entra admin-console screenshots:
+   Devices got a compact toolbar bar (group-assign select + Assign/
+   Delete buttons) right below the intro text; Domains' richer
+   `ACCESS_SELECTS`-based bulk-access form (three comboboxes -- too much
+   to cram into a slim toolbar) became a collapsed-by-default `<details>`
+   summary instead, expanding on click. Both start every action button
+   **disabled**, enabling only once a checkbox is actually checked (with
+   a live "N selected" label) -- the same greyed-out-until-selected
+   pattern Entra's own list views use. Surfaced (and fixed) a real,
+   previously-invisible gap while building this: `button[disabled]` had
+   no CSS treatment anywhere in this app at all -- a disabled button
+   (including the pre-existing "Clean up now" one) looked fully
+   clickable. New global `button[disabled], .btn[disabled] { opacity:
+   .5; cursor: not-allowed; }` rule fixes it everywhere, not just the
+   new toolbars. Live-verified interactively in a real browser (not just
+   unit tests) against the dev server: checking a row enables the
+   buttons and updates the count/summary text in both places, correctly
+   starts disabled, and the CSS actually dims the button once enabled
+   again by re-disabling.
+
+10 new tests across `tests/test_dashboard.py`, `tests/test_logging_dedupe.py`,
+and `tests/test_block_page_server.py`. 870 → 880 passed, 34 skipped, zero
+regressions.
+
+**Tracked for later, not built now:**
+
+- **Full AdGuard/dashboard credential unification** -- needs the
+  dashboard container to gain write access to AdGuard's config volume,
+  bcrypt-hash generation matching AdGuard's own format, and a safe,
+  coordinated AdGuard restart (a real DNS-resolution blip for the whole
+  household, unlike restarting the dashboard container alone) -- real
+  infrastructure work, not a quick patch.
+- **`ip_address` capture across every `log_access()` call site**,
+  specifically Squid's `authz_helper.py`/`sni_helper.py` (13 call sites) --
+  each already has the raw client IP in scope (it's what they pass to
+  `resolve_device()`), so the change itself is mechanical, but those are
+  live, traffic-decision-critical-path files deserving their own
+  dedicated, carefully-tested pass rather than a rushed addition.
+- **"Third Party Integration" nav section** (project owner's own
+  wording, new request) -- a new left-nav item, reserved for future
+  integrations (YouTube, Discord, etc. -- named explicitly, not built),
+  starting with a real Crunchyroll cross-user management page: view
+  every approved series across ALL users in one place, remove a series
+  from everyone at once, approve a series for a specific user, or remove
+  it from just one user -- effectively a global counterpart to today's
+  per-user "Approved Crunchyroll shows" card (item 3 above helps within
+  that existing per-user view, but doesn't replace the need for this
+  standalone cross-user page).
+- The domain/user assignment UX redesign (previous round's entry, still
+  open) and config export/import (still open).
+
+---
+
 ## Cross-cutting: security-by-design
 
 Security is designed in from the start on every phase above, not

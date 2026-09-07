@@ -263,6 +263,7 @@ and its one-click "approve" action.
 | `series_name` | TEXT    | nullable -- set only alongside `series_id` when a name is already known (report-driven approvals resolve/attach a name; live proxy-time denials generally don't have one yet) |
 | `allowed`     | INTEGER | NOT NULL (boolean: 1/0) |
 | `reason`      | TEXT    | free-text enum, see below -- not constrained by a CHECK, just convention |
+| `ip_address`  | TEXT    | nullable, added 2026-09-07 (`ALTER TABLE`, see `common/db.py`'s `_migrate()`) -- the raw source IP, independent of whether `device_id` resolved to anything. Real gap this closed: a genuinely never-seen device (`device_id IS NULL`, no `device_bindings` match at all) previously left nothing to trace it by on the Report page. Populated via `logging_util.log_access()`'s optional `ip_address` kwarg (default `None`, not part of the dedupe key, same treatment as `device_id`) -- currently only `dashboard/block_page_server.py` passes it; Squid's `authz_helper.py`/`sni_helper.py` call sites are a tracked follow-up (RoadMap.md's dated entry), so most rows still have this NULL for now. |
 
 **Indexes:**
 - `idx_access_log_ts` on `access_log(ts DESC)` -- supports the Report

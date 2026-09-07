@@ -113,6 +113,16 @@ def test_writes_access_log_row_for_a_known_device(server, conn):
     assert row["user_id"] is None  # bare device, no user assigned
 
 
+def test_writes_the_raw_source_ip_alongside_the_placeholder_row(server, conn):
+    """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
+    the Report page's Device column was empty for a never-recognized
+    device with nothing to track it down by -- this is the write side of
+    that fix."""
+    _get(server, host_header="crunchyroll.com")
+    row = conn.execute("SELECT * FROM access_log ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["ip_address"] == "127.0.0.1"  # the test server binds localhost
+
+
 def test_writes_placeholder_row_for_an_unrecognized_ip(server, conn):
     """The requesting IP (127.0.0.1, since the test server binds
     localhost) has no device_bindings row at all -- same

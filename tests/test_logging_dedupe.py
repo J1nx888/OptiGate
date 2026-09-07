@@ -38,6 +38,31 @@ def test_different_series_id_is_not_deduped(conn):
     assert len(_rows(conn)) == 2
 
 
+def test_ip_address_is_stored_when_given(conn):
+    """Added 2026-09-07 (RoadMap.md's dated entry): real live-testing
+    feedback that a row for a never-recognized device gave nothing to
+    track it down by. Optional -- defaults to None, so it's descriptive
+    metadata on the row, not a new dedupe dimension (same treatment as
+    device_id)."""
+    logging_util.log_access(
+        conn, user_id=None, username="(unauthenticated)", domain="netflix.com",
+        path=None, allowed=False, reason="dns_tier_denied", ip_address="192.168.1.42",
+    )
+    assert _rows(conn)[0]["ip_address"] == "192.168.1.42"
+
+
+def test_ip_address_defaults_to_none_and_does_not_affect_dedupe(conn):
+    kwargs = dict(
+        user_id=1, username="kid1", domain="crunchyroll.com",
+        path=None, allowed=False, reason="not_authenticated",
+    )
+    logging_util.log_access(conn, ip_address="192.168.1.10", **kwargs)
+    logging_util.log_access(conn, ip_address="192.168.1.11", **kwargs)  # different IP, same window
+    rows = _rows(conn)
+    assert len(rows) == 1, "IP is not part of the dedupe key -- a moved IP within the window still collapses"
+    assert rows[0]["ip_address"] == "192.168.1.10"
+
+
 def test_different_series_id_none_vs_value_is_not_deduped(conn):
     base = dict(user_id=1, username="kid1", domain="crunchyroll.com", path="/", allowed=True)
     logging_util.log_access(conn, reason="global_domain", series_id=None, **base)
