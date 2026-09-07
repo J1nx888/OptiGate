@@ -14,10 +14,32 @@ CONF=/opt/adguardhome/conf/AdGuardHome.yaml
 BIN=/opt/adguardhome/AdGuardHome
 WORK=/opt/adguardhome/work
 
+# 2026-09-07 (RoadMap.md's dated entry): grants the dashboard container's
+# own `proxy` user (uid/gid 13 -- see dashboard/Dockerfile's `USER proxy`)
+# read/write access to this file, so dashboard/adguard_config_sync.py can
+# write a real password change into it directly (AdGuard Home's REST API
+# has no password-change endpoint at all). This image runs AdGuard as
+# root (the upstream image's own default -- confirmed live, the file is
+# created `root:root` mode 600), so dashboard's non-root process would
+# otherwise have zero access to it at all. Numeric gid, not a name --
+# this image's own /etc/group has no "proxy" entry, but chown/chmod don't
+# need one. Run on EVERY start (not just first boot), same "re-fix
+# ownership every time, don't just hope it stays" discipline
+# proxy/entrypoint.sh already uses for the shared /config volume -- if
+# AdGuard's own live process ever rewrites this file in a way that resets
+# its permissions (unconfirmed either way), the next restart repairs it,
+# and a restart is already required for any credential sync to actually
+# take effect anyway.
+_grant_dashboard_access() {
+  chown root:13 "$CONF" 2>/dev/null || true
+  chmod 660 "$CONF" 2>/dev/null || true
+}
+
 if [ -f "$CONF" ]; then
   # Already configured from a previous run (persisted volume) --
   # nothing to bootstrap. exec so this process IS pid 1 and receives
   # signals directly, same as the unwrapped image would.
+  _grant_dashboard_access
   exec "$BIN" --no-check-update -c "$CONF" -w "$WORK"
 fi
 
@@ -111,6 +133,7 @@ if [ ! -f "$CONF" ]; then
   wait "$PID" 2>/dev/null
   exit 1
 fi
+_grant_dashboard_access
 
 # Ad/tracker blocking, layered on top of AdGuard's own default filter --
 # confirmed live 2026-08-30 that install/configure itself already
