@@ -4970,6 +4970,95 @@ regressions.
 
 ---
 
+## Real AdGuard/dashboard credential unification + Devices toolbar redesign (2026-09-07)
+
+**Security correction, done now, not deferred**: the previous round's
+"reveal the plaintext AdGuard password on the Settings page" fix was
+correctly flagged by the project owner as insecure -- displaying a
+second system's real credential in page HTML is a real regression
+regardless of "the admin already has DB access" reasoning, and this
+project's own standing security-by-design practice should have caught
+it before shipping. Replaced with genuine integration instead of a
+band-aid:
+
+- **`dashboard/adguard_config_sync.py`** writes AdGuard Home's own
+  `AdGuardHome.yaml` directly -- the only way to actually change its
+  credential, confirmed live (again) against the real production
+  instance: fetched its OpenAPI spec, `PUT /control/profile/update`'s
+  `ProfileInfo` schema has only `name`/`language`/`theme`, no password
+  field anywhere. **Bcrypt cross-compatibility verified live, not
+  assumed**: generated a hash with Python's `bcrypt` library, injected
+  it as a temporary second user into the REAL production
+  AdGuardHome.yaml (after backing it up), restarted the container, and
+  authenticated successfully against Go's `golang.org/x/crypto/bcrypt`
+  validator via real HTTP Basic Auth -- then removed the test user and
+  restored the original file, confirming the real admin credential was
+  untouched throughout. Safe to test on the live box specifically
+  because interception is currently off (no device depends on AdGuard's
+  DNS right now, so a brief restart carries no real blast radius).
+- **`update_admin()`** (the "Dashboard admin login" form) is now the
+  ONLY place credentials are set, for both systems: saving a new
+  password there also updates the `adguard_username`/`adguard_password`
+  settings AND writes the real AdGuardHome.yaml, in one action. The
+  separate "AdGuard connection settings" card lost its username/password
+  fields entirely (only the connection URL remains there) -- removing
+  the two independent inputs that let them drift apart in the first
+  place, not just hiding the symptom. AdGuard sync failures are
+  best-effort (a missing volume mount on an existing install that
+  hasn't recreated its container yet, a disk error) -- logged and
+  flashed clearly, but never block the dashboard's own password change
+  from saving.
+- **What's still manual, honestly**: AdGuard only reads its config at
+  startup (no live-reload, already established from the earlier
+  `ADGUARD_WEB_BIND` fix), and restarting it from inside the dashboard
+  container would need Docker socket access -- a far larger privilege
+  grant than the scoped, data-only volume mount this actually uses. The
+  flash message tells the admin to run `docker compose restart adguard`
+  themselves after a password change. New `pp_adguard_conf` volume
+  mount added to the `dashboard` service (read-write, same volume
+  `adguard`'s own service already uses) in `docker-compose.yml`; new
+  `pyyaml`/`bcrypt` dependencies in `dashboard/requirements.txt`.
+
+**Devices toolbar redesigned again, same day** -- direct follow-up
+feedback: "instead of the weird dropdown, can you use the buttons like
+Entra has," with a screenshot of Entra's own device-list toolbar
+(Download/Enable/Disable/Delete/Manage) as the explicit reference.
+Replaced the group-select-in-the-toolbar shape from the earlier redesign
+with real buttons matching that set:
+- **Download devices** -- new `GET /devices/export`, a plain CSV of
+  every device (MAC/label/assignment/flags/last-seen), not gated by
+  checkbox selection (same "always available regardless of selection"
+  role Entra's own equivalent button plays). Richer than the existing
+  CSV-import format (`mac_address,label`) -- that one's meant to be
+  re-imported elsewhere, this one's for an admin's own record-keeping.
+- **Enable / Disable** -- new `bulk_resume_devices()`/
+  `bulk_pause_devices()`, the same `_set_quarantine()` mechanism every
+  other pause/resume route already uses, scoped to an `IN (...)` id
+  list, excluding `ignored` devices from the effect (same reasoning as
+  every other bulk-pause route).
+- **Delete** -- unchanged from the previous round's `bulk_delete_devices()`.
+- **Manage** -- a plain `<button type="button">`, not a submit -- click
+  reveals a collapsed panel with the group-assign form (still needs
+  some way to pick a group; a bare button alone can't capture that), so
+  the picker is progressively disclosed instead of sitting visibly in
+  the toolbar by default. Reuses the previous round's own
+  `bulk_assign_devices_to_group()` route unchanged.
+
+All four buttons (plus Download) start disabled and enable together
+once a row is checked, matching Entra's own greyed-out-until-selected
+pattern (same mechanism the previous round's toolbar already
+established). Live-verified interactively via JS-driven checkbox
+toggling against the real dev server (screenshots were unreliable this
+pass -- verified functionally instead): buttons start disabled, enable
+together on selection, "Manage" reveals/hides its panel correctly, and
+unchecking re-hides both.
+
+24 new tests across `tests/test_adguard_config_sync.py` (new file) and
+`tests/test_dashboard.py`. 891 → 900 passed, 34 skipped, zero
+regressions.
+
+---
+
 ## Cross-cutting: security-by-design
 
 Security is designed in from the start on every phase above, not

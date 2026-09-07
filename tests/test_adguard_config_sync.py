@@ -1,0 +1,123 @@
+"""dashboard/adguard_config_sync.py: writes AdGuard Home's real
+AdGuardHome.yaml credential directly, since its REST API has no
+password-change endpoint at all (see that module's own docstring for the
+live verification against a real instance -- confirmed a hash generated
+by THIS module's bcrypt library authenticates against AdGuard's real Go
+bcrypt validator).
+"""
+from __future__ import annotations
+
+import bcrypt
+import pytest
+import yaml
+
+import adguard_config_sync as sync
+
+
+def _write_conf(path, users=None, **extra):
+    data = {"users": users if users is not None else [{"name": "admin", "password": "$2a$10$oldhash"}]}
+    data.update(extra)
+    path.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_sync_writes_a_bcrypt_hash_the_python_library_itself_can_verify(tmp_path):
+    conf = _write_conf(tmp_path / "AdGuardHome.yaml")
+
+    sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+    data = yaml.safe_load(conf.read_text())
+    user = data["users"][0]
+    assert user["name"] == "newadmin"
+    assert bcrypt.checkpw(b"newpass123", user["password"].encode())
+
+
+def test_sync_only_touches_the_first_user_when_multiple_exist(tmp_path):
+    conf = _write_conf(
+        tmp_path / "AdGuardHome.yaml",
+        users=[{"name": "admin", "password": "$2a$10$one"}, {"name": "extra", "password": "$2a$10$two"}],
+    )
+
+    sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+    data = yaml.safe_load(conf.read_text())
+    assert data["users"][0]["name"] == "newadmin"
+    assert data["users"][1] == {"name": "extra", "password": "$2a$10$two"}, "must not touch a second user"
+
+
+def test_sync_preserves_every_other_top_level_config_key(tmp_path):
+    """A real AdGuardHome.yaml has dozens of unrelated keys (DNS
+    upstreams, filtering rules, DHCP, TLS...) -- this must round-trip
+    every one of them untouched, not just the users list."""
+    conf = _write_conf(
+        tmp_path / "AdGuardHome.yaml",
+        dns={"bind_hosts": ["0.0.0.0"], "port": 53},
+        filtering={"protection_enabled": True},
+        auth_attempts=5,
+    )
+
+    sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+    data = yaml.safe_load(conf.read_text())
+    assert data["dns"] == {"bind_hosts": ["0.0.0.0"], "port": 53}
+    assert data["filtering"] == {"protection_enabled": True}
+    assert data["auth_attempts"] == 5
+
+
+def test_sync_preserves_other_fields_on_the_updated_user_entry(tmp_path):
+    """A real user entry can carry more than name/password (AdGuard adds
+    fields over versions) -- only name/password should change."""
+    conf = _write_conf(
+        tmp_path / "AdGuardHome.yaml",
+        users=[{"name": "admin", "password": "$2a$10$oldhash", "language": "en"}],
+    )
+
+    sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+    data = yaml.safe_load(conf.read_text())
+    assert data["users"][0]["language"] == "en"
+
+
+def test_sync_raises_when_config_file_does_not_exist(tmp_path):
+    with pytest.raises(sync.AdGuardConfigSyncError):
+        sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=tmp_path / "does-not-exist.yaml")
+
+
+def test_sync_raises_on_malformed_yaml(tmp_path):
+    conf = tmp_path / "AdGuardHome.yaml"
+    conf.write_text("users: [unterminated", encoding="utf-8")
+    with pytest.raises(sync.AdGuardConfigSyncError):
+        sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+
+def test_sync_raises_when_no_users_list_exists(tmp_path):
+    conf = _write_conf(tmp_path / "AdGuardHome.yaml", users=[])
+    with pytest.raises(sync.AdGuardConfigSyncError):
+        sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+    conf2 = tmp_path / "AdGuardHome2.yaml"
+    conf2.write_text(yaml.safe_dump({"dns": {}}), encoding="utf-8")
+    with pytest.raises(sync.AdGuardConfigSyncError):
+        sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf2)
+
+
+def test_sync_raises_when_yaml_is_not_a_mapping(tmp_path):
+    conf = tmp_path / "AdGuardHome.yaml"
+    conf.write_text(yaml.safe_dump(["not", "a", "mapping"]), encoding="utf-8")
+    with pytest.raises(sync.AdGuardConfigSyncError):
+        sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+
+def test_each_call_generates_a_fresh_salt(tmp_path):
+    """Two syncs of the same password must not produce identical hashes
+    -- a fresh bcrypt salt every time, same discipline as password
+    hashing anywhere else in this project."""
+    conf = _write_conf(tmp_path / "AdGuardHome.yaml")
+    sync.sync_adguard_credentials("admin", "samepassword", conf_path=conf)
+    first_hash = yaml.safe_load(conf.read_text())["users"][0]["password"]
+
+    sync.sync_adguard_credentials("admin", "samepassword", conf_path=conf)
+    second_hash = yaml.safe_load(conf.read_text())["users"][0]["password"]
+
+    assert first_hash != second_hash
+    assert bcrypt.checkpw(b"samepassword", second_hash.encode())

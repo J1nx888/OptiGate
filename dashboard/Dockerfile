@@ -6,7 +6,7 @@ COPY dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY common/*.py /app/
-COPY dashboard/dashboard.py dashboard/block_page_server.py dashboard/captive_portal_server.py /app/
+COPY dashboard/dashboard.py dashboard/block_page_server.py dashboard/captive_portal_server.py dashboard/adguard_config_sync.py /app/
 COPY dashboard/static /app/static
 
 # Port 80 (block_page_server.py, started only when DASHBOARD_URL is set)

@@ -1462,66 +1462,115 @@ def test_update_admin_blank_password_keeps_current_password(client, db_conn):
 
 
 # ============================================================
-# /settings/adguard: connection settings + "check for updates now"
+# Real AdGuard/dashboard credential unification (2026-09-07, RoadMap.md's
+# dated entry) -- replaces the earlier "show the plaintext AdGuard
+# password on screen" approach, correctly flagged as insecure. Changing
+# the dashboard's own admin password is now the ONLY way to change
+# AdGuard's login too; see dashboard/adguard_config_sync.py for the
+# actual file-write half of this (its own tests cover that in isolation).
 # ============================================================
 
-def test_update_adguard_settings_saves_url_username_password(client, db_conn):
-    resp = client.post(
-        "/settings/adguard",
-        data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "hunter2"},
+def test_update_admin_password_change_syncs_adguard_settings(client, db_conn, monkeypatch):
+    import dashboard
+    monkeypatch.setattr(dashboard.adguard_config_sync, "sync_adguard_credentials", lambda *a, **kw: None)
+
+    client.post(
+        "/settings/admin", data={"admin_username": "newadmin", "admin_password": "newpassword123"},
         headers=_auth_header(),
     )
-    assert resp.status_code == 302
+
     import db as db_mod
-    assert db_mod.get_setting(db_conn, "adguard_url") == "http://127.0.0.1:3000"
-    assert db_mod.get_setting(db_conn, "adguard_username") == "admin"
-    assert db_mod.get_setting(db_conn, "adguard_password") == "hunter2"
+    assert db_mod.get_setting(db_conn, "adguard_username") == "newadmin"
+    assert db_mod.get_setting(db_conn, "adguard_password") == "newpassword123"
 
 
-def test_settings_page_reveals_the_actual_adguard_credentials(client, db_conn):
-    """Real live-testing feedback (RoadMap.md's dated entry): "the
-    AdGuard link works, but I don't know the username/password to use"
-    -- the plaintext password was already stored (needed to replay as
-    HTTP Basic Auth against AdGuard's own API), just never shown back to
-    the admin who forgot it."""
+def test_update_admin_password_change_calls_the_real_config_sync(client, db_conn, monkeypatch):
+    import dashboard
+    captured = {}
+    monkeypatch.setattr(
+        dashboard.adguard_config_sync, "sync_adguard_credentials",
+        lambda username, password: captured.update(username=username, password=password),
+    )
+
+    resp = client.post(
+        "/settings/admin", data={"admin_username": "newadmin", "admin_password": "newpassword123"},
+        headers=_auth_header(),
+    )
+
+    assert captured == {"username": "newadmin", "password": "newpassword123"}
+    assert "restart" in resp.headers["Location"]
+
+
+def test_update_admin_username_only_change_does_not_touch_adguard(client, db_conn, monkeypatch):
+    """Blank password means "keep current" -- there's no current
+    plaintext password to re-sync with, so this must not call the sync
+    at all (it would otherwise need to hash an empty string)."""
+    import dashboard
+    called = []
+    monkeypatch.setattr(
+        dashboard.adguard_config_sync, "sync_adguard_credentials",
+        lambda *a, **kw: called.append(True),
+    )
+
+    client.post(
+        "/settings/admin", data={"admin_username": "renamed-only", "admin_password": ""},
+        headers=_auth_header(),
+    )
+
+    assert called == []
+
+
+def test_update_admin_password_change_survives_adguard_sync_failure(client, db_conn, monkeypatch):
+    """The dashboard's OWN password change must still succeed even if
+    writing AdGuard's config fails (volume not mounted on an existing
+    install that hasn't recreated its container yet, disk error,
+    whatever) -- never let a best-effort integration block the primary
+    action."""
+    import dashboard
+    def boom(username, password):
+        raise dashboard.adguard_config_sync.AdGuardConfigSyncError("simulated failure")
+    monkeypatch.setattr(dashboard.adguard_config_sync, "sync_adguard_credentials", boom)
+
+    resp = client.post(
+        "/settings/admin", data={"admin_username": "newadmin", "admin_password": "newpassword123"},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert client.get("/users", headers=_auth_header(username="newadmin", password="newpassword123")).status_code == 200
+
+
+def test_settings_page_never_shows_a_plaintext_adguard_password(client, db_conn):
+    """Regression guard for the exact insecure behavior the project
+    owner flagged and asked to have removed, not just hidden better."""
     import db as db_mod
     db_mod.set_setting(db_conn, "adguard_url", "http://127.0.0.1:3000")
-    db_mod.set_setting(db_conn, "adguard_username", "admin")
     db_mod.set_setting(db_conn, "adguard_password", "s3cr3t-pw")
     db_conn.commit()
 
     resp = client.get("/settings", headers=_auth_header())
 
-    assert b"s3cr3t-pw" in resp.data
+    assert b"s3cr3t-pw" not in resp.data
 
 
-def test_settings_page_omits_adguard_credentials_when_not_configured(client, db_conn):
+def test_settings_page_has_no_separate_adguard_username_or_password_input(client, db_conn):
     resp = client.get("/settings", headers=_auth_header())
-    assert b"Log in there with" not in resp.data
+    assert b'name="adguard_username"' not in resp.data
+    assert b'name="adguard_password"' not in resp.data
 
 
-def test_update_adguard_settings_blank_password_keeps_current(client, db_conn):
-    client.post(
-        "/settings/adguard",
-        data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "hunter2"},
-        headers=_auth_header(),
-    )
-    client.post(
-        "/settings/adguard",
-        data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": ""},
-        headers=_auth_header(),
-    )
-    import db as db_mod
-    assert db_mod.get_setting(db_conn, "adguard_password") == "hunter2"
+# ============================================================
+# /settings/adguard: connection ADDRESS only (username/password moved to
+# /settings/admin above) + "check for updates now"
+# ============================================================
 
-
-def test_update_adguard_settings_blank_username_rejected(client, db_conn):
+def test_update_adguard_settings_saves_only_the_url(client, db_conn):
     resp = client.post(
-        "/settings/adguard",
-        data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "", "adguard_password": "x"},
-        headers=_auth_header(),
+        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
     )
-    assert "error=1" in resp.headers["Location"]
+    assert resp.status_code == 302
+    import db as db_mod
+    assert db_mod.get_setting(db_conn, "adguard_url") == "http://127.0.0.1:3000"
 
 
 def test_refresh_adguard_filters_without_connection_details_shows_error(client, db_conn):
@@ -1564,10 +1613,14 @@ def test_adguard_ui_link_uses_a_different_configured_port(client, db_conn):
 
 
 def test_refresh_adguard_filters_calls_the_real_client_and_reports_the_count(client, db_conn, monkeypatch):
+    import dashboard
+    monkeypatch.setattr(dashboard.adguard_config_sync, "sync_adguard_credentials", lambda *a, **kw: None)
+    client.post("/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header())
+    # Username/password now come from the dashboard's own admin login
+    # (update_admin()), not a separate AdGuard-only form -- see this
+    # module's own dated entry.
     client.post(
-        "/settings/adguard",
-        data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "hunter2"},
-        headers=_auth_header(),
+        "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
     )
 
     captured = {}
@@ -1576,10 +1629,11 @@ def test_refresh_adguard_filters_calls_the_real_client_and_reports_the_count(cli
         captured["args"] = (base_url, username, password)
         return 2
 
-    import dashboard
     monkeypatch.setattr(dashboard.adguard_client, "refresh_filters", fake_refresh)
 
-    resp = client.post("/settings/adguard/refresh", headers=_auth_header())
+    resp = client.post(
+        "/settings/adguard/refresh", headers=_auth_header(username="admin", password="hunter2")
+    )
 
     assert "error=1" not in resp.headers["Location"]
     assert captured["args"] == ("http://127.0.0.1:3000", "admin", "hunter2")
@@ -2802,6 +2856,22 @@ def test_devices_page_lists_bulk_action_form_and_row_checkboxes(client, db_conn)
     assert b'action="/devices/quick-add-to-group"' not in resp.data
 
 
+def test_devices_page_toolbar_matches_the_entra_style_button_set(client, db_conn):
+    """Real follow-up feedback (RoadMap.md's dated entry): "instead of
+    the weird dropdown, can you use the buttons like Entra has" --
+    Download/Enable/Disable/Delete/Manage, not a bare group-select
+    sitting in the toolbar by default."""
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:21"}, headers=_auth_header())
+    resp = client.get("/devices", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'href="/devices/export"' in resp.data
+    assert b"Download devices" in resp.data
+    assert b'action="/devices/bulk-resume"' in resp.data
+    assert b'action="/devices/bulk-pause"' in resp.data
+    assert b'id="deviceBulkManageToggle"' in resp.data
+    assert b'id="deviceBulkManagePanel"' in resp.data
+
+
 def test_bulk_assign_devices_to_group_applies_to_every_selected_device(client, db_conn):
     client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
@@ -2919,6 +2989,91 @@ def test_bulk_delete_devices_without_selection_shows_error(client, db_conn):
 
     assert "error=1" in resp.headers["Location"]
     assert db_conn.execute("SELECT COUNT(*) c FROM devices").fetchone()["c"] == 1
+
+
+# ============================================================
+# Devices toolbar: Enable/Disable/Download (Entra-style buttons, real
+# follow-up feedback -- RoadMap.md's dated entry)
+# ============================================================
+
+def test_bulk_pause_devices_pauses_every_selected_device(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:30"}, headers=_auth_header())
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:31"}, headers=_auth_header())
+    ids = [r["id"] for r in db_conn.execute("SELECT id FROM devices")]
+
+    resp = client.post("/devices/bulk-pause", data={"device_ids": [str(i) for i in ids]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    rows = db_conn.execute("SELECT quarantined_at FROM devices").fetchall()
+    assert all(r["quarantined_at"] is not None for r in rows)
+
+
+def test_bulk_pause_devices_skips_ignored_devices(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:32"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
+    db_conn.execute("UPDATE devices SET ignored = 1 WHERE id = ?", (device_id,))
+    db_conn.commit()
+
+    client.post("/devices/bulk-pause", data={"device_ids": [str(device_id)]}, headers=_auth_header())
+
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["quarantined_at"] is None
+
+
+def test_bulk_pause_devices_without_selection_shows_error(client, db_conn):
+    resp = client.post("/devices/bulk-pause", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_bulk_resume_devices_resumes_every_selected_paused_device(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:33"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
+    client.post("/devices/pause", data={"device_id": device_id}, headers=_auth_header())
+
+    resp = client.post("/devices/bulk-resume", data={"device_ids": [str(device_id)]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["quarantined_at"] is None
+
+
+def test_bulk_resume_devices_without_selection_shows_error(client, db_conn):
+    resp = client.post("/devices/bulk-resume", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_export_devices_csv_includes_every_device_and_key_fields(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post(
+        "/devices/add",
+        data={"mac_address": "AA:BB:CC:DD:EE:34", "label": "Kitchen Cam", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/devices/export", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+    assert "attachment" in resp.headers["Content-Disposition"]
+    body = resp.data.decode()
+    assert "aa:bb:cc:dd:ee:34" in body
+    assert "Kitchen Cam" in body
+    assert "IoT" in body
+
+
+def test_export_devices_csv_marks_an_ignored_device_clearly(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:35", "assignment": "ignored"}, headers=_auth_header())
+
+    resp = client.get("/devices/export", headers=_auth_header())
+
+    body = resp.data.decode()
+    assert "Ignored" in body
+
+
+def test_export_devices_csv_requires_admin_auth(client):
+    resp = client.get("/devices/export")
+    assert resp.status_code == 401
 
 
 def test_group_detail_page_renders(client, db_conn):

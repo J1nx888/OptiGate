@@ -158,6 +158,17 @@ services:
       - HOUSEHOLD_TIME_ZONE=${HOUSEHOLD_TIME_ZONE:-UTC}
     volumes:
       - pp_config:/config
+      # Same volume adguard's own service mounts above, read-write here
+      # too (added 2026-09-07, RoadMap.md's dated entry) -- lets
+      # dashboard/adguard_config_sync.py write AdGuard's real
+      # AdGuardHome.yaml directly whenever the admin changes their
+      # dashboard password (update_admin()), since AdGuard Home's REST
+      # API has no password-change endpoint at all (confirmed live
+      # against a real instance). The two containers never write this
+      # file at the same moment in practice (this only fires on an
+      # infrequent, admin-triggered action, not a background loop), so
+      # no file-locking beyond a plain read-modify-write.
+      - pp_adguard_conf:/opt/adguardhome/conf
 
   # ==========================================================
   # Phase 3 interception layer (arp-worker, nftables-manager, controller)

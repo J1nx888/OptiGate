@@ -847,7 +847,12 @@ text here still said "not built" until now).
   shipped earlier the same day and was removed a few hours later once
   live use showed it made the table more cluttered, not less -- the
   checkbox + bulk-panel shape here handles both the one-device and
-  many-device case with a single control instead.
+  many-device case with a single control instead. **Same-day follow-up**:
+  the always-visible group-select was itself replaced by a "Manage"
+  toggle button in the toolbar (matching Entra's own button set) --
+  clicking it reveals this exact form in a collapsed panel instead of
+  showing the select by default; the route/handler are unchanged, only
+  where the picker lives in the page.
 - `POST /devices/bulk-delete` -> `bulk_delete_devices()` (added
   2026-09-07, same live-testing feedback as above -- "lacks the ability
   to take bulk actions such as deleting multiple devices") -- form field
@@ -855,6 +860,24 @@ text here still said "not built" until now).
   `DELETE ... WHERE id IN (...)` in one statement. Redirects to `devices`
   with a count of devices removed, or an error flash if none were
   selected.
+- `POST /devices/bulk-pause` / `POST /devices/bulk-resume` ->
+  `bulk_pause_devices()` / `bulk_resume_devices()` (added 2026-09-07,
+  same-day follow-up: "instead of the weird dropdown, use the buttons
+  like Entra has" -- Download/Enable/Disable/Delete/Manage) -- form
+  field `device_ids` (multi-value). Same `_set_quarantine()` mechanism
+  every other pause/resume route uses, scoped to an `IN (...)` id list;
+  pause excludes `ignored` devices (same reasoning as
+  `pause_all_devices()`). These are the Devices toolbar's "Disable"/
+  "Enable" buttons.
+- `GET /devices/export` -> `export_devices_csv()` (added 2026-09-07,
+  same follow-up -- the toolbar's "Download devices" button) -- a plain
+  CSV of every device (MAC, label, assigned-to, ignored/bump/bypass/
+  paused flags, last-seen), NOT gated by checkbox selection (always
+  exports the full list, same role Entra's own equivalent button plays
+  -- unlike Enable/Disable/Delete/Manage, which need a selection).
+  Richer than `import_devices()`'s own `mac_address,label` CSV format
+  (that one's meant to be re-imported elsewhere; this one's for an
+  admin's own record-keeping).
 - `POST /groups/pause` / `POST /groups/resume` -> `pause_group()` /
   `resume_group()` (added 2026-09-06 -- the one pause granularity that
   was entirely missing; per-device and per-user pause both already
@@ -983,14 +1006,26 @@ the project owner asked for, not only an operational-health trail.
   leaving it blank keeps the current password hash). Updates
   `admin_username` unconditionally; only rehashes and updates
   `admin_password_hash` if a new password was actually submitted.
-- `POST /settings/adguard` -> `update_adguard_settings()` -- form fields
-  `adguard_url`, `adguard_username` (required, non-empty),
-  `adguard_password` (optional -- leaving it blank keeps the current
-  value, same pattern as `/settings/admin` above, except this one stores
-  the password in plaintext since it has to be replayed as HTTP Basic
-  Auth against AdGuard's own API, not verified locally). Seeded on first
-  run from `ADGUARD_URL`/`ADGUARD_USERNAME`/`ADGUARD_PASSWORD` (added
-  2026-08-30).
+  **Since 2026-09-07 (RoadMap.md's dated entry -- real AdGuard/dashboard
+  credential unification, replacing the earlier insecure "show the
+  plaintext password" approach)**: whenever a new password IS submitted,
+  this is now also the ONLY place AdGuard's login gets updated --
+  `adguard_username`/`adguard_password` settings are set to match, and
+  `dashboard/adguard_config_sync.py`'s `sync_adguard_credentials()`
+  writes a fresh bcrypt hash directly into AdGuard's real
+  `AdGuardHome.yaml` (its REST API has no password-change endpoint at
+  all). A sync failure (`AdGuardConfigSyncError` -- volume not mounted,
+  disk error) is caught, logged, and flashed, but never blocks the
+  dashboard's own password change from saving. On success, the flash
+  message tells the admin to run `docker compose restart adguard`
+  (AdGuard only reads its config at startup, no live-reload).
+- `POST /settings/adguard` -> `update_adguard_settings()` -- form field
+  `adguard_url` ONLY. **Since 2026-09-07**: username/password moved
+  entirely to `/settings/admin` above -- this route used to also accept
+  `adguard_username`/`adguard_password`, which let the two logins drift
+  independently (the exact bug the unification above fixed). Seeded on
+  first run from `ADGUARD_URL`/`ADGUARD_USERNAME`/`ADGUARD_PASSWORD`
+  (added 2026-08-30).
 - `POST /settings/adguard/refresh` -> `refresh_adguard_filters()` --
   calls `adguard_client.refresh_filters()` with the stored connection
   settings. Flashes an error (not a 500) if the settings are incomplete

@@ -297,6 +297,7 @@ form.inline { display: inline; }
   border-radius: var(--radius-sm);
 }
 .toolbar form.inline { display: flex; gap: .4rem; align-items: center; }
+.toolbar-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 .2rem; }
 /* Global -- a disabled button anywhere in this app (not just the
    toolbar above) should visibly look inert; this was silently missing
    before, including on the pre-existing "Clean up now" button. */

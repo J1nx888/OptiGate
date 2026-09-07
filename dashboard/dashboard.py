@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import zoneinfo
 
 import adguard_client
+import adguard_config_sync
 import auth
 import category_fetch
 import cr_api
@@ -2293,7 +2294,7 @@ DEVICES_BODY = """
 </div>
 {% endif %}
 
-<div class="card">
+<div class="card" id="groups">
 <h2>Groups ({{ groups|length }})</h2>
 <p class="hint">A shared-device category (TVs, IoT, Gaming Computers) with its own domain allow-list -- assign devices to a group below, then manage what it can reach from its "Manage domains" link.</p>
 {% if groups %}<input type="search" data-filter-table="groupsTable" placeholder="Search groups&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
@@ -2353,18 +2354,31 @@ DEVICES_BODY = """
 </p>
 {% if devices %}
 <div class="toolbar" id="deviceBulkToolbar">
-  <form id="bulkDeviceGroupForm" class="inline" method="post" action="{{ url_for('bulk_assign_devices_to_group') }}">
-    <select name="group_id" required {{ 'disabled' if not groups }}>
-      <option value="" selected disabled>Assign to group&hellip;</option>
-      {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
-    </select>
-    <button class="btn small" type="submit" disabled {{ 'title="Add a group first"' if not groups }}>Assign</button>
+  <a class="btn small" href="{{ url_for('export_devices_csv') }}">&darr; Download devices</a>
+  <span class="toolbar-sep"></span>
+  <form id="bulkDeviceEnableForm" class="inline" method="post" action="{{ url_for('bulk_resume_devices') }}">
+    <button class="btn small" type="submit" disabled>Enable</button>
+  </form>
+  <form id="bulkDevicePauseForm" class="inline" method="post" action="{{ url_for('bulk_pause_devices') }}">
+    <button class="btn small" type="submit" disabled>Disable</button>
   </form>
   <form id="bulkDeviceDeleteForm" class="inline" method="post" action="{{ url_for('bulk_delete_devices') }}"
         onsubmit="return confirm('Delete every checked device? This cannot be undone.');">
     <button class="danger small" type="submit" disabled>Delete</button>
   </form>
+  <button class="btn small" type="button" id="deviceBulkManageToggle" disabled>Manage</button>
   <span class="hint" id="deviceBulkCount" style="margin:0;">Check devices below to act on several at once.</span>
+</div>
+<div id="deviceBulkManagePanel" hidden style="margin:-.3rem 0 .6rem;">
+  <form id="bulkDeviceGroupForm" class="add-form" method="post" action="{{ url_for('bulk_assign_devices_to_group') }}">
+    <span class="hint" style="margin:0;">Assign checked devices to:</span>
+    <select name="group_id" required {{ 'disabled' if not groups }}>
+      <option value="" selected disabled>Pick a group&hellip;</option>
+      {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+    </select>
+    <button class="add small" type="submit" {{ 'disabled' if not groups }}>Apply</button>
+  </form>
+  {% if not groups %}<p class="hint">No groups yet -- add one above first.</p>{% endif %}
 </div>
 {% endif %}
 {% if devices %}<input type="search" data-filter-table="devicesTable" placeholder="Search devices&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
@@ -2436,10 +2450,14 @@ DEVICES_BODY = """
   // and the action buttons now start disabled, enabling only once
   // something's actually checked, same "greyed out until a selection
   // exists" pattern Entra's own device/user lists use.
+  var manageToggle = document.getElementById("deviceBulkManageToggle");
+  var managePanel = document.getElementById("deviceBulkManagePanel");
+
   function updateToolbarState() {
     if (!toolbar) return;
     var n = document.querySelectorAll(".bulk-device-check:checked").length;
-    toolbar.querySelectorAll("button[type=submit]").forEach(function (btn) { btn.disabled = n === 0; });
+    toolbar.querySelectorAll("button").forEach(function (btn) { btn.disabled = n === 0; });
+    if (n === 0 && managePanel) managePanel.hidden = true;
     if (countLabel) {
       countLabel.textContent = n === 0
         ? "Check devices below to act on several at once."
@@ -2457,6 +2475,16 @@ DEVICES_BODY = """
     box.addEventListener("change", updateToolbarState);
   });
   updateToolbarState();
+
+  // "Manage" doesn't submit anything itself -- it reveals the group-assign
+  // panel (still needs a target group picked somehow; a plain button
+  // alone can't capture that), same "click to open further options"
+  // role Entra's own "Manage" button plays for its device/user lists.
+  if (manageToggle && managePanel) {
+    manageToggle.addEventListener("click", function () {
+      managePanel.hidden = !managePanel.hidden;
+    });
+  }
 
   function wireBulkForm(formId) {
     var form = document.getElementById(formId);
@@ -2483,8 +2511,10 @@ DEVICES_BODY = """
       });
     });
   }
-  wireBulkForm("bulkDeviceGroupForm");
+  wireBulkForm("bulkDeviceEnableForm");
+  wireBulkForm("bulkDevicePauseForm");
   wireBulkForm("bulkDeviceDeleteForm");
+  wireBulkForm("bulkDeviceGroupForm");
 })();
 </script>
 </div>
@@ -4358,6 +4388,80 @@ def bulk_assign_devices_to_group():
     )
 
 
+@app.route("/devices/bulk-pause", methods=["POST"])
+@require_admin
+def bulk_pause_devices():
+    """Devices list's toolbar "Disable" button (RoadMap.md's dated
+    entry, referencing Microsoft Entra's own admin console) -- pauses
+    exactly the checked devices' internet access, same `_set_quarantine()`
+    mechanism as the whole-house/per-user/per-group pause buttons
+    elsewhere, just scoped to an explicit `IN (...)` id list. Excludes
+    `ignored` devices from the count/effect, same reasoning as every
+    other bulk-pause route (`BYPASS` outranks `QUARANTINE`, so pausing
+    one would silently do nothing)."""
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+    if not device_ids:
+        return flash_redirect("devices", "No devices selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(device_ids))
+    n = _set_quarantine(conn, f"id IN ({placeholders}) AND ignored = 0", tuple(device_ids), paused=True)
+    return flash_redirect("devices", f"Paused {n} device{'s' if n != 1 else ''}.")
+
+
+@app.route("/devices/bulk-resume", methods=["POST"])
+@require_admin
+def bulk_resume_devices():
+    """Devices list's toolbar "Enable" button -- the resume counterpart
+    to bulk_pause_devices() above."""
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+    if not device_ids:
+        return flash_redirect("devices", "No devices selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(device_ids))
+    n = _set_quarantine(conn, f"id IN ({placeholders}) AND quarantined_at IS NOT NULL", tuple(device_ids), paused=False)
+    return flash_redirect("devices", f"Resumed {n} device{'s' if n != 1 else ''}.")
+
+
+@app.route("/devices/export", methods=["GET"])
+@require_admin
+def export_devices_csv():
+    """Devices list's toolbar "Download devices" button (same live-
+    testing feedback as the bulk actions above) -- a plain CSV of every
+    device, not gated by checkbox selection (this is a whole-list export,
+    same "always available regardless of selection" role Microsoft
+    Entra's own reference screenshot shows for its equivalent button,
+    unlike Enable/Disable/Delete/Manage which need something checked).
+    Richer than bulk-import's own `mac_address,label` format (that one's
+    designed to be re-imported elsewhere; this one's for an admin's own
+    record-keeping/audit, so it includes assignment/status/flags too)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT d.*, u.display_name, g.name AS group_name FROM devices d "
+        "LEFT JOIN users u ON u.id = d.user_id LEFT JOIN groups g ON g.id = d.group_id "
+        "ORDER BY d.mac_address"
+    ).fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "MAC address", "Label", "Assigned to", "Ignored", "SSL-Bump", "Bypass login", "Paused", "Last seen",
+    ])
+    for d in rows:
+        if d["ignored"]:
+            assigned = "Ignored"
+        else:
+            assigned = d["display_name"] or d["group_name"] or ""
+        writer.writerow([
+            d["mac_address"], d["label"] or "", assigned,
+            "yes" if d["ignored"] else "no", "yes" if d["bump_enabled"] else "no",
+            "yes" if d["bypass_login"] else "no", "yes" if d["quarantined_at"] else "no",
+            d["last_seen_at"] or "",
+        ])
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=devices.csv"},
+    )
+
+
 @app.route("/devices/bulk-delete", methods=["POST"])
 @require_admin
 def bulk_delete_devices():
@@ -5132,43 +5236,28 @@ SETTINGS_BODY = """
   <button class="add" type="submit" {{ 'disabled' if not adguard_configured }}>Check for filter updates now</button>
 </form>
 {% if not adguard_configured %}
-<p class="hint"><strong>Not configured yet</strong> -- set the connection details below (matching whatever ADGUARD_USERNAME/ADGUARD_PASSWORD is set to in <code>.env</code> for the <code>adguard</code> container; if ADGUARD_PASSWORD was left blank there, copy the auto-generated password from <code>docker compose logs adguard</code>).</p>
+<p class="hint"><strong>Not configured yet</strong> -- set the dashboard's own admin login below (the "Dashboard admin login" card further down this page); AdGuard's login is kept in sync with it automatically.</p>
 {% endif %}
 {% if adguard_ui_url %}
 <p class="hint" style="margin-top:.6rem;">
   <a class="btn add" href="{{ adguard_ui_url }}" target="_blank" rel="noopener">Open AdGuard's own dashboard &rarr;</a><br>
-  Its own separate admin login (not this dashboard's) -- full query log, blocked-domain stats, and charts this project doesn't duplicate. Tighter integration (pulling those numbers into this dashboard directly) is a planned future improvement, not built yet.
+  Full query log, blocked-domain stats, and charts this project doesn't duplicate. Tighter integration (pulling those numbers into this dashboard directly) is a planned future improvement, not built yet.
   <strong>Only reachable if <code>ADGUARD_WEB_BIND</code> in <code>.env</code> is set to something other than the default <code>127.0.0.1</code></strong> (same idea as this dashboard's own <code>DASHBOARD_BIND</code>) -- otherwise this link only works from the Beelink itself, not your browser.
-</p>
-{% if adguard_password %}
-<p class="hint">
-  Log in there with <strong>{{ adguard_username }}</strong> / <code>{{ adguard_password }}</code>.
-  This is a completely separate login from this dashboard's own admin
-  password above -- changing one never changes the other (a real,
-  known gap; see the connection settings below to change AdGuard's own
-  credentials here, which updates what THIS dashboard uses to talk to
-  it, but does not by itself change AdGuard's actual stored password --
-  see the hint on that field).
+  <strong>Logs in with the same username/password as this dashboard's own admin login</strong> (below) -- there's only one credential to remember now.
 </p>
 {% endif %}
-{% endif %}
-<details {{ 'open' if not adguard_configured }}>
-<summary>Connection settings</summary>
+<details {{ 'open' if not adguard_url }}>
+<summary>Connection address</summary>
 <p class="hint">
-  Tells THIS dashboard what to use when it talks to AdGuard's API --
-  it does NOT change AdGuard's own actual stored password (AdGuard
-  Home has no API to do that; the real value lives in its own config
-  file, only ever set at first boot). Enter AdGuard's REAL current
-  username/password here to match it, not a new one you want it to
-  become -- entering the wrong value here just breaks every
-  AdGuard-dependent feature (filter updates, SafeSearch, category
-  blocking, this project's own domain-blocking sync) until it's fixed
-  back.
+  Only the address (host/port) is set here -- AdGuard's login itself is
+  always the dashboard's own admin username/password (see "Dashboard
+  admin login" below); changing that automatically writes the matching
+  credential into AdGuard's own config too (a restart of the
+  <code>adguard</code> container is needed for it to take effect --
+  AdGuard only reads its config at startup, it has no live-reload).
 </p>
 <form class="add-form" method="post" action="{{ url_for('update_adguard_settings') }}">
   <input type="text" name="adguard_url" value="{{ adguard_url }}" placeholder="http://127.0.0.1:3000" style="flex:1; min-width:280px;">
-  <input type="text" name="adguard_username" value="{{ adguard_username }}" placeholder="Username">
-  <input type="password" name="adguard_password" placeholder="Password (leave blank to keep current)">
   <button class="add" type="submit">Save</button>
 </form>
 </details>
@@ -5445,7 +5534,9 @@ def settings_page():
     device_stale_days = db.get_setting(conn, "device_stale_days", "")
     stale_devices = _stale_devices(conn, int(device_stale_days)) if device_stale_days else []
     adguard_url = db.get_setting(conn, "adguard_url", "")
-    adguard_username = db.get_setting(conn, "adguard_username", "admin")
+    # adguard_username is no longer read here -- since 2026-09-07 it's
+    # always identical to admin_username above (see update_admin()),
+    # nothing on this page needs it independently anymore.
     adguard_password = db.get_setting(conn, "adguard_password", "")
     # "" (genuinely never saved) vs "UTC" (explicitly saved as UTC) are
     # deliberately distinguished here -- see bootstrap_admin()'s own
@@ -5461,7 +5552,6 @@ def settings_page():
         SETTINGS_BODY, local_network=local_network, admin_username=admin_username,
         block_page_mode=block_page_mode, device_stale_days=device_stale_days,
         stale_devices=stale_devices, adguard_url=adguard_url,
-        adguard_username=adguard_username, adguard_password=adguard_password,
         adguard_configured=bool(adguard_url and adguard_password),
         adguard_ui_url=_adguard_ui_url(adguard_url),
         household_time_zone=household_time_zone,
@@ -5534,16 +5624,14 @@ def update_household_time_zone():
 @app.route("/settings/adguard", methods=["POST"])
 @require_admin
 def update_adguard_settings():
+    """Only the connection ADDRESS -- since 2026-09-07 (RoadMap.md's
+    dated entry), the username/password half of this moved entirely to
+    update_admin() (the dashboard's own admin-login form), which keeps
+    AdGuard's real credential in sync automatically instead of letting
+    the two drift independently the way this route used to allow."""
     url = request.form.get("adguard_url", "").strip()
-    username = request.form.get("adguard_username", "").strip()
-    password = request.form.get("adguard_password", "")
-    if not username:
-        return flash_redirect("settings_page", "AdGuard username can't be empty.", error=True)
     conn = get_db()
     db.set_setting(conn, "adguard_url", url)
-    db.set_setting(conn, "adguard_username", username)
-    if password:
-        db.set_setting(conn, "adguard_password", password)
     conn.commit()
     return flash_redirect("settings_page", "Saved.")
 
@@ -5640,16 +5728,53 @@ def update_block_page_mode():
 @app.route("/settings/admin", methods=["POST"])
 @require_admin
 def update_admin():
+    """The dashboard's own admin login -- and, since 2026-09-07
+    (RoadMap.md's dated entry), the SAME action that keeps AdGuard's
+    real login in sync, replacing the earlier "just show the plaintext
+    AdGuard password on screen" approach the project owner correctly
+    flagged as insecure. There is deliberately no separate way to set a
+    different AdGuard username/password anymore -- one admin identity
+    governs both, so they can never drift apart the way they did before.
+
+    Only touches AdGuard when a NEW password is actually submitted (same
+    "blank means keep current" convention this form already had) --
+    changing just the username without changing the password would
+    otherwise force a password re-sync using nothing (there's no
+    current plaintext password ever stored anymore to re-hash with)."""
     username = request.form.get("admin_username", "").strip()
     password = request.form.get("admin_password", "")
     if not username:
         return flash_redirect("settings_page", "Admin username can't be empty.", error=True)
     conn = get_db()
     db.set_setting(conn, "admin_username", username)
+    message = "Saved."
     if password:
         db.set_setting(conn, "admin_password_hash", auth.hash_password(password))
+        # Kept only for common/adguard_client.py's own REST calls (filter
+        # refresh, category sync, SafeSearch, etc.), which need to replay
+        # this as HTTP Basic Auth -- never displayed back to the admin
+        # anymore (that was the insecure part); they already know it,
+        # since they're the one who just set it.
+        db.set_setting(conn, "adguard_username", username)
+        db.set_setting(conn, "adguard_password", password)
+        try:
+            adguard_config_sync.sync_adguard_credentials(username, password)
+        except adguard_config_sync.AdGuardConfigSyncError as exc:
+            log.warning("AdGuard credential sync failed: %s", exc)
+            message = (
+                "Saved. Could not update AdGuard's own login automatically "
+                f"({exc}) -- AdGuard-dependent features (filter updates, "
+                "SafeSearch, category blocking) may stop working until this "
+                "is resolved."
+            )
+        else:
+            message = (
+                "Saved. AdGuard's own login was updated too -- run "
+                "'docker compose restart adguard' for it to take effect "
+                "(AdGuard only reads its config at startup)."
+            )
     conn.commit()
-    return flash_redirect("settings_page", "Saved.")
+    return flash_redirect("settings_page", message)
 
 
 db.init_db()  # once per process, not per request -- see get_db()'s own comment above
