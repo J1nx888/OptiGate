@@ -71,6 +71,14 @@ NOTHING`) in `common/db.py`. Known keys actually written/read elsewhere:
   set by `series_resolve._record_resolver_error()` and cleared by
   `_clear_resolver_error()` on the next success. Surfaced as a banner on the
   dashboard's Report page (`dashboard.report()`).
+- `optigate_hostname_prefix` -- the customizable first label of the
+  memorable troubleshooting address (default `"optigate"`; the `.home`
+  suffix is hardcoded, never stored -- see `common/db.py`'s
+  `optigate_hostname()`). Editable from the Settings page
+  (`update_optigate_hostname`); read by `controller/adguard_sync.py`'s
+  `sync_optigate_rewrite()` (pushes the matching AdGuard DNS rewrite) and
+  `dashboard/block_page_server.py` (serves the device-info page for
+  whichever hostname this currently resolves to).
 
 ### `users`
 One row per proxy login (one per kid/person), independent of the dashboard

@@ -306,6 +306,114 @@ def test_domain_access_grants_and_revokes_a_user(client, db_conn):
     ).fetchone() is None
 
 
+def test_domains_page_lists_bulk_access_form_and_row_checkboxes(client, db_conn):
+    """Real live-testing feedback (RoadMap.md's dated entry): "we should
+    probably have a way to bulk categorize domains" -- setting access on
+    dozens of domains one at a time via each one's own Manage page
+    doesn't scale."""
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    resp = client.get("/domains", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'action="/domains/bulk-access"' in resp.data
+    assert b'class="bulk-domain-check"' in resp.data
+    assert b'id="domainSelectAll"' in resp.data
+
+
+def test_bulk_update_domain_access_applies_to_every_selected_domain(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()[0]
+    client.post("/domains/add", data={"pattern": r"a\.example\.com", "mode": "splice"}, headers=_auth_header())
+    client.post("/domains/add", data={"pattern": r"b\.example\.com", "mode": "splice"}, headers=_auth_header())
+    domain_ids = [
+        r["id"] for r in db_conn.execute(
+            "SELECT id FROM domains WHERE pattern IN (?, ?)", (r"a\.example\.com", r"b\.example\.com")
+        )
+    ]
+    assert len(domain_ids) == 2
+
+    resp = client.post(
+        "/domains/bulk-access",
+        data={"domain_ids": [str(i) for i in domain_ids], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith("/domains")
+    for domain_id in domain_ids:
+        assert db_conn.execute(
+            "SELECT 1 FROM user_domains WHERE user_id = ? AND domain_id = ?", (user_id, domain_id)
+        ).fetchone() is not None
+
+
+def test_bulk_update_domain_access_can_set_global(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"a\.example\.com", "mode": "splice"}, headers=_auth_header())
+    client.post("/domains/add", data={"pattern": r"b\.example\.com", "mode": "splice"}, headers=_auth_header())
+    domain_ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+
+    client.post(
+        "/domains/bulk-access",
+        data={"domain_ids": [str(i) for i in domain_ids], "is_global": "on"},
+        headers=_auth_header(),
+    )
+
+    rows = db_conn.execute("SELECT is_global FROM domains").fetchall()
+    assert all(r["is_global"] == 1 for r in rows)
+
+
+def test_bulk_update_domain_access_without_selection_shows_error_and_changes_nothing(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    domain_id = db_conn.execute("SELECT id FROM domains").fetchone()["id"]
+
+    resp = client.post(
+        "/domains/bulk-access", data={"is_global": "on"}, headers=_auth_header(),
+    )
+
+    assert "error=1" in resp.headers["Location"]
+    row = db_conn.execute("SELECT is_global FROM domains WHERE id = ?", (domain_id,)).fetchone()
+    assert row["is_global"] == 0
+
+
+def test_bulk_update_domain_access_is_one_transaction_not_one_commit_per_domain(client, db_conn, monkeypatch):
+    """Regression guard mirroring test_category_fetch.py's own
+    test_sync_is_one_atomic_transaction_not_thousands_of_autocommits --
+    same isolation_level=None database, same risk if this loop ever lost
+    its explicit BEGIN IMMEDIATE/commit wrapper. A mid-loop failure must
+    leave every domain's access completely untouched, not partially
+    applied to whichever ones were processed before the failure."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()[0]
+    client.post("/domains/add", data={"pattern": r"a\.example\.com", "mode": "splice"}, headers=_auth_header())
+    client.post("/domains/add", data={"pattern": r"b\.example\.com", "mode": "splice"}, headers=_auth_header())
+    domain_ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains ORDER BY id")]
+
+    import dashboard as dashboard_module
+    real_replace = dashboard_module._replace_domain_access
+    calls = []
+
+    def boom(conn, domain_id, *a, **kw):
+        calls.append(domain_id)
+        if len(calls) == 2:
+            raise ValueError("simulated failure partway through the batch")
+        return real_replace(conn, domain_id, *a, **kw)
+
+    monkeypatch.setattr(dashboard_module, "_replace_domain_access", boom)
+
+    # dashboard_app fixture sets app.testing = True, which propagates the
+    # exception to the test instead of turning it into a 500 response --
+    # same as common/category_fetch.py's own equivalent test.
+    with pytest.raises(ValueError):
+        client.post(
+            "/domains/bulk-access",
+            data={"domain_ids": [str(i) for i in domain_ids], "user_ids": [str(user_id)]},
+            headers=_auth_header(),
+        )
+
+    for domain_id in domain_ids:
+        assert db_conn.execute(
+            "SELECT 1 FROM user_domains WHERE user_id = ? AND domain_id = ?", (user_id, domain_id)
+        ).fetchone() is None, "first domain's write must have rolled back too, not just the second one's failure"
+
+
 def test_add_path_and_delete_path(client, db_conn):
     client.post("/domains/add", data={"pattern": r"example\.com", "mode": "bump"}, headers=_auth_header())
     domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
@@ -641,6 +749,30 @@ def test_user_detail_unknown_id_redirects_with_error(client):
     resp = client.get("/users/999999", headers=_auth_header())
     assert resp.status_code == 302
     assert "error=1" in resp.headers["Location"]
+
+
+def test_user_detail_shows_global_domains_separately_from_assigned(client, db_conn):
+    """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
+    the Users list's "N assigned" count includes every is_global domain
+    (users()'s own domain_count query), but this page used to query only
+    user_domains directly -- a brand-new user with zero explicit
+    assignments showed nothing at all beyond a vague aside, with no way
+    to see what the global domains actually are. Now they're listed here
+    directly, note included."""
+    client.post(
+        "/domains/add",
+        data={"pattern": r"google\.com", "mode": "splice", "note": "Google", "is_global": "on"},
+        headers=_auth_header(),
+    )
+    client.post("/users/add", data={"username": "kid1", "display_name": "Kid One", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()[0]
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Global sites" in resp.data
+    assert rb"google\.com" in resp.data
+    assert b"Google" in resp.data
 
 
 def test_add_show_invalid_url_rejected(client, db_conn):
@@ -986,6 +1118,53 @@ def test_update_local_network_blank_disables_check(client, db_conn):
     assert db.get_setting(db_conn, "local_network") == ""
     import matching
     assert matching.ip_in_configured_lan(db_conn, "8.8.8.8") is True
+
+
+def test_settings_page_shows_the_default_optigate_hostname(client):
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"optigate.home" in resp.data
+
+
+def test_update_optigate_hostname_saves_lowercased_value(client, db_conn):
+    resp = client.post(
+        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "MyNetwork"}, headers=_auth_header()
+    )
+    assert resp.status_code == 302
+    import db
+    assert db.get_setting(db_conn, "optigate_hostname_prefix") == "mynetwork"
+
+
+def test_update_optigate_hostname_blank_falls_back_to_default(client, db_conn):
+    client.post("/settings/optigate-hostname", data={"optigate_hostname_prefix": ""}, headers=_auth_header())
+    import db
+    assert db.get_setting(db_conn, "optigate_hostname_prefix") == db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
+
+
+def test_update_optigate_hostname_rejects_a_dot(client, db_conn):
+    """The project owner's own words: "force the use of .home so the
+    administrator can only change the first part of the URL" -- a
+    prefix containing its own dot could otherwise smuggle in a
+    different, unintended suffix."""
+    resp = client.post(
+        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "evil.example"}, headers=_auth_header()
+    )
+    assert "error=1" in resp.headers["Location"]
+    import db
+    assert db.get_setting(db_conn, "optigate_hostname_prefix") is None
+
+
+def test_update_optigate_hostname_rejects_invalid_characters(client, db_conn):
+    resp = client.post(
+        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "not valid!"}, headers=_auth_header()
+    )
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_update_optigate_hostname_rejects_leading_or_trailing_hyphen(client, db_conn):
+    resp = client.post(
+        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "-bad"}, headers=_auth_header()
+    )
+    assert "error=1" in resp.headers["Location"]
 
 
 def test_update_block_page_mode_valid_value_saved(client, db_conn):
@@ -2445,6 +2624,95 @@ def test_deleting_a_group_unassigns_its_devices(client, db_conn):
 # group_detail page at all to put a per-group pause control on)
 # ============================================================
 
+def test_devices_page_lists_per_row_add_to_group_select(client, db_conn):
+    """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
+    the group page's own bulk-add form needed you to already know the
+    device's label/MAC to find it in a search-only combobox. This is the
+    opposite direction -- an inline "Add to group" select right on the
+    device's own row, no navigation or typing required."""
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:20"}, headers=_auth_header())
+    resp = client.get("/devices", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'action="/devices/quick-add-to-group"' in resp.data
+    assert b">IoT</option>" in resp.data
+
+
+def test_quick_add_device_to_group_assigns_and_stays_on_devices_page(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:21", "label": "Kitchen Cam"},
+        headers=_auth_header(),
+    )
+    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:21'").fetchone()["id"]
+
+    resp = client.post(
+        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": group_id},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith("/devices")
+    row = db_conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["group_id"] == group_id
+    assert row["user_id"] is None
+    assert row["ignored"] == 0
+    assert row["label"] == "Kitchen Cam", "must not touch label -- unlike update_device(), this is a narrow assignment-only update"
+
+
+def test_quick_add_device_to_group_preserves_bump_and_bypass_flags(client, db_conn):
+    """Regression guard: quick_add_device_to_group() must use the same
+    narrow UPDATE as bulk_add_to_group(), never update_device()'s
+    whole-row-from-form rewrite, or it would silently clear
+    bump_enabled/bypass_login on every quick-assign."""
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:22"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:22'").fetchone()["id"]
+    client.post(
+        "/devices/update",
+        data={"device_id": device_id, "bump_enabled": "on", "bypass_login": "on", "assignment": ""},
+        headers=_auth_header(),
+    )
+
+    client.post(
+        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": group_id},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["group_id"] == group_id
+    assert row["bump_enabled"] == 1
+    assert row["bypass_login"] == 1
+
+
+def test_quick_add_device_to_group_without_group_selected_shows_error(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:23"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
+
+    resp = client.post(
+        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": ""},
+        headers=_auth_header(),
+    )
+
+    assert "error=1" in resp.headers["Location"]
+    row = db_conn.execute("SELECT group_id FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["group_id"] is None
+
+
+def test_quick_add_device_to_group_unknown_group_shows_error(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:24"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
+
+    resp = client.post(
+        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": 999999},
+        headers=_auth_header(),
+    )
+
+    assert "error=1" in resp.headers["Location"]
+
+
 def test_group_detail_page_renders(client, db_conn):
     client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
@@ -2453,6 +2721,26 @@ def test_group_detail_page_renders(client, db_conn):
     assert b"TVs" in resp.data
     assert b"Active right now" in resp.data
     assert b"Pause the internet" in resp.data
+
+
+def test_group_detail_shows_global_domains_separately_from_assigned(client, db_conn):
+    """Same real live-testing feedback as user_detail's own equivalent
+    test -- groups have the exact same is_global-count-vs-empty-list
+    mismatch."""
+    client.post(
+        "/domains/add",
+        data={"pattern": r"gstatic\.com", "mode": "splice", "note": "Google static assets", "is_global": "on"},
+        headers=_auth_header(),
+    )
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+
+    resp = client.get(f"/groups/{group_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Global sites" in resp.data
+    assert rb"gstatic\.com" in resp.data
+    assert b"Google static assets" in resp.data
 
 
 def test_group_detail_unknown_id_redirects_with_error(client):

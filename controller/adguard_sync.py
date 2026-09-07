@@ -60,6 +60,15 @@ handled by an entirely separate mechanism, `sync_category_subscriptions()`
 ITS OWN native managed filter lists instead of expanding it into custom
 rules, letting AdGuard's engine (built for exactly this) match it. See
 each function's own docstring.
+
+**Memorable-URL addendum (2026-09-07)**: `sync_optigate_rewrite()` is a
+FOURTH, unrelated mechanism living in this same module purely because
+it's the same "reconcile every cycle" background loop -- it manages an
+AdGuard DNS-rewrite entry (a completely different AdGuard feature from
+the custom filtering rules the other three sources feed, see
+common/adguard_client.py's own docstring), not a block/allow decision
+at all. See that function's own docstring and dashboard/
+block_page_server.py for the page it makes reachable.
 """
 from __future__ import annotations
 
@@ -686,6 +695,55 @@ def sync_safesearch(
     adguard_client.set_safesearch_settings(base_url, username, password, payload, timeout=timeout)
 
 
+def sync_optigate_rewrite(
+    conn: sqlite3.Connection,
+    base_url: str,
+    username: str,
+    password: str,
+    block_page_ip: str | None,
+    timeout: float = adguard_client.DEFAULT_TIMEOUT,
+) -> None:
+    """Reconciles AdGuard Home's own DNS-rewrite entries against this
+    project's single `optigate.home` entry (the memorable-URL feature,
+    RoadMap.md's dated 2026-09-07 entry) -- same "recompute and reconcile
+    every cycle" discipline as sync_safesearch() above, so renaming the
+    hostname prefix (Settings page) or the box's own LAN IP changing
+    (DASHBOARD_URL) self-heals on the next cycle, no manual step needed.
+
+    Skipped entirely if block_page_ip is None -- same "not configured,
+    not an error" treatment every other block_page_ip consumer already
+    gives it (see controller/main.py's `_parse_block_page_ip()` own
+    docstring): there's nowhere to point the rewrite at without it.
+
+    Manages ONLY entries whose domain ends in
+    `db.OPTIGATE_HOSTNAME_SUFFIX` (".home") -- that forced suffix exists
+    specifically so this project's own managed entry is unambiguous and
+    never collides with an admin's own unrelated AdGuard rewrite (a
+    completely separate, general-purpose AdGuard feature this project
+    doesn't otherwise touch). A stale entry (leftover from an old prefix,
+    or an old LAN IP) is deleted before the correct one is (re-)added --
+    AdGuard has no update-in-place call for this, only add/delete (see
+    common/adguard_client.py's own docstring)."""
+    if not block_page_ip:
+        return
+    desired_domain = db.optigate_hostname(conn)
+    current = adguard_client.get_rewrites(base_url, username, password, timeout=timeout)
+    ours = [
+        r for r in current
+        if isinstance(r, dict) and str(r.get("domain", "")).endswith(db.OPTIGATE_HOSTNAME_SUFFIX)
+    ]
+    already_correct = any(
+        r.get("domain") == desired_domain and r.get("answer") == block_page_ip for r in ours
+    )
+    for stale in ours:
+        if stale.get("domain") != desired_domain or stale.get("answer") != block_page_ip:
+            adguard_client.delete_rewrite(
+                base_url, username, password, stale["domain"], stale["answer"], timeout=timeout
+            )
+    if not already_correct:
+        adguard_client.add_rewrite(base_url, username, password, desired_domain, block_page_ip, timeout=timeout)
+
+
 def sync_once(
     conn: sqlite3.Connection, base_url: str, username: str, password: str, block_page_ip: str | None = None
 ) -> int:
@@ -718,6 +776,7 @@ def sync_once(
     adguard_client.set_custom_rules(base_url, username, password, new_rules)
     sync_category_subscriptions(conn, base_url, username, password)
     sync_safesearch(conn, base_url, username, password)
+    sync_optigate_rewrite(conn, base_url, username, password, block_page_ip)
     return len(managed)
 
 

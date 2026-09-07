@@ -613,6 +613,33 @@ def set_setting_if_absent(conn: sqlite3.Connection, key: str, value: str) -> Non
     )
 
 
+# The memorable-URL feature (RoadMap.md's dated entry, 2026-09-07): a
+# device that's already connected to the WiFi but lost real internet
+# access (or just wants to self-check) can visit this hostname to see its
+# own Label/User-or-Group/IP/MAC -- see dashboard/block_page_server.py for
+# the page itself and controller/adguard_sync.py's sync_optigate_rewrite()
+# for the AdGuard DNS-rewrite that makes the hostname actually resolve to
+# this box. Lives here (common/), not in either of those two -- both
+# dashboard.py's own Settings-page route and adguard_sync.py need the
+# exact same "what's the current full hostname" answer, and they're
+# separate container images (see common/category_fetch.py's own docstring
+# for why a shared helper belongs in common/ rather than being duplicated
+# or cross-imported between controller/ and dashboard/).
+OPTIGATE_HOSTNAME_SUFFIX = ".home"
+DEFAULT_OPTIGATE_HOSTNAME_PREFIX = "optigate"
+
+
+def optigate_hostname(conn: sqlite3.Connection) -> str:
+    """The full current hostname (e.g. "optigate.home"). The `.home`
+    suffix is hardcoded, never stored or admin-editable -- the project
+    owner's explicit direction: "force the use of .home so the
+    administrator can only change the first part of the URL." Only the
+    prefix (`optigate_hostname_prefix` setting) is customizable, from the
+    dashboard's Settings page."""
+    prefix = get_setting(conn, "optigate_hostname_prefix", DEFAULT_OPTIGATE_HOSTNAME_PREFIX)
+    return f"{prefix or DEFAULT_OPTIGATE_HOSTNAME_PREFIX}{OPTIGATE_HOSTNAME_SUFFIX}"
+
+
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z"
 

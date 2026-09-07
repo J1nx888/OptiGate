@@ -406,3 +406,79 @@ def test_set_safesearch_settings_puts_the_expected_body(monkeypatch):
     assert captured["url"] == "http://127.0.0.1:3000/control/safesearch/settings"
     assert captured["method"] == "PUT"
     assert captured["body"] == config
+
+
+# ============================================================
+# DNS rewrites (optigate.home memorable-URL feature, RoadMap.md's dated
+# 2026-09-07 entry) -- confirmed live the same session against a real
+# AdGuard Home instance, see this module's own docstring.
+# ============================================================
+
+def test_get_rewrites_returns_the_plain_list(monkeypatch):
+    captured = {}
+
+    def fake_open(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        return _json_response([{"domain": "optigate.home", "answer": "192.168.1.250", "enabled": True}])
+
+    monkeypatch.setattr(adguard_client._OPENER, "open", fake_open)
+
+    rewrites = adguard_client.get_rewrites("http://127.0.0.1:3000", "admin", "hunter2")
+
+    assert rewrites == [{"domain": "optigate.home", "answer": "192.168.1.250", "enabled": True}]
+    assert captured["url"] == "http://127.0.0.1:3000/control/rewrite/list"
+    assert captured["method"] == "GET"
+
+
+def test_get_rewrites_handles_a_fresh_instances_empty_list(monkeypatch):
+    monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: _json_response([]))
+    assert adguard_client.get_rewrites("http://127.0.0.1:3000", "admin", "x") == []
+
+
+def test_get_rewrites_rejects_non_list_response(monkeypatch):
+    monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: _json_response({"not": "a list"}))
+    with pytest.raises(adguard_client.AdGuardError):
+        adguard_client.get_rewrites("http://127.0.0.1:3000", "admin", "x")
+
+
+def test_get_rewrites_rejects_malformed_json(monkeypatch):
+    monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: FakeResponse(b"not json"))
+    with pytest.raises(adguard_client.AdGuardError):
+        adguard_client.get_rewrites("http://127.0.0.1:3000", "admin", "x")
+
+
+def test_add_rewrite_posts_domain_and_answer(monkeypatch):
+    captured = {}
+
+    def fake_open(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["body"] = json.loads(request.data.decode())
+        return FakeResponse(b"")
+
+    monkeypatch.setattr(adguard_client._OPENER, "open", fake_open)
+
+    adguard_client.add_rewrite("http://127.0.0.1:3000", "admin", "hunter2", "optigate.home", "192.168.1.250")
+
+    assert captured["url"] == "http://127.0.0.1:3000/control/rewrite/add"
+    assert captured["method"] == "POST"
+    assert captured["body"] == {"domain": "optigate.home", "answer": "192.168.1.250"}
+
+
+def test_delete_rewrite_posts_domain_and_answer(monkeypatch):
+    captured = {}
+
+    def fake_open(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["body"] = json.loads(request.data.decode())
+        return FakeResponse(b"")
+
+    monkeypatch.setattr(adguard_client._OPENER, "open", fake_open)
+
+    adguard_client.delete_rewrite("http://127.0.0.1:3000", "admin", "hunter2", "optigate.home", "192.168.1.250")
+
+    assert captured["url"] == "http://127.0.0.1:3000/control/rewrite/delete"
+    assert captured["method"] == "POST"
+    assert captured["body"] == {"domain": "optigate.home", "answer": "192.168.1.250"}

@@ -55,6 +55,7 @@ Pi-hole setup:
 | 18 | Editable category subscription URLs; 4th blocklist format (full URL per line) | ✅ Done, live-verified |
 | 19 | Schedule-categories picker: combobox → checkbox list | ✅ Done, live-verified |
 | 20 | Live post-soak-test fixes: per-device info page, bulk-add devices to a group, `PeriodicTask` immediate-first-run fix (category sync) | ✅ Done, live-verified |
+| 21 | Devices-page quick-add-to-group; global-sites visibility on user/group pages; bulk domain access assignment; `optigate.home` memorable-URL + device-status page | ✅ Built and unit-tested; `optigate.home` not yet enabled/verified on the real production box (needs `DASHBOARD_URL` set there first) |
 
 ---
 
@@ -1860,6 +1861,168 @@ substantive features that need their own design pass, not squeezed in
 alongside the above. The `optigate.home` memorable-URL + device-status
 page feature (needed before go-live, so users losing connectivity have
 somewhere to be pointed) is also still to build.
+
+### Bulk-add-to-group follow-up: per-row quick action on the Devices page (2026-09-07)
+
+Real live-testing feedback on item 2 above, immediately after it
+shipped: the group detail page's own bulk-add combobox requires already
+knowing a device's exact label/MAC to find it (`data-mode="multi"`'s
+`SHOW_ALL_THRESHOLD = 8` means anything past 8 devices in the house
+shows only "Type to search N entries," not a browsable list) --
+backwards when you're trying to add a device you're looking right at.
+Considered, and rejected, changing the shared combobox widget itself to
+always list everything in multi mode: `schedule_detail`'s own category
+picker (Phase 19) deliberately keeps the opposite choice for
+kids/groups/devices specifically *because* those lists "can grow
+large," unlike the small fixed category list -- flipping that here
+would undo that reasoning for the domain-access assignment picker too
+(same shared widget, same `data-mode="multi"`, used for potentially
+much larger households).
+
+Instead, added the other option the project owner suggested: a plain
+inline `<select>` + "Add" button on every row of the Devices table
+itself -- no searching, no navigating away, click and continue to the
+next row. New narrow route `/devices/quick-add-to-group`
+(`quick_add_device_to_group()`) mirrors `bulk_add_to_group()`'s own
+UPDATE exactly (`user_id`/`group_id`/`ignored` only -- never touches
+label/`bump_enabled`/`bypass_login`, unlike `update_device()`'s
+whole-row rewrite), and redirects back to `/devices` rather than
+`group_detail` so a household with several devices to sort can keep
+working down the list. The existing bulk-add-by-combobox on the group
+page is left in place for the genuinely-bulk case (assigning several
+devices you already know by name at once); this is the complementary
+one-at-a-time-but-fast path. 5 new tests in `tests/test_dashboard.py`.
+
+### "Mystery" global domains + bulk domain access (2026-09-07)
+
+The other still-open item: "several domains appear as 'everyone' but I
+don't know what they are for... when I create a new user, the 27
+domains show for that new user too but when I click manage, those
+domains don't show since they are assigned to everyone."
+
+**Root cause, and it wasn't missing data.** The 27 domains are real:
+`defaults/seed_defaults.py`'s `GLOBAL_SPLICE_DOMAINS` (24) +
+`TRUSTED_DOMAINS` (2) + `crunchyroll.com` (1), every one seeded
+`is_global=1` with its own `note` already explaining what it's for
+("Google", "Cookie consent", "Crunchyroll raw video CDN", etc.) --
+shared infrastructure a household's Crunchyroll access depends on, not
+mystery entries. The actual bug was purely a visibility gap:
+`users()`'s "N assigned" count on the Users list correctly ORs in every
+`is_global` domain, but `user_detail()`'s "Assigned sites" card only
+ever queried the `user_domains` junction table directly -- a brand-new
+user with zero explicit assignments showed nothing there beyond a vague
+"(still gets global sites)" aside, with no way to see what those global
+sites actually were short of separately knowing to visit the unfiltered
+Domains page and manually spot the "Everyone" rows among however many
+per-user ones. `group_detail()` had the exact same gap. Fixed with a
+new shared `GLOBAL_SITES_CARD` (pattern/mode/note, `_global_domains()`
+helper) on both pages -- no schema change, just surfacing data that was
+already there.
+
+**"Bulk categorize domains"**: added a bulk-access-assignment action
+to the Domains page -- the allow-list equivalent of item 2's bulk-
+add-to-group for devices, since setting access on dozens of domains one
+Manage-page-at-a-time doesn't scale (the same 27 seeded ones alone
+already make the flat table long). Checkboxes per row (plus a "select
+all") feed a `#bulkDomainAccessForm` reusing the same `ACCESS_SELECTS`
+widget (Everyone / Users / Groups / Devices) as the single-domain
+Manage page and the add-domain form -- deliberately NOT wrapped as one
+`<form>` around the whole table (that would nest `<form>` elements
+around each row's own Delete form, invalid HTML), so a small inline
+`<script>` collects checked boxes into hidden `domain_ids` inputs right
+before submit instead. New route `bulk_update_domain_access()` reuses
+the single-domain route's own access-replacement logic (extracted into
+`_replace_domain_access()`, shared by both) in a loop wrapped in one
+`BEGIN IMMEDIATE`/commit -- same "one transaction, not one autocommit
+per row" discipline as `bulk_add_to_group()` and, at a much larger
+scale, `common/category_fetch.py`'s own fix earlier in this same
+session. 9 new tests in `tests/test_dashboard.py`, including a
+monkeypatched mid-batch-failure test proving the rollback covers the
+whole batch, not just the row that failed.
+
+**Still open**: the `optigate.home` memorable-URL + device-status page
+feature.
+
+### `optigate.home` memorable troubleshooting address (2026-09-07)
+
+The last pre-go-live item the project owner asked for directly: "we need
+a website address that can be easily remembered by a user for devices
+that have already connected to the wifi that will bring up [a page
+identifying] Label (if it already exists), User/DeviceGroup (if already
+assigned), IP Address, MAC Address, and maybe even Device Name if
+possible" -- so anyone who loses internet after go-live has somewhere to
+be pointed, without walking them through finding their own IP/MAC by
+hand. Address specified exactly: `optigate.home`, "but allow
+customization on the settings page later... force the use of .home so
+the administrator can only change the first part of the URL."
+
+**Two halves, both self-healing every cycle -- no manual end-user step
+required, per the project owner's standing constraint from the
+FORWARD-chain fix above.**
+
+1. **Making the hostname resolve at all.** `common/adguard_client.py`
+   gained `get_rewrites()`/`add_rewrite()`/`delete_rewrite()` for
+   AdGuard Home's DNS-rewrite feature (`/control/rewrite/*` -- a
+   separate mechanism from the custom filtering rules the rest of this
+   module manages, confirmed live 2026-09-07 against the real
+   production instance: `list` returns a plain `[]` on a fresh instance,
+   `add`/`delete` both take `{"domain", "answer"}`, and a rewrite is
+   immediately resolvable -- confirmed with `dig @127.0.0.1 -p 5353` on
+   the real box, then confirmed gone after `delete`).
+   `controller/adguard_sync.py`'s new `sync_optigate_rewrite()` runs on
+   every regular sync cycle (wired into `sync_once()`) and reconciles
+   AdGuard's rewrite list against the current desired
+   `(optigate.home, this-box's-LAN-IP)` pair -- renaming the hostname
+   prefix from Settings, or the box's own `DASHBOARD_URL` changing,
+   self-heals on the next cycle. Scoped defensively: only ever touches
+   entries whose domain ends in `.home` (the forced suffix exists
+   specifically so this project's own managed entry can never be
+   confused with an admin's own unrelated AdGuard rewrite). Skipped
+   entirely -- not an error -- when `DASHBOARD_URL` isn't set, same
+   "not configured yet" treatment every other `block_page_ip` consumer
+   already gives it; **found live that this was already the case in
+   production** (`DASHBOARD_URL` was blank on the real Beelink, so
+   `block_page_server.py` had never actually been running there either,
+   a pre-existing gap this surfaced rather than caused).
+2. **Serving the page.** Extended `dashboard/block_page_server.py`
+   (already the LAN-wide port-80 listener for the friendly blocked-site
+   page, and already resolving identity from the requesting socket's
+   source IP) rather than standing up a new server: its handler now
+   checks the `Host` header against `common/db.optigate_hostname()`
+   first, and if it matches, renders a small table (Label,
+   Assigned-to -- user display name, group name, "Ignored", or
+   "Unassigned" -- IP, MAC) instead of the blocked-page response.
+   Device name is shown honestly as "Not tracked yet" rather than
+   omitted -- no DHCP-hostname/mDNS capture exists anywhere in this
+   project's schema yet, a real gap for a future session, not something
+   invented here to check a box. An IP with no active `device_bindings`
+   row at all still gets a real page ("Not recognized on this network
+   yet"), not an error.
+3. **The forced-suffix setting.** New `optigate_hostname_prefix` setting
+   (default `"optigate"`), a Settings-page card with server-side
+   validation (DNS label rules -- letters/digits/hyphens only, no dots,
+   no leading/trailing hyphen) enforcing the project owner's own
+   constraint that only the first label is editable. Shared helper
+   `common/db.py`'s `optigate_hostname()` is the single source of truth
+   both `sync_optigate_rewrite()` and `block_page_server.py` read, so
+   the two can never disagree about which hostname is "the" one --
+   deliberately placed in `common/` rather than either `controller/` or
+   `dashboard/` since both container images need it (same reasoning
+   `common/category_fetch.py`'s own docstring already established for
+   this exact split).
+
+Live-verified against the real production AdGuard instance (rewrite
+add/list/delete + `dig` resolution, see above) before writing the
+reconciliation logic against it, matching this project's own repeated
+lesson about verifying REST shapes against the real thing rather than
+documentation/memory alone. 34 new tests across
+`tests/test_adguard_client.py`, `tests/test_controller_adguard_sync.py`,
+`tests/test_block_page_server.py`, and `tests/test_dashboard.py`.
+
+**Not yet done**: actually setting `DASHBOARD_URL` on the real
+production box and confirming `optigate.home` resolves and renders
+end-to-end there -- deliberately not flipped live without asking first,
+since it's the household's live gate box.
 
 ### New database tables planned
 

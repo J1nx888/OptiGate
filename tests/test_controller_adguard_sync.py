@@ -741,13 +741,14 @@ class _FakeAdGuardClient:
 
     DEFAULT_TIMEOUT = 5.0
 
-    def __init__(self, existing_filters=None, safesearch=None):
+    def __init__(self, existing_filters=None, safesearch=None, rewrites=None):
         self.filters = list(existing_filters or [])
         self.calls = []
         self.safesearch = dict(safesearch) if safesearch is not None else {
             "enabled": False, "bing": True, "duckduckgo": True, "ecosia": True,
             "google": True, "pixabay": True, "yandex": True, "youtube": True,
         }
+        self.rewrites = [dict(r) for r in (rewrites or [])]
 
     def get_filters_status(self, base_url, username, password, timeout=None):
         return self.filters
@@ -768,6 +769,17 @@ class _FakeAdGuardClient:
     def set_safesearch_settings(self, base_url, username, password, config, timeout=None):
         self.calls.append(("safesearch", dict(config)))
         self.safesearch = dict(config)
+
+    def get_rewrites(self, base_url, username, password, timeout=None):
+        return [dict(r) for r in self.rewrites]
+
+    def add_rewrite(self, base_url, username, password, domain, answer, timeout=None):
+        self.calls.append(("add_rewrite", domain, answer))
+        self.rewrites.append({"domain": domain, "answer": answer, "enabled": True})
+
+    def delete_rewrite(self, base_url, username, password, domain, answer, timeout=None):
+        self.calls.append(("delete_rewrite", domain, answer))
+        self.rewrites = [r for r in self.rewrites if not (r["domain"] == domain and r["answer"] == answer)]
 
 
 def test_sync_category_subscriptions_skips_categories_at_or_under_threshold(conn, monkeypatch):
@@ -913,3 +925,77 @@ def test_sync_safesearch_never_touches_per_service_booleans(conn, monkeypatch):
     assert pushed["pixabay"] is False
     assert pushed["bing"] is True
     assert pushed["enabled"] is True
+
+
+# ============================================================
+# sync_optigate_rewrite (optigate.home memorable-URL feature, RoadMap.md's
+# dated 2026-09-07 entry)
+# ============================================================
+
+def test_sync_optigate_rewrite_skipped_entirely_without_a_block_page_ip(conn, monkeypatch):
+    fake = _FakeAdGuardClient()
+    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+
+    adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", None)
+
+    assert fake.calls == []
+
+
+def test_sync_optigate_rewrite_adds_the_default_hostname_on_a_fresh_instance(conn, monkeypatch):
+    fake = _FakeAdGuardClient()
+    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+
+    adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
+
+    assert fake.calls == [("add_rewrite", "optigate.home", "192.168.1.250")]
+
+
+def test_sync_optigate_rewrite_is_a_noop_when_already_correct(conn, monkeypatch):
+    fake = _FakeAdGuardClient(rewrites=[{"domain": "optigate.home", "answer": "192.168.1.250", "enabled": True}])
+    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+
+    adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
+
+    assert fake.calls == []
+
+
+def test_sync_optigate_rewrite_replaces_a_stale_ip_when_dashboard_url_changed(conn, monkeypatch):
+    fake = _FakeAdGuardClient(rewrites=[{"domain": "optigate.home", "answer": "192.168.1.99", "enabled": True}])
+    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+
+    adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
+
+    assert fake.calls == [
+        ("delete_rewrite", "optigate.home", "192.168.1.99"),
+        ("add_rewrite", "optigate.home", "192.168.1.250"),
+    ]
+    assert fake.rewrites == [{"domain": "optigate.home", "answer": "192.168.1.250", "enabled": True}]
+
+
+def test_sync_optigate_rewrite_replaces_a_stale_domain_when_prefix_renamed(conn, monkeypatch):
+    db.set_setting(conn, "optigate_hostname_prefix", "mynetwork")
+    conn.commit()
+    fake = _FakeAdGuardClient(rewrites=[{"domain": "optigate.home", "answer": "192.168.1.250", "enabled": True}])
+    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+
+    adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
+
+    assert fake.calls == [
+        ("delete_rewrite", "optigate.home", "192.168.1.250"),
+        ("add_rewrite", "mynetwork.home", "192.168.1.250"),
+    ]
+
+
+def test_sync_optigate_rewrite_never_touches_an_unrelated_rewrite(conn, monkeypatch):
+    """Only entries ending in .home are this project's business -- an
+    admin's own unrelated AdGuard rewrite (a general-purpose AdGuard
+    feature this project doesn't otherwise manage) must survive
+    untouched."""
+    fake = _FakeAdGuardClient(rewrites=[{"domain": "printer.lan", "answer": "192.168.1.5", "enabled": True}])
+    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+
+    adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
+
+    assert ("delete_rewrite", "printer.lan", "192.168.1.5") not in fake.calls
+    assert {"domain": "printer.lan", "answer": "192.168.1.5", "enabled": True} in fake.rewrites
+    assert ("add_rewrite", "optigate.home", "192.168.1.250") in fake.calls

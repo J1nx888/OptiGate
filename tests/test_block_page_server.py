@@ -138,3 +138,124 @@ def test_page_still_renders_even_if_logging_is_unreachable(server, monkeypatch):
     status, body, _ = _get(server, host_header="crunchyroll.com")
     assert status == 403
     assert "isn't approved" in body
+
+
+# ============================================================
+# optigate.home memorable-URL device-info page (RoadMap.md's dated
+# 2026-09-07 entry)
+# ============================================================
+
+def test_optigate_hostname_shows_a_known_devices_info(server, conn):
+    mac = "aa:bb:cc:dd:ee:02"
+    conn.execute(
+        "INSERT INTO devices (mac_address, label, created_at) VALUES (?, ?, ?)",
+        (mac, "Kitchen Cam", db.now_iso()),
+    )
+    conn.commit()
+    identity.record_binding(conn, mac, "127.0.0.1", source="rtnetlink")
+
+    status, body, headers = _get(server, host_header="optigate.home")
+
+    assert status == 200
+    assert "text/html" in headers["Content-Type"]
+    assert "Kitchen Cam" in body
+    assert mac in body
+    assert "127.0.0.1" in body
+    assert "Not tracked yet" in body  # device name -- honestly not captured anywhere yet
+
+
+def test_optigate_hostname_shows_the_assigned_users_display_name(server, conn):
+    mac = "aa:bb:cc:dd:ee:03"
+    conn.execute(
+        "INSERT INTO users (username, password_hash, display_name, created_at) VALUES (?, ?, ?, ?)",
+        ("kid1", "x", "Alex", db.now_iso()),
+    )
+    user_id = conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO devices (mac_address, user_id, created_at) VALUES (?, ?, ?)",
+        (mac, user_id, db.now_iso()),
+    )
+    conn.commit()
+    identity.record_binding(conn, mac, "127.0.0.1", source="rtnetlink")
+
+    _, body, _ = _get(server, host_header="optigate.home")
+
+    assert "Alex" in body
+
+
+def test_optigate_hostname_shows_the_assigned_groups_name(server, conn):
+    mac = "aa:bb:cc:dd:ee:04"
+    conn.execute("INSERT INTO groups (name, created_at) VALUES (?, ?)", ("IoT", db.now_iso()))
+    group_id = conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO devices (mac_address, group_id, created_at) VALUES (?, ?, ?)",
+        (mac, group_id, db.now_iso()),
+    )
+    conn.commit()
+    identity.record_binding(conn, mac, "127.0.0.1", source="rtnetlink")
+
+    _, body, _ = _get(server, host_header="optigate.home")
+
+    assert "IoT" in body
+
+
+def test_optigate_hostname_shows_ignored_for_a_bypassed_device(server, conn):
+    mac = "aa:bb:cc:dd:ee:05"
+    conn.execute(
+        "INSERT INTO devices (mac_address, ignored, created_at) VALUES (?, 1, ?)", (mac, db.now_iso())
+    )
+    conn.commit()
+    identity.record_binding(conn, mac, "127.0.0.1", source="rtnetlink")
+
+    _, body, _ = _get(server, host_header="optigate.home")
+
+    assert "Ignored" in body
+
+
+def test_optigate_hostname_unrecognized_ip_shows_just_the_ip(server, conn):
+    status, body, _ = _get(server, host_header="optigate.home")
+
+    assert status == 200
+    assert "127.0.0.1" in body
+    assert "Not recognized" in body
+
+
+def test_optigate_hostname_is_case_insensitive_and_ignores_port(server, conn):
+    status, body, _ = _get(server, host_header="OptiGate.Home:8080")
+    assert status == 200
+    assert "Not recognized" in body
+
+
+def test_optigate_hostname_respects_custom_prefix_setting(server, conn):
+    db.set_setting(conn, "optigate_hostname_prefix", "mynetwork")
+    conn.commit()
+
+    status, body, _ = _get(server, host_header="mynetwork.home")
+    assert status == 200
+    assert "Not recognized" in body
+
+    # The old default no longer matches once the prefix has been changed
+    # -- falls through to the ordinary blocked-page response instead.
+    status, body, _ = _get(server, host_header="optigate.home")
+    assert status == 403
+
+
+def test_other_hostnames_still_get_the_ordinary_blocked_page(server, conn):
+    status, body, _ = _get(server, host_header="crunchyroll.com")
+    assert status == 403
+    assert "isn't approved" in body
+
+
+def test_optigate_page_falls_back_to_blocked_page_if_hostname_lookup_fails(server, monkeypatch):
+    """A total DB outage means the current hostname setting can't be
+    read at all -- falls through to the ordinary blocked-page response
+    (which has its own, separate DB-failure fallback, already covered by
+    test_page_still_renders_even_if_logging_is_unreachable) rather than
+    crashing the request."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated DB failure")
+
+    monkeypatch.setattr(block_page_server.db, "get_conn", _boom)
+    status, body, _ = _get(server, host_header="optigate.home")
+    assert status == 403
+    assert "isn't approved" in body

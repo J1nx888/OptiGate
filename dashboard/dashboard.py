@@ -1016,6 +1016,47 @@ def reset_password():
     return flash_redirect("user_detail", "Password updated.", user_id=user_id)
 
 
+# Shared by user_detail and group_detail's own "Assigned sites" card --
+# real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
+# creating a new user shows "27 assigned" on the Users list (the
+# is_global count, see users()'s own domain_count query), but that
+# user's own Manage page only ever queried user_domains directly, so it
+# showed nothing for a brand-new user beyond a vague "(still gets global
+# sites)" aside -- no way to see WHAT those 27 domains actually are
+# without separately knowing to visit the unfiltered Domains page and
+# spot the "Everyone" rows yourself. This card answers that in place,
+# using each domain's own `note` (defaults/seed_defaults.py already sets
+# one on every seeded global domain -- "Google", "Cookie consent", etc.)
+# -- no schema change needed, just surfacing data that already existed.
+# Needs global_domains in scope wherever it's used.
+GLOBAL_SITES_CARD = """
+<div class="card">
+<h2>Global sites (apply to everyone, {{ global_domains|length }})</h2>
+<p class="hint">
+  Always included on top of whatever's assigned above -- shared
+  infrastructure (fonts, auth providers, CDNs, etc.) rather than a
+  per-person decision. This is why the Users/Groups list's "assigned"
+  count is higher than what's shown above alone.
+</p>
+<div class="table-scroll">
+<table>
+  <tr><th>Domain</th><th>Mode</th><th>Note</th></tr>
+  {% for d in global_domains %}
+  <tr>
+    <td><code>{{ d.pattern }}</code></td>
+    <td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td>
+    <td>{{ d.note or '' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3"><em>No global sites configured.</em></td></tr>
+  {% endfor %}
+</table>
+</div>
+<p class="hint">Manage the full list, including which are global, from the <a href="{{ url_for('domains') }}">Domains</a> page.</p>
+</div>
+"""
+
+
 USER_DETAIL_BODY = """
 <p><a href="{{ url_for('users') }}">&larr; All users</a></p>
 <h1>{{ u.display_name }} <code>({{ u.username }})</code></h1>
@@ -1068,12 +1109,14 @@ USER_DETAIL_BODY = """
   {% for d in assigned_domains %}
   <tr><td><code>{{ d.pattern }}</code></td><td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td></tr>
   {% else %}
-  <tr><td colspan="2"><em>No per-user sites assigned (still gets global sites).</em></td></tr>
+  <tr><td colspan="2"><em>No per-user sites assigned (still gets global sites, see below).</em></td></tr>
   {% endfor %}
 </table>
 </div>
 <p class="hint">Manage assignment from the <a href="{{ url_for('domains') }}">Domains</a> page -- pick the site there and check this user.</p>
 </div>
+
+""" + GLOBAL_SITES_CARD + """
 
 <div class="card">
 <h2>Approved Crunchyroll shows ({{ shows|length }})</h2>
@@ -1146,7 +1189,7 @@ def user_detail(user_id: int):
     body = render_template_string(
         USER_DETAIL_BODY, u=u, assigned_domains=assigned_domains, shows=shows,
         user_devices=user_devices, paused_device_count=paused_device_count,
-        active_schedules=active_schedules,
+        active_schedules=active_schedules, global_domains=_global_domains(conn),
     )
     return render("users", body)
 
@@ -1222,6 +1265,15 @@ def path_to_pattern(path: str) -> str:
     callers must still let it go through the normal add_path validation.
     """
     return "^" + re.escape((path or "/").split("?", 1)[0])
+
+
+def _global_domains(conn) -> list:
+    """Every is_global=1 domain, for GLOBAL_SITES_CARD -- shared by
+    user_detail() and group_detail() (see that constant's own docstring
+    for why this exists)."""
+    return conn.execute(
+        "SELECT pattern, mode, note FROM domains WHERE is_global = 1 ORDER BY pattern"
+    ).fetchall()
 
 
 def _entity_combo(rows, label_fn) -> list[dict]:
@@ -1352,9 +1404,10 @@ DOMAINS_BODY = """
 {% if domains %}<input type="search" data-filter-table="domainsTable" placeholder="Search domains&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
 <table id="domainsTable">
-  <tr><th>Pattern</th><th>Mode</th><th>Access</th><th>Note</th><th></th></tr>
+  <tr><th>{% if domains %}<input type="checkbox" id="domainSelectAll" title="Select all">{% endif %}</th><th>Pattern</th><th>Mode</th><th>Access</th><th>Note</th><th></th></tr>
   {% for d in domains %}
   <tr>
+    <td><input type="checkbox" class="bulk-domain-check" value="{{ d.id }}"></td>
     <td><code>{{ d.pattern }}</code></td>
     <td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td>
     <td>{{ 'Everyone' if d.is_global else 'Per-user/group/device' }}</td>
@@ -1371,11 +1424,58 @@ DOMAINS_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="5"><em>No domains configured.</em></td></tr>
+  <tr><td colspan="6"><em>No domains configured.</em></td></tr>
   {% endfor %}
 </table>
 </div>
+<script>
+(function () {
+  var selectAll = document.getElementById("domainSelectAll");
+  if (selectAll) {
+    selectAll.addEventListener("change", function () {
+      document.querySelectorAll(".bulk-domain-check").forEach(function (box) { box.checked = selectAll.checked; });
+    });
+  }
+  var bulkForm = document.getElementById("bulkDomainAccessForm");
+  if (bulkForm) {
+    bulkForm.addEventListener("submit", function (event) {
+      // The row checkboxes live in #domainsTable, not inside this form --
+      // nesting a <form> around the table would break the per-row Delete
+      // forms already in each row (HTML forms can't nest) -- so they're
+      // collected into hidden inputs here instead, right before submit.
+      var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-domain-check:checked"));
+      if (!checked.length) {
+        event.preventDefault();
+        alert("Check at least one domain above first.");
+        return;
+      }
+      bulkForm.querySelectorAll("input[name=domain_ids]").forEach(function (el) { el.remove(); });
+      checked.forEach(function (box) {
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "domain_ids";
+        hidden.value = box.value;
+        bulkForm.appendChild(hidden);
+      });
+    });
+  }
+})();
+</script>
+</div>
 
+{% if domains %}
+<div class="card">
+<h2>Bulk-assign access</h2>
+<p class="hint">Check domains in the table above, pick who gets them here, then apply -- replaces the ENTIRE access grant for every domain checked (same as editing each one's own Manage page, just all at once).</p>
+<form id="bulkDomainAccessForm" class="add-form" method="post" action="{{ url_for('bulk_update_domain_access') }}">
+""" + ACCESS_SELECTS + """
+  <button class="add" type="submit">Apply to checked domains</button>
+</form>
+</div>
+{% endif %}
+
+<div class="card">
+<h2>Add a domain</h2>
 <form class="add-form" method="post" action="{{ url_for('add_domain') }}">
   {% if filtered_user %}<input type="hidden" name="user_id" value="{{ filtered_user.id }}">{% endif %}
   {% if filtered_group %}<input type="hidden" name="group_id" value="{{ filtered_group.id }}">{% endif %}
@@ -1844,20 +1944,16 @@ def update_domain():
     return flash_redirect("domain_detail", "Saved.", domain_id=domain_id)
 
 
-@app.route("/domains/access", methods=["POST"])
-@require_admin
-def update_domain_access():
-    """Replaces a domain's entire access grant (Everyone + users + groups
-    + devices) with exactly what was submitted -- granting and revoking
-    are the same action here, just a changed selection, rather than
-    separate add/remove endpoints per assignment type."""
-    domain_id = request.form.get("domain_id", "")
-    is_global = 1 if request.form.get("is_global") else 0
-    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
-    group_ids = {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}
-    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
-
-    conn = get_db()
+def _replace_domain_access(conn, domain_id, is_global: int, user_ids: set[int], group_ids: set[int], device_ids: set[int]) -> None:
+    """Replaces one domain's entire access grant (Everyone + users +
+    groups + devices) with exactly what's passed in -- granting and
+    revoking are the same action here, just a changed selection, rather
+    than separate add/remove endpoints per assignment type. Shared by
+    update_domain_access() (one domain, from its own Manage page) and
+    bulk_update_domain_access() (many domains at once, from the Domains
+    list) -- deliberately no conn.commit() here, so the bulk caller can
+    wrap its whole loop in one transaction rather than committing (and
+    fsyncing) once per domain."""
     conn.execute("UPDATE domains SET is_global = ? WHERE id = ?", (is_global, domain_id))
     conn.execute("DELETE FROM user_domains WHERE domain_id = ?", (domain_id,))
     for uid in user_ids:
@@ -1868,8 +1964,61 @@ def update_domain_access():
     conn.execute("DELETE FROM device_domains WHERE domain_id = ?", (domain_id,))
     for did in device_ids:
         conn.execute("INSERT OR IGNORE INTO device_domains (device_id, domain_id) VALUES (?,?)", (did, domain_id))
+
+
+@app.route("/domains/access", methods=["POST"])
+@require_admin
+def update_domain_access():
+    domain_id = request.form.get("domain_id", "")
+    is_global = 1 if request.form.get("is_global") else 0
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    group_ids = {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+
+    conn = get_db()
+    _replace_domain_access(conn, domain_id, is_global, user_ids, group_ids, device_ids)
     conn.commit()
     return flash_redirect("domain_detail", "Access updated.", domain_id=domain_id)
+
+
+@app.route("/domains/bulk-access", methods=["POST"])
+@require_admin
+def bulk_update_domain_access():
+    """Domains list's "bulk categorize" action -- real live-testing
+    feedback (RoadMap.md's dated entry): with dozens of domains in one
+    flat table (27 seeded global ones alone), setting access one at a
+    time via each domain's own Manage page doesn't scale. Checks
+    multiple domain rows on the list (collected client-side into
+    domain_ids -- see the bulk-assign form's own inline <script>, since
+    the checkboxes live in the table, not inside this form, to avoid
+    nesting <form> elements around the per-row Delete forms) and applies
+    the SAME access grant to all of them in one submission, via the same
+    _replace_domain_access() the single-domain form uses -- one commit
+    for the whole batch, not one per domain, same "batch it, don't
+    autocommit per row" discipline as bulk_add_to_group() and (at a much
+    larger scale) common/category_fetch.py's own fix."""
+    domain_ids = {int(x) for x in request.form.getlist("domain_ids") if x.isdigit()}
+    is_global = 1 if request.form.get("is_global") else 0
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    group_ids = {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+
+    if not domain_ids:
+        return flash_redirect("domains", "No domains selected.", error=True)
+
+    conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for domain_id in domain_ids:
+            _replace_domain_access(conn, domain_id, is_global, user_ids, group_ids, device_ids)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.commit()
+    return flash_redirect(
+        "domains", f"Access updated for {len(domain_ids)} domain{'s' if len(domain_ids) != 1 else ''}."
+    )
 
 
 @app.route("/domains/paths/add", methods=["POST"])
@@ -2150,6 +2299,16 @@ DEVICES_BODY = """
     <td>
       <a class="btn small" href="{{ url_for('device_detail', device_id=d.id) }}">Manage</a>
       <a class="btn small" href="{{ url_for('domains', device_id=d.id) }}">Domains</a>
+      {% if groups %}
+      <form class="inline" method="post" action="{{ url_for('quick_add_device_to_group') }}">
+        <input type="hidden" name="device_id" value="{{ d.id }}">
+        <select name="group_id" style="width:auto;" title="Add {{ d.label or d.mac_address }} to a group">
+          <option value="" selected disabled>Add to group&hellip;</option>
+          {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+        </select>
+        <button class="btn small" type="submit">Add</button>
+      </form>
+      {% endif %}
       {% if d.pending %}
       <form class="inline" method="post" action="{{ url_for('bypass_login_device') }}">
         <input type="hidden" name="device_id" value="{{ d.id }}">
@@ -3919,13 +4078,14 @@ GROUP_DETAIL_BODY = """
   {% for d in assigned_domains %}
   <tr><td><code>{{ d.pattern }}</code></td><td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td></tr>
   {% else %}
-  <tr><td colspan="2"><em>No per-group sites assigned (still gets global sites).</em></td></tr>
+  <tr><td colspan="2"><em>No per-group sites assigned (still gets global sites, see below).</em></td></tr>
   {% endfor %}
 </table>
 </div>
 <p class="hint">Manage assignment from the <a href="{{ url_for('domains', group_id=g.id) }}">Domains</a> page -- pick the site there and check this group.</p>
 </div>
-"""
+
+""" + GLOBAL_SITES_CARD
 
 
 @app.route("/groups/<int:group_id>")
@@ -3964,8 +4124,41 @@ def group_detail(group_id: int):
         group_devices=group_devices, paused_device_count=paused_device_count,
         active_schedules=active_schedules,
         addable_devices_combo=_entity_combo(addable_devices, lambda dev: dev["label"] or dev["mac_address"]),
+        global_domains=_global_domains(conn),
     )
     return render("devices", body)
+
+
+@app.route("/devices/quick-add-to-group", methods=["POST"])
+@require_admin
+def quick_add_device_to_group():
+    """Devices list's per-row "Add to group" quick action -- real live-
+    testing feedback (RoadMap.md's 2026-09-07 entry): the group page's own
+    bulk-add form (below) needs you to already know the device's label/MAC
+    to find it in a search-only combobox, which is backwards when you're
+    looking right at the device's row already. This goes the other
+    direction: pick the group inline on the row, no navigation or typing
+    needed, and stays on the Devices page so you can keep going row by row.
+    Same narrow UPDATE as bulk_add_to_group() below -- only ever touches
+    user_id/group_id/ignored, never label/bump_enabled/bypass_login (unlike
+    update_device(), which rewrites the whole row from a full form)."""
+    device_id = request.form.get("device_id", "")
+    group_id = request.form.get("group_id", "")
+    conn = get_db()
+    d = conn.execute("SELECT mac_address, label FROM devices WHERE id = ?", (device_id,)).fetchone()
+    if d is None:
+        return flash_redirect("devices", "That device no longer exists.", error=True)
+    if not group_id:
+        return flash_redirect("devices", "Pick a group first.", error=True)
+    g = conn.execute("SELECT name FROM groups WHERE id = ?", (group_id,)).fetchone()
+    if g is None:
+        return flash_redirect("devices", "That group no longer exists.", error=True)
+    conn.execute(
+        "UPDATE devices SET user_id = NULL, group_id = ?, ignored = 0 WHERE id = ?",
+        (group_id, device_id),
+    )
+    conn.commit()
+    return flash_redirect("devices", f"Added {d['label'] or d['mac_address']} to {g['name']}.")
 
 
 @app.route("/groups/add-devices", methods=["POST"])
@@ -4851,6 +5044,31 @@ SETTINGS_BODY = """
 </form>
 {% endif %}
 </div>
+
+<div class="card">
+<h2>Memorable troubleshooting address</h2>
+<p class="hint">
+  A device that's already connected to the WiFi but lost internet access
+  (or just wants to self-check) can go to this address in a browser to
+  see its own Label, User/Group, IP address, and MAC address -- point
+  anyone who loses internet at it instead of walking them through
+  finding those yourself. The <code>.home</code> suffix is fixed; only
+  the first part is yours to change.
+</p>
+<form class="add-form" method="post" action="{{ url_for('update_optigate_hostname') }}">
+  <input type="text" name="optigate_hostname_prefix" value="{{ optigate_hostname_prefix }}" style="max-width:12rem;">
+  <span class="hint" style="margin:0;">.home</span>
+  <button class="add" type="submit">Save</button>
+</form>
+<p class="hint">
+  Currently <code>{{ optigate_hostname_prefix }}.home</code>.
+  <strong>Requires <code>DASHBOARD_URL</code> set in <code>.env</code></strong> (this
+  machine's own address, e.g. <code>http://192.168.1.50:8787</code>) so
+  AdGuard knows which IP to resolve this hostname to -- same requirement
+  the "Blocked-site experience" card's friendly page above already has.
+  Takes effect on the controller's next AdGuard sync cycle, not instantly.
+</p>
+</div>
 """
 
 
@@ -4923,8 +5141,39 @@ def settings_page():
         available_time_zones=sorted(zoneinfo.available_timezones()),
         safesearch_enabled=safesearch_enabled,
         ca_cert_info=_ca_cert_info(CA_CERT_PATH),
+        optigate_hostname_prefix=db.get_setting(
+            conn, "optigate_hostname_prefix", db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
+        ),
     )
     return render("settings", body)
+
+
+# A DNS label: letters/digits/hyphens, 1-63 chars, never starting or
+# ending with a hyphen -- standard hostname-label rules, since this
+# becomes the first part of a real DNS name (db.optigate_hostname()
+# appends the fixed ".home" suffix). No dots allowed, deliberately: the
+# project owner's own words were "force the use of .home so the
+# administrator can only change the first part of the URL."
+_OPTIGATE_PREFIX_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+@app.route("/settings/optigate-hostname", methods=["POST"])
+@require_admin
+def update_optigate_hostname():
+    value = request.form.get("optigate_hostname_prefix", "").strip().lower()
+    if not value:
+        value = db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
+    if not _OPTIGATE_PREFIX_RE.match(value):
+        return flash_redirect(
+            "settings_page",
+            "Invalid address -- letters, numbers, and hyphens only (no dots; "
+            "the .home suffix is fixed and can't be changed).",
+            error=True,
+        )
+    conn = get_db()
+    db.set_setting(conn, "optigate_hostname_prefix", value)
+    conn.commit()
+    return flash_redirect("settings_page", f"Saved. The address is now {value}.home.")
 
 
 @app.route("/settings/safesearch", methods=["POST"])

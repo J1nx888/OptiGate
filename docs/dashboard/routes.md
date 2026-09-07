@@ -298,7 +298,12 @@ admin's next action is one edit + submit rather than starting from scratch:
   listing every schedule currently in effect for this user, via
   `schedule_eval.active_schedules_for_target(conn, now, user_id=...)` --
   reflects any live "Shift mode now" override (RoadMap.md's Phase 12),
-  not just the bare clock. Renders `USER_DETAIL_BODY`. Redirects to
+  not just the bare clock. **Since 2026-09-07** also renders a
+  `GLOBAL_SITES_CARD` listing every `is_global` domain (pattern/mode/
+  note) -- the Users list's own "N assigned" count already included
+  these, but this page used to show nothing for a brand-new user beyond
+  a vague aside; see that template constant's own comment in
+  `dashboard.py`. Renders `USER_DETAIL_BODY`. Redirects to
   `users` with an error flash if the user id doesn't exist.
 - `POST /shows/add` -> `add_show()` -- form fields `user_id`, `url` (a
   Crunchyroll series URL), `name` (optional override). Parses the URL with
@@ -370,6 +375,19 @@ admin's next action is one edit + submit rather than starting from scratch:
   action (a changed selection), not separate add/remove endpoints per
   assignment. Same shape as `update_category_access()` and
   `update_schedule_access()` below. Redirects to `domain_detail`.
+- `POST /domains/bulk-access` -> `bulk_update_domain_access()` (added
+  2026-09-07, RoadMap.md's dated entry -- "bulk categorize domains") --
+  form fields `domain_ids` (multi-value, collected client-side from
+  checkboxes on the Domains list, NOT a combobox field -- see the
+  template's own inline `<script>` for why: nesting another `<form>`
+  around the whole table would break each row's own Delete form) plus
+  the same `is_global`/`user_ids`/`group_ids`/`device_ids` fields as
+  `/domains/access` above. Applies the identical whole-access-grant
+  replacement (factored into `_replace_domain_access()`, shared by both
+  routes) to every listed domain, in one `BEGIN IMMEDIATE` transaction --
+  same "one commit for the batch, not one per row" discipline as
+  `/groups/add-devices` below and `common/category_fetch.py`'s own fix.
+  Redirects to `domains` with an error flash if no domains were checked.
 - `POST /domains/paths/add` -> `add_path()` -- form fields `domain_id`,
   `pattern`. Validates non-empty, <= 200 chars, and compiles as a regex.
   `INSERT OR IGNORE` into `domain_paths`. Redirects to `domain_detail`.
@@ -760,7 +778,29 @@ text here still said "not built" until now).
   summary linking to the `/domains?group_id=` filtered view for actually
   managing them. Renders `GROUP_DETAIL_BODY` under the `devices` nav tab
   (there's no separate "Groups" nav item). Redirects to `devices` with an
-  error flash if the group id doesn't exist.
+  error flash if the group id doesn't exist. **Since 2026-09-07** also
+  shows a bulk-add-devices form (see `/groups/add-devices` below) and a
+  `GLOBAL_SITES_CARD` listing every `is_global` domain (see that
+  template's own comment in `dashboard.py` for the visibility gap this
+  closed).
+- `POST /groups/add-devices` -> `bulk_add_to_group()` (added 2026-09-07,
+  RoadMap.md's dated entry) -- form fields `group_id`, `device_ids`
+  (multi-value, from the shared `data-combobox` widget in
+  `data-mode="multi"`). Batch-`UPDATE`s every listed device's
+  `user_id`/`group_id`/`ignored` (mirrors `update_device()`'s own
+  `"group:<id>"` assignment semantics exactly, never touching
+  label/`bump_enabled`/`bypass_login`). Redirects to `group_detail` with
+  an error flash if no devices were selected or the group no longer
+  exists.
+- `POST /devices/quick-add-to-group` -> `quick_add_device_to_group()`
+  (added 2026-09-07, live-testing follow-up to `/groups/add-devices`
+  above -- its combobox needs the device's exact label/MAC to find it,
+  which doesn't scale past `SHOW_ALL_THRESHOLD` devices) -- form fields
+  `device_id`, `group_id`. Same narrow `UPDATE` as `bulk_add_to_group()`
+  above, for exactly one device, from an inline `<select>` on that
+  device's own row on the Devices list. Redirects to `devices` (not
+  `group_detail`), so working through several devices' rows in a row
+  doesn't bounce the admin away each time.
 - `POST /groups/pause` / `POST /groups/resume` -> `pause_group()` /
   `resume_group()` (added 2026-09-06 -- the one pause granularity that
   was entirely missing; per-device and per-user pause both already
@@ -851,7 +891,8 @@ the project owner asked for, not only an operational-health trail.
 - `GET /settings` -> `settings_page()` -- reads `local_network`,
   `admin_username`, `block_page_mode` (default `"terminate"`),
   `adguard_url`, `adguard_username`, `household_time_zone` (Phase 8,
-  default `"UTC"`) settings. Renders `SETTINGS_BODY`. (Never reads or
+  default `"UTC"`), `optigate_hostname_prefix` (2026-09-07, default
+  `"optigate"`) settings. Renders `SETTINGS_BODY`. (Never reads or
   displays `admin_password_hash` or `adguard_password` -- both password
   fields are always blank/write-only.)
 - `POST /settings/household-time-zone` -> `update_household_time_zone()`
@@ -904,6 +945,19 @@ the project owner asked for, not only an operational-health trail.
   something other than its secure-by-default `127.0.0.1` -- the
   Settings page states this explicitly next to the link rather than
   silently producing a link that fails for most default setups.
+- `POST /settings/optigate-hostname` -> `update_optigate_hostname()`
+  (added 2026-09-07, RoadMap.md's dated entry -- the `optigate.home`
+  memorable-URL feature) -- form field `optigate_hostname_prefix`,
+  lowercased and validated as a single DNS label (letters/digits/
+  hyphens, no dots, no leading/trailing hyphen -- rejected with an error
+  flash otherwise). Blank input falls back to
+  `db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX` ("optigate") rather than saving
+  an empty prefix. The `.home` suffix itself is hardcoded in
+  `common/db.py`'s `optigate_hostname()`, never stored or editable here
+  -- the project owner's own words: "force the use of .home so the
+  administrator can only change the first part of the URL." Takes
+  effect on `controller/adguard_sync.py`'s next sync cycle (
+  `sync_optigate_rewrite()`), not instantly.
 - `POST /settings/safesearch` -> `update_safesearch()` (G3, 2026-09-01) --
   one checkbox field `safesearch_enabled`. Only writes
   `settings.safesearch_enabled` (`"1"`/`"0"`) -- doesn't call AdGuard

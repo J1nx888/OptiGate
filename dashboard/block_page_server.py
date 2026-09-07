@@ -56,6 +56,7 @@ proxy-specific translation is required.
 """
 from __future__ import annotations
 
+import html
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -89,6 +90,43 @@ stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l8 3.5v5.2c0 4.7-3.
 <h1>This site isn't approved.</h1>
 <p>Ask a parent to check the dashboard if you think this should be allowed.</p>
 <p><code>{host}</code></p>
+</body></html>
+"""
+
+# The memorable-URL feature (RoadMap.md's dated 2026-09-07 entry): a
+# device that's ALREADY connected to the WiFi -- unlike
+# captive_portal_server.py's login page, which only an unauthenticated
+# device ever gets redirected to -- can visit this hostname (default
+# optigate.home, see common/db.py's optigate_hostname()) to see its own
+# Label/User-or-Group/IP/MAC, e.g. after losing internet access, or just
+# to self-check before calling whoever administers the network. This
+# server (not a new one) is the natural home for it: it already listens
+# on port 80 across the whole LAN (not gated to unauthenticated_v4 the
+# way captive_portal_server.py's :3131 redirect is) and already resolves
+# identity from the requesting socket's own source IP -- see
+# controller/adguard_sync.py's sync_optigate_rewrite() for the other half
+# (the AdGuard DNS-rewrite that makes the hostname actually resolve here).
+_DEVICE_INFO_TEMPLATE = """\
+<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>{hostname}</title>
+<style>
+:root{{color-scheme:light dark;}}
+body{{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;max-width:28rem;margin:4rem auto;
+padding:0 1.25rem;color:#1e293b;}}
+@media (prefers-color-scheme:dark){{body{{color:#e5eaf3;}}}}
+h1{{font-size:1.15rem;margin:0 0 1rem;text-align:center;}}
+table{{width:100%;border-collapse:collapse;font-size:.92rem;}}
+th{{text-align:left;padding:.5rem .4rem;opacity:.65;font-weight:600;white-space:nowrap;vertical-align:top;}}
+td{{padding:.5rem .4rem;word-break:break-word;}}
+tr+tr th,tr+tr td{{border-top:1px solid rgba(128,128,128,.25);}}
+p.hint{{font-size:.85rem;opacity:.7;text-align:center;margin-top:1.5rem;}}
+</style></head><body>
+<h1>{hostname}</h1>
+<table>
+{rows}
+</table>
+<p class="hint">{footer}</p>
 </body></html>
 """
 
@@ -132,12 +170,88 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
             if conn is not None:
                 conn.close()
 
+    def _respond_device_info(self, hostname: str) -> None:
+        """Renders the optigate.home page -- see this module's own
+        comment above _DEVICE_INFO_TEMPLATE for why it lives here. Best-
+        effort identity resolution: a DB hiccup shows the page with just
+        the bare IP rather than a broken response (same "never let a
+        logging/lookup failure break the real response" posture
+        _log_block() already established below)."""
+        client_ip = self.client_address[0]
+        rows = [("IP address", html.escape(client_ip))]
+        conn = None
+        try:
+            conn = db.get_conn()
+            device = device_identity.resolve_device(conn, client_ip)
+            if device is not None:
+                user = device_identity.resolve_user_for_device(conn, device)
+                if user is not None:
+                    assigned_to = html.escape(user["display_name"])
+                elif device["ignored"]:
+                    assigned_to = "Ignored (never filtered)"
+                elif device["group_id"] is not None:
+                    group = conn.execute(
+                        "SELECT name FROM groups WHERE id = ?", (device["group_id"],)
+                    ).fetchone()
+                    assigned_to = html.escape(group["name"]) if group else "<em>Unassigned</em>"
+                else:
+                    assigned_to = "<em>Unassigned</em>"
+                rows = [
+                    ("Label", html.escape(device["label"]) if device["label"] else "<em>Unnamed device</em>"),
+                    ("Assigned to", assigned_to),
+                    ("IP address", html.escape(client_ip)),
+                    ("MAC address", html.escape(device["mac_address"])),
+                    # No DHCP-hostname/mDNS-name capture exists anywhere in
+                    # this project yet (common/device_bindings has no such
+                    # column) -- shown honestly rather than omitted, since
+                    # the project owner explicitly asked for this field.
+                    ("Device name", "<em>Not tracked yet</em>"),
+                ]
+        except Exception:
+            log.warning("failed to resolve device identity for optigate page (%s)", client_ip, exc_info=True)
+        finally:
+            if conn is not None:
+                conn.close()
+
+        footer = (
+            "Not recognized on this network yet -- if you're having trouble connecting, ask whoever administers it."
+            if len(rows) == 1
+            else "Having trouble connecting? Share this page with whoever administers this network."
+        )
+        body = _DEVICE_INFO_TEMPLATE.format(
+            hostname=html.escape(hostname),
+            rows="\n".join(f"<tr><th>{label}</th><td>{value}</td></tr>" for label, value in rows),
+            footer=footer,
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _respond(self) -> None:
         host = self.headers.get("Host", "this site")
         # Strip a trailing :port from the Host header -- browsers
         # include it for a non-default port, but showing "site.com:80"
         # to a kid asking a parent about it is just noise.
         host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+        optigate_host = None
+        try:
+            conn = db.get_conn()
+            try:
+                optigate_host = db.optigate_hostname(conn)
+            finally:
+                conn.close()
+        except Exception:
+            # Same "never let a lookup failure break the real response"
+            # posture as everywhere else in this handler -- falls back to
+            # the ordinary blocked-page response below.
+            log.warning("failed to read optigate hostname setting", exc_info=True)
+        if optigate_host and host.lower() == optigate_host.lower():
+            self._respond_device_info(optigate_host)
+            return
+
         self._log_block(host)
         body = _PAGE_TEMPLATE.format(host=host).encode("utf-8")
         self.send_response(403)

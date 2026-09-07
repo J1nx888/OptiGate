@@ -66,6 +66,16 @@ import path, three separate Squid startup bugs this same session):
   9-digit/nanosecond, e.g. `"2026-08-31T13:17:13.089285447Z"`) -- see
   `normalize_query_log_time` below for why that can't be compared as a
   plain string against this project's own `db.now_iso()` timestamps.
+- `/control/rewrite/list` (GET) / `/control/rewrite/add` (POST) /
+  `/control/rewrite/delete` (POST) -- DNS rewrites, a separate feature
+  from the custom filtering rules above. Confirmed live 2026-09-07
+  against the real production instance for the `optigate.home`
+  memorable-URL feature (RoadMap.md's dated entry): `list` returns a
+  plain `[]` on a fresh instance (unlike `user_rules`'s `null` quirk
+  above); `add`/`delete` both take `{"domain", "answer"}` and return an
+  empty 200 body; a rewrite added this way is immediately resolvable --
+  confirmed with `dig @127.0.0.1 -p 5353 <domain>` against the real
+  resolver in the same session, then confirmed gone after `delete`.
 
 No third-party dependencies -- matches common/cr_api.py's own
 urllib-based pattern, mirrored here, rather than adding `requests` to a
@@ -188,6 +198,76 @@ def set_custom_rules(
         username=username,
         password=password,
         json_body={"rules": rules},
+        timeout=timeout,
+    )
+
+
+def get_rewrites(
+    base_url: str, username: str, password: str, timeout: float = DEFAULT_TIMEOUT
+) -> list[dict]:
+    """AdGuard Home's own DNS-rewrite entries (`GET /control/rewrite/list`)
+    -- a separate feature from the custom filtering rules above (no
+    `$dnsrewrite` modifier or block involved, just a plain forced DNS
+    answer for a domain). Confirmed live 2026-09-07 against a real
+    AdGuard Home instance: returns a plain JSON array (`[]` on a fresh
+    instance, not `null` the way `user_rules` is -- this endpoint had no
+    equivalent of that quirk), each entry shaped
+    `{"domain": ..., "answer": ..., "enabled": true}`. Used by
+    controller/adguard_sync.py's `sync_optigate_rewrite()` to find and
+    clean up a stale entry (e.g. after the admin renames the
+    `optigate.home` hostname prefix from the Settings page) before
+    adding the current one."""
+    body = _request(
+        f"{base_url.rstrip('/')}/control/rewrite/list",
+        method="GET",
+        username=username,
+        password=password,
+        timeout=timeout,
+    )
+    try:
+        decoded = json.loads(body)
+    except ValueError as exc:
+        raise AdGuardError(f"malformed JSON from {base_url}/control/rewrite/list: {exc}") from exc
+    if not isinstance(decoded, list):
+        raise AdGuardError(f"{base_url}/control/rewrite/list didn't return a JSON array")
+    return decoded
+
+
+def add_rewrite(
+    base_url: str, username: str, password: str, domain: str, answer: str, timeout: float = DEFAULT_TIMEOUT
+) -> None:
+    """Adds one DNS-rewrite entry (`POST /control/rewrite/add`, body
+    `{"domain", "answer"}`) -- confirmed live 2026-09-07: a plain HTTP
+    200 with an empty body on success, and the new entry immediately
+    resolvable via AdGuard's own DNS (confirmed with `dig` against port
+    5353 the same session). Does not check for an existing entry with
+    the same domain first -- callers that need idempotency (
+    sync_optigate_rewrite()) should read get_rewrites() and reconcile
+    before calling this, same "read fresh, then write" discipline as
+    set_custom_rules()."""
+    _request(
+        f"{base_url.rstrip('/')}/control/rewrite/add",
+        method="POST",
+        username=username,
+        password=password,
+        json_body={"domain": domain, "answer": answer},
+        timeout=timeout,
+    )
+
+
+def delete_rewrite(
+    base_url: str, username: str, password: str, domain: str, answer: str, timeout: float = DEFAULT_TIMEOUT
+) -> None:
+    """Removes one DNS-rewrite entry (`POST /control/rewrite/delete`,
+    body `{"domain", "answer"}` -- both fields required; AdGuard matches
+    on the exact pair, not the domain alone, confirmed live 2026-09-07).
+    """
+    _request(
+        f"{base_url.rstrip('/')}/control/rewrite/delete",
+        method="POST",
+        username=username,
+        password=password,
+        json_body={"domain": domain, "answer": answer},
         timeout=timeout,
     )
 
