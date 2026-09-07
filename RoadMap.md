@@ -37,7 +37,7 @@ Pi-hole setup:
 | 1 | Dashboard modernization (design system, charts, PWA) | ✅ Done |
 | 2 | Device/group data model groundwork | ✅ Done |
 | — | Filter/picker UI scaling (GH #8) | ✅ Done |
-| 3 | Network-level interception (the actual Bark Home replacement mechanism) | 🔶 Milestones 1–9 real, tested, verified live in Docker-bridge/veth harnesses **and now against the real Orbi mesh — G1 is a GO (2026-09-02)**, see [Path to deployment](#path-to-deployment) below. Full back-to-back matrix pass + soak test (Milestone 10) still pending. |
+| 3 | Network-level interception (the actual Bark Home replacement mechanism) | 🔶 Milestones 1–9 real, tested, verified live in Docker-bridge/veth harnesses **and now against the real Orbi mesh — G1 is a GO (2026-09-02)**, see [Path to deployment](#path-to-deployment) below. **Discovery + arp-worker composition also verified live (2026-09-07)** — full back-to-back matrix pass + soak test (Milestone 10) still pending. |
 | 4 | Captive-portal forced enrollment | ✅ Done (Milestones 1–3 + reminder screens + portal admin-add) |
 | 5 | Admin dashboard: responsive layout, installable PWA, control surface | 🔶 Begun — mobile/tablet audit done, one bug fixed |
 | 6 | YouTube channel/creator-level filtering | ⬜ Assessed only, 0% built (G2) |
@@ -67,7 +67,7 @@ real deployment decision:
 
 | Gap | What | Status |
 |---|---|---|
-| **G1** | Core ARP interception mechanism has zero real-network evidence — only Docker-bridge/veth harnesses, never the real Orbi mesh | ✅ **GO (2026-09-02)** — real Orbi mesh, real household devices, every applicable matrix row confirmed or soundly inferred, no no-go condition triggered. See the dated result in [Mesh (Orbi) validation](#mesh-orbi-validation--required-before-production-use) and [`docs/deployment/g1-runbook.md`](deployment/g1-runbook.md). One full back-to-back pass + the soak test (Milestone 10) still remain before decommissioning Bark Home. |
+| **G1** | Core ARP interception mechanism has zero real-network evidence — only Docker-bridge/veth harnesses, never the real Orbi mesh | ✅ **GO (2026-09-02)** — real Orbi mesh, real household devices, every applicable matrix row confirmed or soundly inferred, no no-go condition triggered. See the dated result in [Mesh (Orbi) validation](#mesh-orbi-validation--required-before-production-use) and [`docs/deployment/g1-runbook.md`](deployment/g1-runbook.md). **Discovery + arp-worker composition (the one remaining unproven combination) verified GO on 2026-09-07** — see the dated result below. One full back-to-back matrix pass + the soak test (Milestone 10) still remain before decommissioning Bark Home. |
 | G2 | YouTube video/creator whitelist | ⬜ 0% built, fully designed only — not required for baseline Bark Home parity, doesn't block G1 |
 | G3 | No SafeSearch / YouTube Restricted Mode enforcement | ✅ Done (Phase 9) |
 | G4 | Show approvals are user-only (`user_shows` has no `group_shows`/`device_shows` sibling) | ⏸ Explicitly deferred to a later phase at your direction — not a G1 blocker |
@@ -76,14 +76,13 @@ real deployment decision:
 | G7 | Cutover data step for existing household devices (`is_authenticated` defaults) | ✅ Resolved by policy: deploy with zero devices pre-added, bulk-import real MACs via CSV once known |
 | G8 | Bark's on-device ML content-scanning alerts | Out of scope — an app/device feature, not achievable from a network box |
 
-**Before deployment**: G1 itself is done (see above) — what's left is
-finishing the runbook's own next steps: one full back-to-back pass
-through the matrix (the per-row passes proved the mechanism works; a
-back-to-back pass proves it holds up under realistic continuous use),
-and re-verifying full auto-discovery (`--no-discovery`/`--no-rtnetlink`/
-`--no-active-scan`, all deliberately disabled during the 2026-09-02
-pass after they caused a real incident) in its own dedicated, separate
-session before it's trusted for real deployment.
+**Before deployment**: G1 itself is done (see above), and the
+discovery + arp-worker composition that motivated disabling
+`--no-discovery`/`--no-rtnetlink`/`--no-active-scan` on 2026-09-02 is
+now verified safe (2026-09-07, see below) — what's left is finishing
+the runbook's own next step: one full back-to-back pass through the
+matrix (the per-row passes proved the mechanism works; a back-to-back
+pass proves it holds up under realistic continuous use).
 
 **After G1 passes, before decommissioning Bark Home**: the soak test
 (Milestone 10 in Phase 3 below) — a real multi-day household run with
@@ -1476,6 +1475,123 @@ seen this MAC before" is treated as not-vouched-for. Documented in
 `dashboard.py`'s `add_device()`/`import_devices()` directly (not just
 here) specifically so a future pass doesn't make the same near-miss for
 real.
+
+### Discovery + arp-worker composition: GO (2026-09-07, real household, arp-worker actually acting)
+
+The one composition Phase A deliberately left unproven -- full
+auto-discovery enabled **and** arp-worker actually poisoning what it
+finds, not idle -- run for real against the household, with the
+project owner physically present and Bark Home paused. This is the
+exact combination that caused 2026-09-02's whole-household outage
+(incident 1), so it wasn't run as a bare "flip it on and see."
+
+**Preconditions checked first, not assumed**: the production box's SSH
+key had rotated since the last session (rebuilt box, new hostname
+`optigate-MINI-S`) -- found and used the current key rather than
+failing or reusing stale info. The box's checkout was 9 commits behind
+`origin/main`; pulled to current and rebuilt the four interception-
+relevant images before testing, so this validated today's actual code,
+not a stale snapshot. Confirmed all four containers were stopped
+(clean baseline) and that the 8 real devices classified during Phase A
+were still correctly `ignored=1`.
+
+**Safety mechanism** (the actual point of this session): rather than
+Phase A's approach of keeping arp-worker permanently idle, `controller`
+ran with `--poll-interval=180` -- a 3-minute buffer between
+reconciliation cycles. A newly-discovered device's `devices` row is
+created the instant discovery observes it (visible immediately on the
+dashboard's pending-devices page), but only becomes a live arp-worker
+target on the *next* reconciliation push -- giving a real window to
+review and mark it `ignored=1` first if unwanted, without needing to
+touch arp-worker itself.
+
+**Rehearsed the kill switch again first** (one manually-inserted
+throwaway target, discovery off, same shape as the original G1 matrix
+rows) since the box had been rebuilt since it was last exercised.
+Verified via live packet capture (not the client's own state, since
+the throwaway device was an Android tablet with no terminal access):
+captured the real forged ARP replies (`192.168.1.1 is-at
+<Beelink MAC>`) while poisoned, the tablet's real DNS/TLS traffic
+arriving at the Beelink (direct proof of successful redirection, not
+just an ARP cache entry), then zero packets of either kind within
+seconds of `docker compose --profile interception stop` -- clean
+recovery confirmed with no client-side action.
+
+**Then the real test**: brought up the full `interception` profile
+with discovery genuinely on. Watched the `devices` table directly
+(read-only queries via a throwaway container against the `pp_config`
+volume, since `claude-agent` has no direct DB access) between
+reconciliation cycles. Three real "new device" events occurred within
+the first 20 seconds:
+
+1. **The gateway recorded itself** as a device (`mac_address` matched
+   `GATEWAY_MAC` exactly) -- the same known, already-documented gap
+   from Phase A (discovery can't distinguish the router's own traffic
+   from anything else). Marked `ignored=1` immediately as belt-and-
+   suspenders on top of arp-worker's own independent
+   `ValidateTargets` gateway-rejection check, which was never actually
+   exercised since the row was excluded before the next reconciliation.
+2. **A real household tablet, under a rotated MAC** -- the project
+   owner had said in advance at least one phone/tablet had MAC
+   randomization on, and this is a live, concrete confirmation of
+   exactly the scenario RoadMap's "Identity rule" section already
+   flagged as a risk (a MAC-rotation event looks identical to a
+   genuinely new device to this system, by design -- no hostname/vendor
+   auto-merge). Correctly appeared as a new, unassociated device;
+   the project owner identified it by IP via the router's own device
+   list (MAC alone is meaningless at 50+ devices) and it was marked
+   `ignored=1` before the next cycle.
+3. **Two real Nest thermostats**, previously never seen by this system,
+   were classified correctly and *did* become live poisoning targets
+   for one reconciliation cycle (confirmed via packet capture with
+   Ethernet headers -- only these two MACs received forged ARP
+   replies, nothing else) before being identified and marked
+   `ignored=1`. The next reconciliation cycle (`generation 4`, 0
+   targets) dropped them cleanly; a follow-up capture showed zero
+   further poisoning traffic to either. This is the first real,
+   live case of the exact end-to-end flow the composition needed to
+   prove: unknown device discovered -> briefly, correctly gated as a
+   target -> reviewed and excluded -> corrective recovery -- with a
+   real bounded exposure window (single digit minutes) instead of an
+   uncontrolled sweep.
+
+No outage, no stuck state, no manual intervention needed on any client
+device at any point. Wound down with a graceful
+`docker compose --profile interception stop` (confirmed via capture:
+only the real gateway's own ARP traffic remained, no forged replies)
+followed by `docker compose down`.
+
+**Verdict: GO for this composition, given the review-buffer mechanism.**
+The underlying design gap Phase A already knew about (new devices
+default to `ignored=0`, i.e. "gate unknown MACs by default") is
+unchanged and still by design -- what this session proved is that a
+moderate reconciliation interval plus active human review during that
+window is sufficient to catch real-world noise (the gateway recording
+itself, MAC rotation, previously-unseen legitimate devices) before it
+becomes live poisoning, at real household scale, without needing a
+code change. A poll interval this long is not the recommended setting
+for real deployment (it would leave a genuinely new device unfiltered
+for up to 3 minutes) -- it was chosen specifically as a review buffer
+for this validation session, not a production default; the real
+cutover runbook (not yet written, see "What this runbook does not
+cover" in `docs/deployment/g1-runbook.md`) needs its own decision here.
+
+**Two housekeeping items surfaced, neither blocking**:
+- `claude-agent`'s docker-group membership on the production box was
+  supposed to be temporary (granted for the 2026-09-02 session, revoked
+  after) but was found still active. Low risk (unprivileged account,
+  no sudo) but should be revoked -- requires the project owner's own
+  sudo access, not something the `claude-agent` account can do to
+  itself.
+- AdGuard is currently crash-looping on the production box (`listen udp
+  0.0.0.0:5353: bind: address already in use`) -- pre-existing, unrelated
+  to the ARP mechanism, not investigated during this session since it
+  doesn't affect interception itself.
+
+**Still not done**: the one full back-to-back matrix pass (no stopping
+between rows) and the soak test (Milestone 10) -- this session was
+scoped specifically to the discovery/arp-worker composition question,
+not a re-run of the matrix itself.
 
 ### New database tables planned
 

@@ -9,12 +9,16 @@
 > Full detailed writeup, including two real incidents hit and fixed
 > along the way (both setup mistakes, not the ARP mechanism itself), is
 > in [RoadMap.md's dated G1 result](../../RoadMap.md#g1-result-go-2026-09-02-real-orbi-mesh-real-household-devices).
-> **Not yet done**: one full back-to-back pass through the matrix
-> without stopping between rows, the soak test (Milestone 10), and a
-> dedicated re-verification of full auto-discovery (disabled during this
-> pass after it caused one of the two incidents). This runbook's
-> procedure below is kept as-is for that follow-up work and for anyone
-> re-deriving the plan later — it's what was actually followed.
+> **Update, 2026-09-07**: the discovery + arp-worker composition
+> disabled during the pass above (after it caused one of the two
+> incidents) has now been separately verified GO, with a review-buffer
+> safety mechanism (a 3-minute reconciliation interval instead of
+> arp-worker staying idle) rather than a code change — see RoadMap.md's
+> dated result. **Not yet done**: one full back-to-back pass through the
+> matrix without stopping between rows, and the soak test (Milestone 10).
+> This runbook's procedure below is kept as-is for that follow-up work
+> and for anyone re-deriving the plan later — it's what was actually
+> followed.
 
 ## Why this gates everything
 
@@ -46,9 +50,10 @@ watching.
 | G7 — cutover data step for existing household devices | ✅ Resolved by policy: start with zero pre-added devices, use the new CSV bulk-import feature once real MACs are known |
 | G8 — Bark's on-device ML content-scanning | Out of scope — an app/device feature, not achievable from a network box |
 
-**G1 itself is done.** What's left before a real deployment decision:
-one full back-to-back matrix pass, the soak test (Milestone 10), and a
-dedicated re-verification of full auto-discovery.
+**G1 itself is done**, and the discovery + arp-worker composition is
+now also verified (2026-09-07, see RoadMap.md). What's left before a
+real deployment decision: one full back-to-back matrix pass and the
+soak test (Milestone 10).
 
 ## Before you start
 
