@@ -23,24 +23,49 @@ WORK=/opt/adguardhome/work
 # created `root:root` mode 600), so dashboard's non-root process would
 # otherwise have zero access to it at all. Numeric gid, not a name --
 # this image's own /etc/group has no "proxy" entry, but chown/chmod don't
-# need one. Run on EVERY start (not just first boot), same "re-fix
-# ownership every time, don't just hope it stays" discipline
-# proxy/entrypoint.sh already uses for the shared /config volume -- if
-# AdGuard's own live process ever rewrites this file in a way that resets
-# its permissions (unconfirmed either way), the next restart repairs it,
-# and a restart is already required for any credential sync to actually
-# take effect anyway.
+# need one.
+#
+# **Must run AFTER AdGuard's own startup has fully settled, every time,
+# not just once before launching it** -- confirmed live 2026-09-07 that
+# AdGuard rewrites AdGuardHome.yaml itself (root:root mode 600 again)
+# within moments of starting, even on a plain restart with nothing
+# actually reconfigured: an initial version of this fix that ran chown
+# once and then `exec`'d straight into the binary was silently undone
+# before the next request could even check it. Every call site below
+# backgrounds the process and polls its own `/control/status` first
+# (same technique the first-boot flow already uses to know when to send
+# its own setup API calls), so this always runs once AdGuard's own
+# post-launch file-touching is done -- if it's ever rewritten again
+# later during a long uptime (unconfirmed whether that happens), the
+# next restart repairs it, same "config only takes effect on restart
+# anyway" limitation this project already accepts for this feature.
 _grant_dashboard_access() {
   chown root:13 "$CONF" 2>/dev/null || true
   chmod 660 "$CONF" 2>/dev/null || true
 }
 
+_wait_for_control_api() {
+  i=0
+  while ! wget -q -O /dev/null http://127.0.0.1:3000/control/status 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -ge 30 ] && return 1
+    sleep 1
+  done
+  return 0
+}
+
 if [ -f "$CONF" ]; then
   # Already configured from a previous run (persisted volume) --
-  # nothing to bootstrap. exec so this process IS pid 1 and receives
-  # signals directly, same as the unwrapped image would.
+  # nothing to bootstrap. Backgrounded (not exec'd) so this script can
+  # still run _grant_dashboard_access after it's actually up, same
+  # signal-forwarding shape the first-boot path below already uses.
+  "$BIN" --no-check-update -c "$CONF" -w "$WORK" &
+  PID=$!
+  trap 'kill -TERM "$PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
+  _wait_for_control_api || echo "AdGuard Home did not come up within 30s -- continuing to wait on it anyway" >&2
   _grant_dashboard_access
-  exec "$BIN" --no-check-update -c "$CONF" -w "$WORK"
+  wait "$PID"
+  exit $?
 fi
 
 if [ -z "${ADGUARD_PASSWORD:-}" ]; then
@@ -133,7 +158,12 @@ if [ ! -f "$CONF" ]; then
   wait "$PID" 2>/dev/null
   exit 1
 fi
-_grant_dashboard_access
+# NOT _grant_dashboard_access here yet -- every wget call below is its own
+# admin API request, and each one risks AdGuard re-persisting its config
+# (unconfirmed exactly when it does, but observed live that it does so at
+# least once shortly after launch -- see this function's own comment
+# above). Applied once, at the very end of whichever branch actually
+# runs, instead.
 
 # Ad/tracker blocking, layered on top of AdGuard's own default filter --
 # confirmed live 2026-08-30 that install/configure itself already
@@ -214,8 +244,20 @@ if [ "$WEB_BIND" != "0.0.0.0" ]; then
   wait "$PID" 2>/dev/null
   trap - TERM INT
   sed -i "s/^  address: 0\.0\.0\.0:3000\$/  address: ${WEB_BIND}:3000/" "$CONF"
-  exec "$BIN" --no-check-update -c "$CONF" -w "$WORK"
+  # Backgrounded, not exec'd -- same reasoning as the "already configured"
+  # branch above: need to run _grant_dashboard_access AFTER this relaunch
+  # settles too (the sed -i itself, and/or AdGuard's own startup, can
+  # each independently reset the file's ownership/permissions).
+  "$BIN" --no-check-update -c "$CONF" -w "$WORK" &
+  PID=$!
+  trap 'kill -TERM "$PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
+  _wait_for_control_api || echo "AdGuard Home did not come back up within 30s after the bind-address restart -- continuing to wait on it anyway" >&2
+  _grant_dashboard_access
+  wait "$PID"
+  exit $?
 fi
 
+_wait_for_control_api || echo "AdGuard Home did not respond to its own control API within 30s -- continuing to wait on it anyway" >&2
+_grant_dashboard_access
 echo "AdGuard Home configured (DNS on :${ADGUARD_DNS_PORT:-5353}, admin UI on 0.0.0.0:3000)." >&2
 wait "$PID"
