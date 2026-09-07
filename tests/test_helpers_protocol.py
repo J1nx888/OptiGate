@@ -377,11 +377,26 @@ def test_authz_device_only_assignment_works_with_no_user_or_group(conn):
     assert row["device_id"] == device_id
 
 
-def test_authz_generic_bump_domain_no_path_rules_allows_any_path(conn):
+def test_authz_generic_bump_domain_no_path_rules_denies_beyond_root(conn):
+    """Changed 2026-09-07 (RoadMap.md's dated entry, project owner's
+    explicit direction): a domain with zero domain_paths rows used to
+    allow every path by default -- switching a domain to bump mode
+    silently opened its entire site until an admin came back and
+    narrowed it. Now only the bare root is allowed until at least one
+    path rule is added."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"example\.com", mode="bump", is_global=1)
-    assert authz_helper.decide(conn, "192.168.1.5", "example.com:443", "/whatever") is True
+    assert authz_helper.decide(conn, "192.168.1.5", "example.com:443", "/whatever") is False
+    row = conn.execute("SELECT * FROM access_log ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["reason"] == "path_not_allowed"
+
+
+def test_authz_generic_bump_domain_no_path_rules_still_allows_bare_root(conn):
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    _add_domain(conn, r"example\.com", mode="bump", is_global=1)
+    assert authz_helper.decide(conn, "192.168.1.5", "example.com:443", "/") is True
 
 
 def test_authz_generic_bump_domain_with_path_rules_enforces_them(conn):
@@ -493,3 +508,16 @@ def test_authz_crunchyroll_other_shape_falls_back_to_path_allowlist(conn):
     conn.commit()
     assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/discover") is True
     assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/not-configured") is False
+
+
+def test_authz_crunchyroll_other_shape_with_no_path_rules_denies_beyond_root(conn):
+    """Same 2026-09-07 deny-by-default-beyond-root change as the generic
+    bump-domain test above, for Crunchyroll's own OTHER-shape fallback --
+    in practice defaults.py always seeds a real path list for this
+    domain, so this only matters for a hand-configured Crunchyroll-kind
+    domain that hasn't had paths added yet."""
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/") is True
+    assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/some-other-page") is False

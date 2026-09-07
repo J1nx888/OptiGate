@@ -26,11 +26,19 @@ Decision order for a bump-mode domain:
      show list. CMS metadata-only requests are always allowed (matches v1).
      Requires a resolved user -- user_shows has no group/device
      equivalent, see decide()'s own "show_requires_user" case.
-  4. Otherwise: if the domain has any configured allowed-paths, the
-     request's path must match one of them (defense-in-depth, same idea as
-     v1's allowed_paths.txt). A domain with zero configured paths allows
-     any path -- admins only need to curate paths for domains where that
-     matters.
+  4. Otherwise: the request's path must match one of the domain's
+     configured allowed-paths. **Changed 2026-09-07 (RoadMap.md's dated
+     entry, project owner's explicit direction)**: a domain with ZERO
+     configured paths used to allow every path by default ("admins only
+     need to curate paths for domains where that matters") -- switching a
+     domain to bump mode silently opened its entire site until someone
+     came back and narrowed it. Now a domain with no path rules allows
+     ONLY the bare root ("/") -- see `_path_allowed_or_bare_root()` --
+     so bump mode is deny-by-default beyond the homepage until an admin
+     deliberately adds path rules for whatever else should be reachable.
+     A domain that already has at least one path rule is unaffected --
+     only ITS OWN rules ever mattered for it, before or after this
+     change.
 
 Every decision is logged (deduped) via logging_util.
 
@@ -123,7 +131,7 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
             return False
         return _decide_crunchyroll(conn, user, hostname, path, domain)
 
-    if not matching.path_allowed(conn, domain["id"], path) and _has_any_path_rules(conn, domain["id"]):
+    if not _path_allowed_or_bare_root(conn, domain["id"], path):
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
             path=path, allowed=False, reason="path_not_allowed", device_id=device_id,
@@ -142,6 +150,20 @@ def _has_any_path_rules(conn, domain_id: int) -> bool:
         "SELECT 1 FROM domain_paths WHERE domain_id = ? LIMIT 1", (domain_id,)
     ).fetchone()
     return row is not None
+
+
+def _path_allowed_or_bare_root(conn, domain_id: int, path: str) -> bool:
+    """Whether `path` is allowed for `domain_id`'s configured path rules,
+    for both the generic bump-domain check above and Crunchyroll's own
+    "OTHER request shape" fallback below. **Changed 2026-09-07** -- see
+    this module's own docstring for the full reasoning: a domain with
+    ZERO configured rows in `domain_paths` used to allow every path;
+    now it allows only the bare root ("/"), deny-by-default otherwise.
+    A domain with at least one rule is unaffected -- delegates entirely
+    to `matching.path_allowed()`, same as before this change."""
+    if _has_any_path_rules(conn, domain_id):
+        return matching.path_allowed(conn, domain_id, path)
+    return path == "/"
 
 
 def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
@@ -164,12 +186,12 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
         # defense-in-depth v1 had: fall back to the configured path
         # allowlist for this domain instead of allowing blindly, so an
         # endpoint the classifier doesn't know about isn't automatically
-        # open. A domain with zero configured paths allows anything (see
-        # module docstring), matching how domain_paths behaves everywhere
-        # else -- for Crunchyroll specifically, defaults.py seeds this
-        # domain with a real path list, so that permissive fallback
-        # shouldn't normally be reached here.
-        if not _has_any_path_rules(conn, domain["id"]) or matching.path_allowed(conn, domain["id"], path):
+        # open. Same deny-by-default-beyond-root treatment as the generic
+        # bump-domain check above (2026-09-07) when zero paths are
+        # configured -- for Crunchyroll specifically, defaults.py seeds
+        # this domain with a real path list, so that fallback shouldn't
+        # normally be reached here at all.
+        if _path_allowed_or_bare_root(conn, domain["id"], path):
             return True
         logging_util.log_access(
             conn, user_id=user["id"], username=username, domain=hostname,

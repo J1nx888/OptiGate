@@ -419,13 +419,100 @@ def test_add_path_and_delete_path(client, db_conn):
     domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
 
     client.post(
-        "/domains/paths/add", data={"domain_id": domain_id, "pattern": r"^/ok"}, headers=_auth_header()
+        "/domains/paths/add", data={"domain_id": domain_id, "pattern": "/ok"}, headers=_auth_header()
     )
     path_row = db_conn.execute("SELECT * FROM domain_paths WHERE domain_id = ?", (domain_id,)).fetchone()
     assert path_row is not None
 
     client.post("/domains/paths/delete", data={"path_id": path_row["id"]}, headers=_auth_header())
     assert db_conn.execute("SELECT * FROM domain_paths WHERE id = ?", (path_row["id"],)).fetchone() is None
+
+
+# ============================================================
+# add_path(): plain path/URL input, not hand-written regex (changed
+# 2026-09-07, RoadMap.md's dated entry -- "the admin can just paste the
+# URL and everything after what is pasted is allowed")
+# ============================================================
+
+def test_extract_path_from_a_bare_path():
+    import dashboard
+    assert dashboard._extract_path("/comics/foo") == "/comics/foo"
+
+
+def test_extract_path_from_a_full_url():
+    import dashboard
+    assert dashboard._extract_path("https://example.com/comics/foo") == "/comics/foo"
+
+
+def test_extract_path_from_a_schemeless_host_and_path():
+    import dashboard
+    assert dashboard._extract_path("example.com/comics/foo") == "/comics/foo"
+
+
+def test_extract_path_strips_query_string_via_path_to_pattern():
+    import dashboard
+    assert dashboard._extract_path("/comics/foo?ref=1") == "/comics/foo"
+
+
+def test_add_path_accepts_a_plain_path_and_matches_it_and_anything_after(client, db_conn):
+    """The project owner's own example: pasting a path allows that exact
+    path, a real subpath under it, AND a different literal path that
+    merely shares the same string prefix (not just a "/" boundary)."""
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "bump"}, headers=_auth_header())
+    domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
+
+    client.post(
+        "/domains/paths/add",
+        data={"domain_id": domain_id, "pattern": "/comics/surviving-the-game-as-a-barbarian"},
+        headers=_auth_header(),
+    )
+
+    import matching
+    assert matching.path_allowed(db_conn, domain_id, "/comics/surviving-the-game-as-a-barbarian") is True
+    assert matching.path_allowed(db_conn, domain_id, "/comics/surviving-the-game-as-a-barbarian/what") is True
+    assert matching.path_allowed(db_conn, domain_id, "/comics/surviving-the-game-as-a-barbarian-adfasdfasdf") is True
+    assert matching.path_allowed(db_conn, domain_id, "/comics/something-else") is False
+
+
+def test_add_path_accepts_a_full_url_and_extracts_just_the_path(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "bump"}, headers=_auth_header())
+    domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
+
+    client.post(
+        "/domains/paths/add",
+        data={"domain_id": domain_id, "pattern": "https://example.com/discover?ref=homepage"},
+        headers=_auth_header(),
+    )
+
+    import matching
+    assert matching.path_allowed(db_conn, domain_id, "/discover") is True
+
+
+def test_add_path_escapes_regex_metacharacters_in_the_pasted_path(client, db_conn):
+    """A literal dot in a real path (e.g. a filename) must match only
+    that literal character, not "any character" -- proves the input is
+    actually re.escape()d, not inserted as raw regex."""
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "bump"}, headers=_auth_header())
+    domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
+
+    client.post(
+        "/domains/paths/add", data={"domain_id": domain_id, "pattern": "/file.json"}, headers=_auth_header()
+    )
+
+    import matching
+    assert matching.path_allowed(db_conn, domain_id, "/file.json") is True
+    assert matching.path_allowed(db_conn, domain_id, "/fileXjson") is False
+
+
+def test_add_path_blank_input_rejected(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "bump"}, headers=_auth_header())
+    domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
+
+    resp = client.post(
+        "/domains/paths/add", data={"domain_id": domain_id, "pattern": ""}, headers=_auth_header()
+    )
+
+    assert "error=1" in resp.headers["Location"]
 
 
 def test_delete_path_on_an_already_deleted_row_does_not_500(client, db_conn):

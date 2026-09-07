@@ -188,11 +188,19 @@ admins are expected to write `^/...` themselves; see
 `dashboard.path_to_pattern()`, which prefixes `^` and `re.escape()`s a
 literal path when deriving a suggested pattern from a real blocked
 request). Semantics, from `matching.path_allowed()` and its caller
-`authz_helper._has_any_path_rules()`: **a domain with zero `domain_paths`
-rows allows every path** once the domain check itself passes -- admins only
-need to curate paths for domains where restricting *which* pages are
-reachable actually matters (this is why the Crunchyroll domain is
-pre-seeded with an extensive path list but most domains have none).
+`authz_helper._path_allowed_or_bare_root()`: **a domain with zero
+`domain_paths` rows allows ONLY the bare root path (`/`)** once the domain
+check itself passes -- deny-by-default beyond the homepage until an admin
+adds path rules for whatever else should be reachable. **Changed
+2026-09-07 (RoadMap.md's dated entry, project owner's explicit
+direction)**: this used to allow every path by default ("admins only need
+to curate paths for domains where that matters") -- switching a domain to
+bump mode silently opened its entire site until someone came back and
+narrowed it, which the project owner correctly flagged as backwards. The
+Crunchyroll domain is pre-seeded with an extensive path list (so this
+default never applies to it in practice); a newly bump-enabled domain
+with no paths yet now needs at least one added before anything beyond
+its homepage works.
 
 ### `user_shows`
 Per-user approved Crunchyroll series (independent of `domain_paths` --
@@ -743,7 +751,7 @@ From `proxy/authz_helper.py` (HTTP layer, bump-mode domains, `path` always popul
 - `unknown_domain` -- `decide()`: no `domains` row matches this hostname at all.
 - `not_bump_mode` -- `decide()`: a `domains` row exists but its `mode` isn't `bump` (reached via the ssl_bump `block_page` redirect path for a denied splice-mode domain).
 - `domain_not_assigned` -- `decide()`: domain exists and is `bump` mode, but `matching.device_domain_reason()` found no authorization by any axis (global, user, group, or device).
-- `path_not_allowed` -- `decide()` (generic bump domain) and `_decide_crunchyroll()` (Crunchyroll `OTHER`-shape fallback): domain permitted, but the request path matched none of its `domain_paths` patterns (only checked when the domain has at least one path rule at all).
+- `path_not_allowed` -- `decide()` (generic bump domain) and `_decide_crunchyroll()` (Crunchyroll `OTHER`-shape fallback), via the shared `_path_allowed_or_bare_root()`: domain permitted, but the request path matched none of its `domain_paths` patterns -- or, since 2026-09-07, the domain has zero path rules at all and the request wasn't for the bare root (`/`), the new deny-by-default-beyond-root case.
 - `global_domain` / `user_domain` / `group_domain` / `device_domain` -- `decide()`: generic bump-mode domain allowed, via whichever axis `device_domain_reason()` matched first (see the SNI-layer entries above for `group_domain`/`device_domain`'s 2026-08-31 history).
 - `show_requires_user` -- `decide()`: a crunchyroll-kind domain IS authorized (via group/device), but no user resolved for this device at all -- `user_shows` is keyed by `user_id` only, so there's no group/device-level show list to check (added 2026-08-31, alongside the `group_domain`/`device_domain` fix).
 - `blocked_shape` -- `_decide_crunchyroll()`: `cr_urls.classify()` recognized the URL as a shape that's always denied.

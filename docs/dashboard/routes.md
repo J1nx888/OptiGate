@@ -404,8 +404,18 @@ admin's next action is one edit + submit rather than starting from scratch:
   `/groups/add-devices` below and `common/category_fetch.py`'s own fix.
   Redirects to `domains` with an error flash if no domains were checked.
 - `POST /domains/paths/add` -> `add_path()` -- form fields `domain_id`,
-  `pattern`. Validates non-empty, <= 200 chars, and compiles as a regex.
-  `INSERT OR IGNORE` into `domain_paths`. Redirects to `domain_detail`.
+  `pattern`. **Changed 2026-09-07 (RoadMap.md's dated entry -- "can we
+  simplify it so the admin can just paste the URL")**: `pattern` is now
+  a plain pasted path or full URL, not hand-written regex -- validates
+  non-empty and <= 500 chars, extracts just the path with the new
+  `_extract_path()` helper (a bare path passes through as-is; a full URL
+  or schemeless `host/path` gets `urlparse(...).path` extracted, same
+  technique `add_domain_from_url()` already used), then converts it
+  through `path_to_pattern()` (anchored, `re.escape()`d, no trailing
+  anchor -- matches the given path and anything after it) before
+  storing. There is no longer a way to submit a custom regex from this
+  form. `INSERT OR IGNORE` into `domain_paths`. Redirects to
+  `domain_detail`.
 - `POST /domains/paths/delete` -> `delete_path()` -- form field `path_id`.
   Looks up the `domain_id` first (needed for the redirect target after the
   row is gone), deletes the `domain_paths` row, redirects to

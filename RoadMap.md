@@ -5085,6 +5085,61 @@ independently.
 
 ---
 
+## Bump-mode path enforcement: deny-by-default beyond the homepage; plain-URL path input (2026-09-07)
+
+Two related fixes to `proxy/authz_helper.py`'s bump-mode path checking,
+both from direct project-owner feedback the same day:
+
+**1. Real behavior change, a genuine security tightening.** "when
+something is configured for bump, by default it allows everything on
+that site. I don't want that... it should only allow the specific
+domain site and nothing afterwards unless I add it to the path
+configuration." Confirmed in code: a domain with zero `domain_paths`
+rows used to allow every path once the domain-assignment check passed
+-- switching a domain to bump mode silently opened its ENTIRE site
+until an admin came back and deliberately narrowed it with path rules,
+backwards from a safe default. Asked the project owner directly which
+default they wanted (deny everything outright vs. allow only the bare
+homepage) -- **chose allow-only-the-root**. New shared
+`_path_allowed_or_bare_root()` in `authz_helper.py`, used by both the
+generic bump-domain check and Crunchyroll's own `OTHER`-request-shape
+fallback (previously two separate copies of the same "no rules = allow
+everything" logic): a domain with existing path rules is completely
+unaffected (still exactly `matching.path_allowed()`); a domain with
+none now allows only `/`. The Crunchyroll domain itself is unaffected
+in practice (`defaults.py` seeds it with a real path list already).
+Every place documenting the old default -- this module's own docstring,
+`docs/database/schema.md`'s `domain_paths` table and `path_not_allowed`
+reason, the Domain Manage page's own "Allowed paths" card -- corrected
+to describe the new one.
+
+**2. "The regex pattern matching... is going to be complex. Can we
+simplify it so the admin can just paste the URL and everything after
+what is pasted is allowed?"** -- with the exact example "/comics/foo"
+should also match "/comics/foo/bar" (a real subpath) AND
+"/comics/foo-anything-else" (a different literal path merely sharing
+the same string prefix, not a "/"-bounded subpath) -- i.e. genuine
+string-prefix matching, not directory-style prefix matching. The
+underlying mechanism already did exactly this
+(`dashboard.path_to_pattern()`: anchored, fully `re.escape()`d, no
+trailing anchor -- already used by the existing "approve a specific
+page" URL-paste shortcut), just never applied to the **generic** "Add
+path" form on a domain's own Manage page, which required admins to
+hand-write valid, correctly-escaped regex themselves
+(`^/discover`-style). `add_path()` now takes a plain pasted path OR
+full URL (new `_extract_path()`, same `urlparse(...).path` extraction
+`add_domain_from_url()` already used) and converts it through
+`path_to_pattern()` automatically -- there is no longer a way to
+hand-author custom regex from this form at all (a deliberate
+simplification, not an oversight; a genuine power-user regex need would
+mean inserting a `domain_paths` row directly).
+
+18 new tests across `tests/test_helpers_protocol.py` and
+`tests/test_dashboard.py`. 900 → 910 passed, 34 skipped, zero
+regressions.
+
+---
+
 ## Cross-cutting: security-by-design
 
 Security is designed in from the start on every phase above, not

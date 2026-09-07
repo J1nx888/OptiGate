@@ -1939,9 +1939,18 @@ DOMAIN_DETAIL_BODY = """
 {% if d.mode == 'bump' %}
 <div class="card">
 <h2>Allowed paths ({{ paths|length }})</h2>
-<p class="hint">Regex patterns matched against the request path. Leave empty to allow any path on this domain once it's otherwise permitted.</p>
+<p class="hint">
+  Paste a page's path or full URL below -- everything from there onward
+  is allowed (e.g. adding <code>/comics/foo</code> also allows
+  <code>/comics/foo/bar</code> and <code>/comics/foo-anything-else</code>).
+  Only enforced for <span class="badge mode-bump">bump</span> domains
+  (splice never decrypts far enough to see a path at all).
+  <strong>Leave this empty and only the bare homepage (<code>/</code>) is
+  allowed</strong> -- deny-by-default beyond that until you add at least
+  one path here for whatever else on this site should be reachable.
+</p>
 {% if prefill_path %}
-<p class="hint">A blocked request suggested the pattern below (derived from the actual path that was denied) -- review it, broaden or narrow it as needed, then save.</p>
+<p class="hint">A blocked request suggested the path below (the one that was actually denied) -- review it, broaden or narrow it as needed, then save.</p>
 {% endif %}
 <div class="table-scroll">
 <table>
@@ -1957,13 +1966,13 @@ DOMAIN_DETAIL_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="2"><em>No path restriction -- any path is allowed once the domain check passes.</em></td></tr>
+  <tr><td colspan="2"><em>No path rules yet -- only <code>/</code> (the bare homepage) is currently allowed on this domain.</em></td></tr>
   {% endfor %}
 </table>
 </div>
 <form class="add-form" method="post" action="{{ url_for('add_path') }}">
   <input type="hidden" name="domain_id" value="{{ d.id }}">
-  <input type="text" name="pattern" placeholder="e.g. ^/discover" value="{{ prefill_path or '' }}" required>
+  <input type="text" name="pattern" placeholder="e.g. /discover or https://example.com/discover" value="{{ prefill_path or '' }}" required>
   <button class="add" type="submit">Add path</button>
 </form>
 </div>
@@ -2100,19 +2109,45 @@ def bulk_update_domain_access():
     )
 
 
+def _extract_path(raw: str) -> str:
+    """Accepts either a bare path (`/comics/foo`) or a full URL
+    (`https://example.com/comics/foo`, scheme optional) and returns just
+    the path part, always leading-slash. Added 2026-09-07 (RoadMap.md's
+    dated entry, project owner's explicit direction) so add_path() below
+    can accept a plain pasted URL/path instead of requiring hand-written
+    regex -- same `urlparse(...).path` extraction add_domain_from_url()
+    already uses for its own "paste a URL" shortcut."""
+    raw = raw.strip()
+    if "://" not in raw and not raw.startswith("/"):
+        # A bare host-and-path with no scheme (e.g. "example.com/x") would
+        # otherwise urlparse as an all-path relative URL with no netloc --
+        # giving it a scheme first makes urlparse split host from path
+        # correctly either way.
+        raw = "https://" + raw
+    return urlparse(raw).path or "/"
+
+
 @app.route("/domains/paths/add", methods=["POST"])
 @require_admin
 def add_path():
+    """Takes a plain pasted path or URL, not hand-written regex --
+    changed 2026-09-07 (RoadMap.md's dated entry): "the admin can just
+    paste the URL and everything after what is pasted is allowed."
+    Converts it the exact same way the auto-suggested-from-a-blocked-
+    request flow already did (`path_to_pattern()`: anchored, fully
+    `re.escape()`d, no trailing anchor so it also matches anything
+    AFTER the pasted path, e.g. `/comics/foo` also matches
+    `/comics/foo/bar` and `/comics/foo-anything-else`) -- there is no
+    longer a way to hand-author a custom regex from this form; anyone
+    who genuinely needs one can still insert a `domain_paths` row
+    directly against the database."""
     domain_id = request.form.get("domain_id", "")
-    pattern = request.form.get("pattern", "").strip()
-    if not pattern:
-        return flash_redirect("domain_detail", "Pattern is required.", error=True, domain_id=domain_id)
-    if len(pattern) > 200:
-        return flash_redirect("domain_detail", "Pattern too long (200 characters max).", error=True, domain_id=domain_id)
-    try:
-        re.compile(pattern)
-    except re.error as exc:
-        return flash_redirect("domain_detail", f"Not a valid regex: {exc}", error=True, domain_id=domain_id)
+    raw = request.form.get("pattern", "").strip()
+    if not raw:
+        return flash_redirect("domain_detail", "A path or URL is required.", error=True, domain_id=domain_id)
+    if len(raw) > 500:
+        return flash_redirect("domain_detail", "That's too long (500 characters max).", error=True, domain_id=domain_id)
+    pattern = path_to_pattern(_extract_path(raw))
     conn = get_db()
     conn.execute(
         "INSERT OR IGNORE INTO domain_paths (domain_id, pattern) VALUES (?,?)", (domain_id, pattern)
