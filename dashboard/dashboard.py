@@ -913,12 +913,31 @@ USERS_BODY = """
 
 <div class="card">
 <h2>Users ({{ users|length }})</h2>
+{% if users %}
+<div class="toolbar" id="userBulkToolbar">
+  <a class="btn small" href="{{ url_for('export_users_csv') }}">&darr; Download users</a>
+  <span class="toolbar-sep"></span>
+  <form id="bulkUserEnableForm" class="inline" method="post" action="{{ url_for('bulk_resume_users') }}">
+    <button class="btn small" type="submit" disabled>Enable</button>
+  </form>
+  <form id="bulkUserPauseForm" class="inline" method="post" action="{{ url_for('bulk_pause_users') }}">
+    <button class="btn small" type="submit" disabled>Disable</button>
+  </form>
+  <form id="bulkUserDeleteForm" class="inline" method="post" action="{{ url_for('bulk_delete_users') }}"
+        onsubmit="return confirm('Delete every checked user? This removes their login, site access, and show approvals, and cannot be undone.');">
+    <button class="danger small" type="submit" disabled>Delete</button>
+  </form>
+  <span class="hint" id="userBulkCount" style="margin:0;">Check users below to Enable/Disable/Delete several at once.</span>
+</div>
+<p class="hint">"Enable"/"Disable" pause or resume every checked user's own devices -- same as each kid's own Pause card on their Manage page, just for several kids at once.</p>
+{% endif %}
 {% if users %}<input type="search" data-filter-table="usersTable" placeholder="Search users&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
 <table id="usersTable">
-  <tr><th>Username</th><th>Display name</th><th>Sites</th><th>Shows</th><th></th></tr>
+  <tr><th>{% if users %}<input type="checkbox" id="userSelectAll" title="Select all">{% endif %}</th><th>Username</th><th>Display name</th><th>Sites</th><th>Shows</th><th></th></tr>
   {% for u in users %}
   <tr>
+    <td><input type="checkbox" class="bulk-user-check" value="{{ u.id }}"></td>
     <td><code>{{ u.username }}</code></td>
     <td>{{ u.display_name }}</td>
     <td><a href="{{ url_for('domains', user_id=u.id) }}">{{ u.domain_count }} assigned</a></td>
@@ -932,10 +951,71 @@ USERS_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="5"><em>No users yet.</em></td></tr>
+  <tr><td colspan="6"><em>No users yet.</em></td></tr>
   {% endfor %}
 </table>
 </div>
+<script>
+(function () {
+  var selectAll = document.getElementById("userSelectAll");
+  var countLabel = document.getElementById("userBulkCount");
+  var toolbar = document.getElementById("userBulkToolbar");
+
+  // Same toolbar pattern as the Devices page (RoadMap.md's dated entry,
+  // referencing Microsoft Entra's admin console) -- extended here to
+  // Users/Categories/Schedules for consistency across every list page.
+  function updateToolbarState() {
+    if (!toolbar) return;
+    var n = document.querySelectorAll(".bulk-user-check:checked").length;
+    toolbar.querySelectorAll("button").forEach(function (btn) { btn.disabled = n === 0; });
+    if (countLabel) {
+      countLabel.textContent = n === 0
+        ? "Check users below to Enable/Disable/Delete several at once."
+        : n + " user" + (n === 1 ? "" : "s") + " selected.";
+    }
+  }
+
+  if (selectAll) {
+    selectAll.addEventListener("change", function () {
+      document.querySelectorAll(".bulk-user-check").forEach(function (box) { box.checked = selectAll.checked; });
+      updateToolbarState();
+    });
+  }
+  document.querySelectorAll(".bulk-user-check").forEach(function (box) {
+    box.addEventListener("change", updateToolbarState);
+  });
+  updateToolbarState();
+
+  function wireBulkForm(formId) {
+    var form = document.getElementById(formId);
+    if (!form) return;
+    form.addEventListener("submit", function (event) {
+      // Checkboxes live in #usersTable, not inside any bulk form --
+      // nesting a <form> around the table would break each row's own
+      // Delete form (HTML forms can't nest) -- collected into hidden
+      // inputs here instead, right before submit. Same pattern as the
+      // Devices/Domains pages' own bulk forms.
+      var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-user-check:checked"));
+      if (!checked.length) {
+        event.preventDefault();
+        alert("Check at least one user above first.");
+        return;
+      }
+      form.querySelectorAll("input[name=user_ids]").forEach(function (el) { el.remove(); });
+      checked.forEach(function (box) {
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "user_ids";
+        hidden.value = box.value;
+        form.appendChild(hidden);
+      });
+    });
+  }
+  wireBulkForm("bulkUserEnableForm");
+  wireBulkForm("bulkUserPauseForm");
+  wireBulkForm("bulkUserDeleteForm");
+})();
+</script>
 <form class="add-form" method="post" action="{{ url_for('add_user') }}">
   <input type="text" name="username" placeholder="username, e.g. kid1" required>
   <input type="text" name="display_name" placeholder="Display name, e.g. Alex">
@@ -1013,6 +1093,82 @@ def delete_user():
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
     return flash_redirect("users", "User deleted.")
+
+
+@app.route("/users/bulk-delete", methods=["POST"])
+@require_admin
+def bulk_delete_users():
+    """Users list's toolbar "Delete" button (RoadMap.md's dated entry --
+    extending the Devices/Domains bulk-actions pattern to every list
+    page). Plain `DELETE ... WHERE id IN (...)`, same shape as
+    `bulk_delete_devices()`."""
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    if not user_ids:
+        return flash_redirect("users", "No users selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(user_ids))
+    conn.execute(f"DELETE FROM users WHERE id IN ({placeholders})", tuple(user_ids))
+    conn.commit()
+    return flash_redirect("users", f"Deleted {len(user_ids)} user{'s' if len(user_ids) != 1 else ''}.")
+
+
+@app.route("/users/bulk-pause", methods=["POST"])
+@require_admin
+def bulk_pause_users():
+    """Users list's toolbar "Disable" button -- pauses every checked
+    user's own devices, same `_set_quarantine()` mechanism `pause_user()`
+    already uses for one kid at a time, scoped to an `IN (...)` id list."""
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    if not user_ids:
+        return flash_redirect("users", "No users selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(user_ids))
+    n = _set_quarantine(conn, f"user_id IN ({placeholders}) AND ignored = 0", tuple(user_ids), paused=True)
+    return flash_redirect("users", f"Paused {n} device{'s' if n != 1 else ''}.")
+
+
+@app.route("/users/bulk-resume", methods=["POST"])
+@require_admin
+def bulk_resume_users():
+    """Users list's toolbar "Enable" button -- the resume counterpart to
+    bulk_pause_users() above."""
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    if not user_ids:
+        return flash_redirect("users", "No users selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(user_ids))
+    n = _set_quarantine(
+        conn, f"user_id IN ({placeholders}) AND quarantined_at IS NOT NULL", tuple(user_ids), paused=False
+    )
+    return flash_redirect("users", f"Resumed {n} device{'s' if n != 1 else ''}.")
+
+
+@app.route("/users/export", methods=["GET"])
+@require_admin
+def export_users_csv():
+    """Users list's toolbar "Download users" button -- a plain CSV of
+    every user (username, display name, assigned-sites count, approved-
+    shows count), not gated by checkbox selection, same "always
+    available regardless of selection" role `export_devices_csv()`
+    already established."""
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Username", "Display name", "Sites assigned", "Shows approved"])
+    for u in rows:
+        domain_count = conn.execute(
+            "SELECT COUNT(*) c FROM domains d "
+            "LEFT JOIN user_domains ud ON ud.domain_id = d.id AND ud.user_id = ? "
+            "WHERE d.is_global = 1 OR ud.user_id IS NOT NULL",
+            (u["id"],),
+        ).fetchone()["c"]
+        show_count = conn.execute("SELECT COUNT(*) c FROM user_shows WHERE user_id = ?", (u["id"],)).fetchone()["c"]
+        writer.writerow([u["username"], u["display_name"], domain_count, show_count])
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=users.csv"},
+    )
 
 
 @app.route("/users/reset-password", methods=["POST"])
@@ -2579,14 +2735,26 @@ CATEGORIES_BODY = """
   Domains come from a subscribed list, manual additions, or both.
 </p>
 {% if categories %}
+<div class="toolbar" id="categoryBulkToolbar">
+  <a class="btn small" href="{{ url_for('export_categories_csv') }}">&darr; Download categories</a>
+  <span class="toolbar-sep"></span>
+  <form id="bulkCategoryDeleteForm" class="inline" method="post" action="{{ url_for('bulk_delete_categories') }}"
+        onsubmit="return confirm('Delete every checked category? This cannot be undone.');">
+    <button class="danger small" type="submit" disabled>Delete</button>
+  </form>
+  <span class="hint" id="categoryBulkCount" style="margin:0;">Check categories below to delete several at once.</span>
+</div>
+{% endif %}
+{% if categories %}
 <input type="search" data-filter-table="categoriesTable" placeholder="Filter by category name&hellip;" style="margin-bottom:.3rem; width:100%; max-width:280px;">
 <p class="hint" style="margin:0 0 .6rem;">This box filters the list below by <strong>category name</strong> only -- to check whether a specific domain (e.g. <code>facebook.com</code>) is blocked by any category, use "Find a domain across categories" below instead.</p>
 {% endif %}
 <div class="table-scroll">
 <table id="categoriesTable">
-  <tr><th>Name</th><th>Domains</th><th>Blocked for</th><th>Last synced</th><th></th></tr>
+  <tr><th>{% if categories %}<input type="checkbox" id="categorySelectAll" title="Select all">{% endif %}</th><th>Name</th><th>Domains</th><th>Blocked for</th><th>Last synced</th><th></th></tr>
   {% for c in categories %}
   <tr>
+    <td><input type="checkbox" class="bulk-category-check" value="{{ c.id }}"></td>
     <td>{{ c.name }}</td>
     <td>{{ c.domain_count }}{% if c.domain_count > max_scoped %} <span class="badge blocked" title="Over {{ max_scoped }} domains -- can only be blocked for Everyone, see Manage">everyone-only</span>{% endif %}</td>
     <td>{{ 'Everyone' if c.is_global else 'Per-user/group/device' }}</td>
@@ -2600,10 +2768,59 @@ CATEGORIES_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="5"><em>No categories configured.</em></td></tr>
+  <tr><td colspan="6"><em>No categories configured.</em></td></tr>
   {% endfor %}
 </table>
 </div>
+<script>
+(function () {
+  var selectAll = document.getElementById("categorySelectAll");
+  var countLabel = document.getElementById("categoryBulkCount");
+  var toolbar = document.getElementById("categoryBulkToolbar");
+
+  function updateToolbarState() {
+    if (!toolbar) return;
+    var n = document.querySelectorAll(".bulk-category-check:checked").length;
+    toolbar.querySelectorAll("button").forEach(function (btn) { btn.disabled = n === 0; });
+    if (countLabel) {
+      countLabel.textContent = n === 0
+        ? "Check categories below to delete several at once."
+        : n + " categor" + (n === 1 ? "y" : "ies") + " selected.";
+    }
+  }
+
+  if (selectAll) {
+    selectAll.addEventListener("change", function () {
+      document.querySelectorAll(".bulk-category-check").forEach(function (box) { box.checked = selectAll.checked; });
+      updateToolbarState();
+    });
+  }
+  document.querySelectorAll(".bulk-category-check").forEach(function (box) {
+    box.addEventListener("change", updateToolbarState);
+  });
+  updateToolbarState();
+
+  var form = document.getElementById("bulkCategoryDeleteForm");
+  if (form) {
+    form.addEventListener("submit", function (event) {
+      var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-category-check:checked"));
+      if (!checked.length) {
+        event.preventDefault();
+        alert("Check at least one category above first.");
+        return;
+      }
+      form.querySelectorAll("input[name=category_ids]").forEach(function (el) { el.remove(); });
+      checked.forEach(function (box) {
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "category_ids";
+        hidden.value = box.value;
+        form.appendChild(hidden);
+      });
+    });
+  }
+})();
+</script>
 
 <form class="add-form" method="post" action="{{ url_for('add_category') }}">
   <input type="text" name="name" placeholder="e.g. Gambling" required>
@@ -2782,6 +2999,53 @@ def delete_category():
     conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
     conn.commit()
     return flash_redirect("categories", "Category removed.")
+
+
+@app.route("/categories/bulk-delete", methods=["POST"])
+@require_admin
+def bulk_delete_categories():
+    """Categories list's toolbar "Delete" button (RoadMap.md's dated
+    entry -- extending the Devices/Domains/Users bulk-actions pattern to
+    every list page). No Enable/Disable here -- a category's `is_global`
+    flag is a real per-target assignment, not a simple on/off toggle the
+    way a device's pause state is, so there's no clean equivalent."""
+    category_ids = {int(x) for x in request.form.getlist("category_ids") if x.isdigit()}
+    if not category_ids:
+        return flash_redirect("categories", "No categories selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(category_ids))
+    conn.execute(f"DELETE FROM categories WHERE id IN ({placeholders})", tuple(category_ids))
+    conn.commit()
+    return flash_redirect(
+        "categories", f"Deleted {len(category_ids)} categor{'y' if len(category_ids) == 1 else 'ies'}."
+    )
+
+
+@app.route("/categories/export", methods=["GET"])
+@require_admin
+def export_categories_csv():
+    """Categories list's toolbar "Download categories" button -- a
+    plain CSV overview (name, domain count, blocked-for, subscription
+    URL, last synced), same "always available regardless of selection"
+    role `export_devices_csv()`/`export_users_csv()` already
+    established."""
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM categories ORDER BY name").fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Name", "Domain count", "Blocked for", "Subscription URL", "Last synced"])
+    for c in rows:
+        domain_count = conn.execute(
+            "SELECT COUNT(*) c FROM category_domains WHERE category_id = ?", (c["id"],)
+        ).fetchone()["c"]
+        writer.writerow([
+            c["name"], domain_count, "Everyone" if c["is_global"] else "Per-user/group/device",
+            c["subscription_url"] or "", c["last_synced_at"] or "",
+        ])
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=categories.csv"},
+    )
 
 
 CATEGORY_DETAIL_BODY = """
@@ -3160,12 +3424,24 @@ SCHEDULES_BODY = """
 <div class="card">
 <h2>Schedules ({{ schedules|length }})</h2>
 <p class="hint">A schedule blocks categories (or everything) for whoever it's assigned to, only while its time window is open -- e.g. "block Social Media on school days 08:00-15:00" or "no internet at all, every night 21:00-06:00."</p>
+{% if schedules %}
+<div class="toolbar" id="scheduleBulkToolbar">
+  <a class="btn small" href="{{ url_for('export_schedules_csv') }}">&darr; Download schedules</a>
+  <span class="toolbar-sep"></span>
+  <form id="bulkScheduleDeleteForm" class="inline" method="post" action="{{ url_for('bulk_delete_schedules') }}"
+        onsubmit="return confirm('Delete every checked schedule? This cannot be undone.');">
+    <button class="danger small" type="submit" disabled>Delete</button>
+  </form>
+  <span class="hint" id="scheduleBulkCount" style="margin:0;">Check schedules below to delete several at once.</span>
+</div>
+{% endif %}
 {% if schedules %}<input type="search" data-filter-table="schedulesTable" placeholder="Search schedules&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
 <table id="schedulesTable">
-  <tr><th>Name</th><th>Days</th><th>Window</th><th>Effect</th><th>Applies to</th><th></th></tr>
+  <tr><th>{% if schedules %}<input type="checkbox" id="scheduleSelectAll" title="Select all">{% endif %}</th><th>Name</th><th>Days</th><th>Window</th><th>Effect</th><th>Applies to</th><th></th></tr>
   {% for s in schedules %}
   <tr>
+    <td><input type="checkbox" class="bulk-schedule-check" value="{{ s.id }}"></td>
     <td>{{ s.name }}{% if s.is_mode %} <span class="badge" title="Eligible for &quot;Shift mode now&quot;">mode</span>{% endif %}</td>
     <td>{{ s.days_of_week }}</td>
     <td>{{ s.start_time }}&ndash;{{ s.end_time }} {{ s.time_zone }}</td>
@@ -3180,10 +3456,59 @@ SCHEDULES_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="6"><em>No schedules configured.</em></td></tr>
+  <tr><td colspan="7"><em>No schedules configured.</em></td></tr>
   {% endfor %}
 </table>
 </div>
+<script>
+(function () {
+  var selectAll = document.getElementById("scheduleSelectAll");
+  var countLabel = document.getElementById("scheduleBulkCount");
+  var toolbar = document.getElementById("scheduleBulkToolbar");
+
+  function updateToolbarState() {
+    if (!toolbar) return;
+    var n = document.querySelectorAll(".bulk-schedule-check:checked").length;
+    toolbar.querySelectorAll("button").forEach(function (btn) { btn.disabled = n === 0; });
+    if (countLabel) {
+      countLabel.textContent = n === 0
+        ? "Check schedules below to delete several at once."
+        : n + " schedule" + (n === 1 ? "" : "s") + " selected.";
+    }
+  }
+
+  if (selectAll) {
+    selectAll.addEventListener("change", function () {
+      document.querySelectorAll(".bulk-schedule-check").forEach(function (box) { box.checked = selectAll.checked; });
+      updateToolbarState();
+    });
+  }
+  document.querySelectorAll(".bulk-schedule-check").forEach(function (box) {
+    box.addEventListener("change", updateToolbarState);
+  });
+  updateToolbarState();
+
+  var form = document.getElementById("bulkScheduleDeleteForm");
+  if (form) {
+    form.addEventListener("submit", function (event) {
+      var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-schedule-check:checked"));
+      if (!checked.length) {
+        event.preventDefault();
+        alert("Check at least one schedule above first.");
+        return;
+      }
+      form.querySelectorAll("input[name=schedule_ids]").forEach(function (el) { el.remove(); });
+      checked.forEach(function (box) {
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "schedule_ids";
+        hidden.value = box.value;
+        form.appendChild(hidden);
+      });
+    });
+  }
+})();
+</script>
 
 <form class="add-form" method="post" action="{{ url_for('add_schedule') }}" style="flex-wrap:wrap;">
   <input type="text" name="name" placeholder="e.g. Bedtime" required style="flex:1; min-width:200px;">
@@ -3436,6 +3761,56 @@ def delete_schedule():
     conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
     conn.commit()
     return flash_redirect("schedules", "Schedule removed.")
+
+
+@app.route("/schedules/bulk-delete", methods=["POST"])
+@require_admin
+def bulk_delete_schedules():
+    """Schedules list's toolbar "Delete" button (RoadMap.md's dated
+    entry -- extending the Devices/Domains/Users/Categories bulk-actions
+    pattern to every list page). No Enable/Disable here either -- a
+    schedule's own time window already governs when it's active; there's
+    no separate on/off flag to toggle in bulk."""
+    schedule_ids = {int(x) for x in request.form.getlist("schedule_ids") if x.isdigit()}
+    if not schedule_ids:
+        return flash_redirect("schedules", "No schedules selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(schedule_ids))
+    conn.execute(f"DELETE FROM schedules WHERE id IN ({placeholders})", tuple(schedule_ids))
+    conn.commit()
+    return flash_redirect(
+        "schedules", f"Deleted {len(schedule_ids)} schedule{'s' if len(schedule_ids) != 1 else ''}."
+    )
+
+
+@app.route("/schedules/export", methods=["GET"])
+@require_admin
+def export_schedules_csv():
+    """Schedules list's toolbar "Download schedules" button -- a plain
+    CSV overview (name, days, window, time zone, effect, applies-to),
+    same "always available regardless of selection" role the other
+    list pages' own export buttons already established."""
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM schedules ORDER BY name").fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Name", "Days", "Start", "End", "Time zone", "Effect", "Applies to", "Mode schedule"])
+    for s in rows:
+        if s["lockout_all"]:
+            effect = "Full lockout"
+        else:
+            category_count = conn.execute(
+                "SELECT COUNT(*) c FROM schedule_categories WHERE schedule_id = ?", (s["id"],)
+            ).fetchone()["c"]
+            effect = f"{category_count} categories"
+        writer.writerow([
+            s["name"], s["days_of_week"], s["start_time"], s["end_time"], s["time_zone"], effect,
+            "Everyone" if s["is_global"] else "Per-user/group/device", "yes" if s["is_mode"] else "no",
+        ])
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=schedules.csv"},
+    )
 
 
 SCHEDULE_DETAIL_BODY = """

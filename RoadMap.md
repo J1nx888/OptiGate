@@ -5140,6 +5140,62 @@ regressions.
 
 ---
 
+## Bulk-actions toolbar extended to every list page (2026-09-07)
+
+"Can you implement the same design change we did for devices, to the
+rest of the page such as users, devices, schedules, categories?" --
+Devices and Domains already had the checkbox + toolbar-above-the-table
+pattern (referencing Microsoft Entra's admin console); extended the
+identical shape to Users, Categories, and Schedules, choosing bulk
+actions per page based on what the page actually has rather than
+forcing an identical button set everywhere:
+
+- **Users**: Download (CSV: username, display name, sites assigned,
+  shows approved), Enable/Disable (bulk `_set_quarantine()` across every
+  checked user's own devices, scoped to `user_id IN (...)` -- the exact
+  same mechanism `pause_user()`/`resume_user()` already use for one kid
+  at a time, just extended to several at once), Delete (new
+  `bulk_delete_users()`).
+- **Categories**: Download (CSV: name, domain count, blocked-for,
+  subscription URL, last synced), Delete only -- deliberately no
+  Enable/Disable here: a category's `is_global` is a real per-target
+  assignment (Everyone vs. specific users/groups/devices), not a simple
+  on/off flag the way a device's pause state is, so there's no clean
+  binary toggle to map a bulk Enable/Disable onto.
+- **Schedules**: Download (CSV: name, days, window, time zone, effect,
+  applies-to, mode-schedule flag), Delete only -- same reasoning as
+  Categories: a schedule's own time window already governs when it's
+  active, no separate on/off flag exists to toggle in bulk.
+
+All three follow the identical interaction shape already established
+for Devices: checkboxes live in the table (not inside any bulk `<form>`,
+avoiding nesting around each row's own per-item Delete form), a shared
+per-page `updateToolbarState()` disables every toolbar button until at
+least one row is checked and shows a live "N selected" count, and
+Download is the one action that's always enabled regardless of
+selection (exports the full list). Live-verified interactively in the
+real dev server (JS-driven checkbox toggling, same technique used for
+Devices) for all three pages, not just unit tests -- each toolbar
+renders with real seeded data and correctly enables its buttons on
+selection.
+
+**Also answered directly, no code change**: "what happens if I block a
+domain in categories but then allow it in the domain listing?" --
+traced the actual rule-generation code in `controller/adguard_sync.py`:
+Categories and Domains are two fully independent rule sources that both
+feed the SAME AdGuard deny-list, and this project never generates
+AdGuard exception (`@@`) rules, only plain deny rules -- so a category's
+deny rule for a domain wins regardless of that domain's Domains-page
+configuration. The real, existing way to exempt one domain from one
+category is that category's own "Allow-exceptions" card
+(`category_overrides` table) -- scoped to just that category, not a
+global override.
+
+18 new tests in `tests/test_dashboard.py`. 910 → 928 passed, 34
+skipped, zero regressions.
+
+---
+
 ## Cross-cutting: security-by-design
 
 Security is designed in from the start on every phase above, not

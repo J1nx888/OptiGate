@@ -287,6 +287,21 @@ admin's next action is one edit + submit rather than starting from scratch:
 - `POST /users/delete` -> `delete_user()` -- form field `user_id`. Hard
   deletes the row (cascades to `user_domains`/`user_shows` via FK
   `ON DELETE CASCADE`). Redirects to `users`.
+- `POST /users/bulk-delete` / `POST /users/bulk-pause` / `POST
+  /users/bulk-resume` -> `bulk_delete_users()` / `bulk_pause_users()` /
+  `bulk_resume_users()` (added 2026-09-07, RoadMap.md's dated entry --
+  extending the Devices/Domains bulk-actions toolbar to every list page)
+  -- form field `user_ids` (multi-value, collected client-side from
+  checkboxes, same pattern as every other bulk route). Delete is a plain
+  `DELETE ... WHERE id IN (...)`; pause/resume reuse `_set_quarantine()`
+  scoped to `user_id IN (...) AND ignored = 0` / `... AND quarantined_at
+  IS NOT NULL` -- the exact mechanism `pause_user()`/`resume_user()`
+  already use for one kid, extended to several. These are the Users
+  toolbar's Delete/Disable/Enable buttons.
+- `GET /users/export` -> `export_users_csv()` (added 2026-09-07, same
+  entry -- the toolbar's "Download users" button) -- a plain CSV
+  (username, display name, sites-assigned count, shows-approved count),
+  not gated by checkbox selection.
 - `POST /users/reset-password` -> `reset_password()` -- form fields
   `user_id`, `password`. Redirects to `user_detail` (not `users`) with
   `user_id=` preserved.

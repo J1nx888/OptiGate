@@ -3422,6 +3422,219 @@ def test_users_page_has_no_search_box_when_empty(client):
     assert b'data-filter-table="usersTable"' not in resp.data
 
 
+# ============================================================
+# Bulk-actions toolbar extended to Users/Categories/Schedules (RoadMap.md's
+# dated entry -- "implement the same design change... to the rest of the
+# page such as users, devices, schedules, categories")
+# ============================================================
+
+def test_users_page_has_bulk_actions_toolbar(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    resp = client.get("/users", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'href="/users/export"' in resp.data
+    assert b'action="/users/bulk-resume"' in resp.data
+    assert b'action="/users/bulk-pause"' in resp.data
+    assert b'action="/users/bulk-delete"' in resp.data
+    assert b'class="bulk-user-check"' in resp.data
+    assert b'id="userSelectAll"' in resp.data
+
+
+def test_bulk_delete_users_removes_every_selected_user(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    client.post("/users/add", data={"username": "kid2", "password": "pw"}, headers=_auth_header())
+    client.post("/users/add", data={"username": "kid3", "password": "pw"}, headers=_auth_header())
+    to_delete = [r["id"] for r in db_conn.execute("SELECT id FROM users WHERE username IN ('kid1','kid2')")]
+
+    resp = client.post("/users/bulk-delete", data={"user_ids": [str(i) for i in to_delete]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    remaining = {r["username"] for r in db_conn.execute("SELECT username FROM users")}
+    assert remaining == {"kid3"}
+
+
+def test_bulk_delete_users_without_selection_shows_error(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    resp = client.post("/users/bulk-delete", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"] == 1
+
+
+def test_bulk_pause_users_pauses_every_selected_users_devices(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:40", "assignment": f"user:{user_id}"},
+        headers=_auth_header(),
+    )
+
+    resp = client.post("/users/bulk-pause", data={"user_ids": [str(user_id)]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE user_id = ?", (user_id,)).fetchone()
+    assert row["quarantined_at"] is not None
+
+
+def test_bulk_resume_users_resumes_every_selected_users_devices(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:41", "assignment": f"user:{user_id}"},
+        headers=_auth_header(),
+    )
+    client.post("/users/pause", data={"user_id": user_id}, headers=_auth_header())
+
+    resp = client.post("/users/bulk-resume", data={"user_ids": [str(user_id)]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE user_id = ?", (user_id,)).fetchone()
+    assert row["quarantined_at"] is None
+
+
+def test_bulk_pause_and_resume_users_without_selection_shows_error(client, db_conn):
+    resp = client.post("/users/bulk-pause", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    resp = client.post("/users/bulk-resume", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_export_users_csv_includes_every_user_and_key_fields(client, db_conn):
+    client.post(
+        "/users/add", data={"username": "kid1", "display_name": "Kid One", "password": "pw"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/users/export", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+    assert "attachment" in resp.headers["Content-Disposition"]
+    body = resp.data.decode()
+    assert "kid1" in body
+    assert "Kid One" in body
+
+
+def test_export_users_csv_requires_admin_auth(client):
+    resp = client.get("/users/export")
+    assert resp.status_code == 401
+
+
+def test_categories_page_has_bulk_actions_toolbar(client, db_conn):
+    client.post("/categories/add", data={"name": "TestCat"}, headers=_auth_header())
+    resp = client.get("/categories", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'href="/categories/export"' in resp.data
+    assert b'action="/categories/bulk-delete"' in resp.data
+    assert b'class="bulk-category-check"' in resp.data
+    assert b'id="categorySelectAll"' in resp.data
+
+
+def test_bulk_delete_categories_removes_every_selected_category(client, db_conn):
+    client.post("/categories/add", data={"name": "Cat1"}, headers=_auth_header())
+    client.post("/categories/add", data={"name": "Cat2"}, headers=_auth_header())
+    client.post("/categories/add", data={"name": "Cat3"}, headers=_auth_header())
+    to_delete = [r["id"] for r in db_conn.execute("SELECT id FROM categories WHERE name IN ('Cat1','Cat2')")]
+
+    resp = client.post(
+        "/categories/bulk-delete", data={"category_ids": [str(i) for i in to_delete]}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    remaining = {r["name"] for r in db_conn.execute("SELECT name FROM categories")}
+    assert remaining == {"Cat3"}
+
+
+def test_bulk_delete_categories_without_selection_shows_error(client, db_conn):
+    client.post("/categories/add", data={"name": "Cat1"}, headers=_auth_header())
+    resp = client.post("/categories/bulk-delete", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"] == 1
+
+
+def test_export_categories_csv_includes_every_category_and_key_fields(client, db_conn):
+    client.post(
+        "/categories/add", data={"name": "TestCat", "subscription_url": "https://example.invalid/list.txt"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/categories/export", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+    body = resp.data.decode()
+    assert "TestCat" in body
+    assert "https://example.invalid/list.txt" in body
+
+
+def test_export_categories_csv_requires_admin_auth(client):
+    resp = client.get("/categories/export")
+    assert resp.status_code == 401
+
+
+def test_schedules_page_has_bulk_actions_toolbar(client, db_conn):
+    client.post(
+        "/schedules/add",
+        data={"name": "Bedtime", "days": ["mon"], "start_time": "21:00", "end_time": "06:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    resp = client.get("/schedules", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'href="/schedules/export"' in resp.data
+    assert b'action="/schedules/bulk-delete"' in resp.data
+    assert b'class="bulk-schedule-check"' in resp.data
+    assert b'id="scheduleSelectAll"' in resp.data
+
+
+def test_bulk_delete_schedules_removes_every_selected_schedule(client, db_conn):
+    for name in ("Sched1", "Sched2", "Sched3"):
+        client.post(
+            "/schedules/add",
+            data={"name": name, "days": ["mon"], "start_time": "21:00", "end_time": "06:00", "time_zone": "UTC"},
+            headers=_auth_header(),
+        )
+    to_delete = [r["id"] for r in db_conn.execute("SELECT id FROM schedules WHERE name IN ('Sched1','Sched2')")]
+
+    resp = client.post(
+        "/schedules/bulk-delete", data={"schedule_ids": [str(i) for i in to_delete]}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    remaining = {r["name"] for r in db_conn.execute("SELECT name FROM schedules")}
+    assert remaining == {"Sched3"}
+
+
+def test_bulk_delete_schedules_without_selection_shows_error(client, db_conn):
+    client.post(
+        "/schedules/add",
+        data={"name": "Sched1", "days": ["mon"], "start_time": "21:00", "end_time": "06:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    resp = client.post("/schedules/bulk-delete", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) c FROM schedules").fetchone()["c"] == 1
+
+
+def test_export_schedules_csv_includes_every_schedule_and_key_fields(client, db_conn):
+    client.post(
+        "/schedules/add",
+        data={"name": "Bedtime", "days": ["mon"], "start_time": "21:00", "end_time": "06:00", "time_zone": "UTC", "lockout_all": "on"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/schedules/export", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+    body = resp.data.decode()
+    assert "Bedtime" in body
+    assert "Full lockout" in body
+
+
+def test_export_schedules_csv_requires_admin_auth(client):
+    resp = client.get("/schedules/export")
+    assert resp.status_code == 401
+
+
 def test_domains_and_devices_pages_have_search_boxes(client, db_conn):
     client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:30"}, headers=_auth_header())
