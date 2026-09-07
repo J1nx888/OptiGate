@@ -14,11 +14,11 @@
 > incidents) has now been separately verified GO, with a review-buffer
 > safety mechanism (a 3-minute reconciliation interval instead of
 > arp-worker staying idle) rather than a code change — see RoadMap.md's
-> dated result. **Not yet done**: one full back-to-back pass through the
-> matrix without stopping between rows, and the soak test (Milestone 10).
-> This runbook's procedure below is kept as-is for that follow-up work
-> and for anyone re-deriving the plan later — it's what was actually
-> followed.
+> dated result. The full back-to-back matrix pass has also been run
+> (consecutively, no stopping between rows, per the project owner —
+> confirmed clean). **Not yet done**: the soak test (Milestone 10).
+> This runbook's procedure below is kept as-is for anyone re-deriving
+> the plan later — it's what was actually followed.
 
 ## Why this gates everything
 
@@ -50,10 +50,10 @@ watching.
 | G7 — cutover data step for existing household devices | ✅ Resolved by policy: start with zero pre-added devices, use the new CSV bulk-import feature once real MACs are known |
 | G8 — Bark's on-device ML content-scanning | Out of scope — an app/device feature, not achievable from a network box |
 
-**G1 itself is done**, and the discovery + arp-worker composition is
-now also verified (2026-09-07, see RoadMap.md). What's left before a
-real deployment decision: one full back-to-back matrix pass and the
-soak test (Milestone 10).
+**G1 itself is done**, the discovery + arp-worker composition is
+verified (2026-09-07, see RoadMap.md), and the full back-to-back matrix
+pass is done. What's left before a real deployment decision: the soak
+test (Milestone 10).
 
 ## Before you start
 

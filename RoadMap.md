@@ -37,7 +37,7 @@ Pi-hole setup:
 | 1 | Dashboard modernization (design system, charts, PWA) | ✅ Done |
 | 2 | Device/group data model groundwork | ✅ Done |
 | — | Filter/picker UI scaling (GH #8) | ✅ Done |
-| 3 | Network-level interception (the actual Bark Home replacement mechanism) | 🔶 Milestones 1–9 real, tested, verified live in Docker-bridge/veth harnesses **and now against the real Orbi mesh — G1 is a GO (2026-09-02)**, see [Path to deployment](#path-to-deployment) below. **Discovery + arp-worker composition also verified live (2026-09-07)** — full back-to-back matrix pass + soak test (Milestone 10) still pending. |
+| 3 | Network-level interception (the actual Bark Home replacement mechanism) | 🔶 Milestones 1–9 real, tested, verified live in Docker-bridge/veth harnesses **and now against the real Orbi mesh — G1 is a GO (2026-09-02)**, see [Path to deployment](#path-to-deployment) below. **Discovery + arp-worker composition verified live (2026-09-07)** and **full back-to-back matrix pass done** — only the soak test (Milestone 10) remains. |
 | 4 | Captive-portal forced enrollment | ✅ Done (Milestones 1–3 + reminder screens + portal admin-add) |
 | 5 | Admin dashboard: responsive layout, installable PWA, control surface | 🔶 Begun — mobile/tablet audit done, one bug fixed |
 | 6 | YouTube channel/creator-level filtering | ⬜ Assessed only, 0% built (G2) |
@@ -76,13 +76,12 @@ real deployment decision:
 | G7 | Cutover data step for existing household devices (`is_authenticated` defaults) | ✅ Resolved by policy: deploy with zero devices pre-added, bulk-import real MACs via CSV once known |
 | G8 | Bark's on-device ML content-scanning alerts | Out of scope — an app/device feature, not achievable from a network box |
 
-**Before deployment**: G1 itself is done (see above), and the
+**Before deployment**: G1 itself is done (see above), the
 discovery + arp-worker composition that motivated disabling
 `--no-discovery`/`--no-rtnetlink`/`--no-active-scan` on 2026-09-02 is
-now verified safe (2026-09-07, see below) — what's left is finishing
-the runbook's own next step: one full back-to-back pass through the
-matrix (the per-row passes proved the mechanism works; a back-to-back
-pass proves it holds up under realistic continuous use).
+now verified safe (2026-09-07, see below), and the full back-to-back
+matrix pass is done. What's left is the soak-test window decision
+(Milestone 10).
 
 **After G1 passes, before decommissioning Bark Home**: the soak test
 (Milestone 10 in Phase 3 below) — a real multi-day household run with
@@ -1395,11 +1394,16 @@ than the ARP mechanism itself, now fixed and verified. The mechanism
 works; getting to a clean demonstration of that took two real
 incidents first.
 
-**Not yet done**: per the runbook's own "if this comes back a go"
-section -- one full back-to-back pass through the matrix without
-stopping between rows (the per-row passes above prove the mechanism
-works; a back-to-back pass proves it holds up under realistic
-continuous use), then deciding the soak-test window (Milestone 10).
+**Full back-to-back matrix pass: done** (per the runbook's own "if this
+comes back a go" section) -- run consecutively, without stopping
+arp-worker between rows, using the project owner's own phone and
+tablet as test devices. Per the project owner, confirmed clean --
+recorded here from that report rather than a live session transcript,
+since it happened in a prior session this document's own history
+doesn't otherwise capture; no per-row detail beyond "clean" is
+available to add.
+
+**Not yet done**: deciding the soak-test window (Milestone 10).
 Bark Home was re-enabled immediately after this session ended and
 stays installed/re-enabled between test windows until the soak period
 also passes. Full auto-discovery (`--no-discovery`/`--no-rtnetlink`/
