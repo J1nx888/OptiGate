@@ -627,6 +627,37 @@ def test_report_page_lists_logged_rows(client, db_conn):
     assert b"example.com" in resp.data
 
 
+def test_report_page_shows_which_device_a_blocked_row_came_from(client, db_conn):
+    """Real live-testing feedback (RoadMap.md's dated entry): a blocked
+    row for an unauthenticated device showed "(unauthenticated)" as its
+    User with no way to tell which physical device that actually was --
+    access_log.device_id was already there (see log_identity_fields()'s
+    own docstring), just never surfaced on this page."""
+    device_id = _insert_device(db_conn, "aa:bb:cc:dd:ee:60", label="Kitchen Tablet")
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, device_id) "
+        "VALUES (datetime('now'), NULL, '(unauthenticated)', 'example.com', NULL, 0, 'dns_tier_denied', ?)",
+        (device_id,),
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Kitchen Tablet" in resp.data
+    assert f'href="/devices/{device_id}"'.encode() in resp.data
+
+
+def test_report_page_shows_dash_for_a_row_with_no_device(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'example.com', '/', 1, 'global_domain')"
+    )
+    db_conn.commit()
+    resp = client.get("/report", headers=_auth_header())
+    assert resp.status_code == 200
+
+
 # ============================================================
 # Report: filter by device/group target (added 2026-08-31, GH #9 --
 # access_log.device_id lets rows with no user_id at all still be
@@ -2624,52 +2655,61 @@ def test_deleting_a_group_unassigns_its_devices(client, db_conn):
 # group_detail page at all to put a per-group pause control on)
 # ============================================================
 
-def test_devices_page_lists_per_row_add_to_group_select(client, db_conn):
+def test_devices_page_lists_bulk_action_form_and_row_checkboxes(client, db_conn):
     """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
-    the group page's own bulk-add form needed you to already know the
-    device's label/MAC to find it in a search-only combobox. This is the
-    opposite direction -- an inline "Add to group" select right on the
-    device's own row, no navigation or typing required."""
+    the devices table was "getting really clunky" and needed real bulk
+    actions (assign/delete several at once) instead of one-row-at-a-
+    time. Supersedes the same-day per-row quick-add-to-group select,
+    which added exactly the clutter this was meant to fix."""
     client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:20"}, headers=_auth_header())
     resp = client.get("/devices", headers=_auth_header())
     assert resp.status_code == 200
-    assert b'action="/devices/quick-add-to-group"' in resp.data
+    assert b'action="/devices/bulk-assign-group"' in resp.data
+    assert b'action="/devices/bulk-delete"' in resp.data
+    assert b'class="bulk-device-check"' in resp.data
+    assert b'id="deviceSelectAll"' in resp.data
     assert b">IoT</option>" in resp.data
+    assert b'action="/devices/quick-add-to-group"' not in resp.data
 
 
-def test_quick_add_device_to_group_assigns_and_stays_on_devices_page(client, db_conn):
+def test_bulk_assign_devices_to_group_applies_to_every_selected_device(client, db_conn):
     client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
     client.post(
         "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:21", "label": "Kitchen Cam"},
         headers=_auth_header(),
     )
-    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:21'").fetchone()["id"]
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:22"}, headers=_auth_header())
+    device_ids = [
+        r["id"] for r in db_conn.execute(
+            "SELECT id FROM devices WHERE mac_address IN (?, ?)", ("aa:bb:cc:dd:ee:21", "aa:bb:cc:dd:ee:22")
+        )
+    ]
+    assert len(device_ids) == 2
 
     resp = client.post(
-        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": group_id},
+        "/devices/bulk-assign-group",
+        data={"group_id": group_id, "device_ids": [str(i) for i in device_ids]},
         headers=_auth_header(),
     )
 
     assert resp.status_code == 302
     assert resp.headers["Location"].startswith("/devices")
-    row = db_conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
-    assert row["group_id"] == group_id
-    assert row["user_id"] is None
-    assert row["ignored"] == 0
-    assert row["label"] == "Kitchen Cam", "must not touch label -- unlike update_device(), this is a narrow assignment-only update"
+    for device_id in device_ids:
+        row = db_conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+        assert row["group_id"] == group_id
+        assert row["user_id"] is None
+        assert row["ignored"] == 0
+    kitchen_cam = db_conn.execute("SELECT label FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:21'").fetchone()
+    assert kitchen_cam["label"] == "Kitchen Cam", "must not touch label -- narrow assignment-only update"
 
 
-def test_quick_add_device_to_group_preserves_bump_and_bypass_flags(client, db_conn):
-    """Regression guard: quick_add_device_to_group() must use the same
-    narrow UPDATE as bulk_add_to_group(), never update_device()'s
-    whole-row-from-form rewrite, or it would silently clear
-    bump_enabled/bypass_login on every quick-assign."""
+def test_bulk_assign_devices_to_group_preserves_bump_and_bypass_flags(client, db_conn):
     client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
-    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:22"}, headers=_auth_header())
-    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:22'").fetchone()["id"]
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:23"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:23'").fetchone()["id"]
     client.post(
         "/devices/update",
         data={"device_id": device_id, "bump_enabled": "on", "bypass_login": "on", "assignment": ""},
@@ -2677,7 +2717,7 @@ def test_quick_add_device_to_group_preserves_bump_and_bypass_flags(client, db_co
     )
 
     client.post(
-        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": group_id},
+        "/devices/bulk-assign-group", data={"group_id": group_id, "device_ids": [str(device_id)]},
         headers=_auth_header(),
     )
 
@@ -2687,12 +2727,12 @@ def test_quick_add_device_to_group_preserves_bump_and_bypass_flags(client, db_co
     assert row["bypass_login"] == 1
 
 
-def test_quick_add_device_to_group_without_group_selected_shows_error(client, db_conn):
-    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:23"}, headers=_auth_header())
+def test_bulk_assign_devices_to_group_without_group_selected_shows_error(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:24"}, headers=_auth_header())
     device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
 
     resp = client.post(
-        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": ""},
+        "/devices/bulk-assign-group", data={"group_id": "", "device_ids": [str(device_id)]},
         headers=_auth_header(),
     )
 
@@ -2701,16 +2741,55 @@ def test_quick_add_device_to_group_without_group_selected_shows_error(client, db
     assert row["group_id"] is None
 
 
-def test_quick_add_device_to_group_unknown_group_shows_error(client, db_conn):
-    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:24"}, headers=_auth_header())
+def test_bulk_assign_devices_to_group_unknown_group_shows_error(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:25"}, headers=_auth_header())
     device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
 
     resp = client.post(
-        "/devices/quick-add-to-group", data={"device_id": device_id, "group_id": 999999},
+        "/devices/bulk-assign-group", data={"group_id": 999999, "device_ids": [str(device_id)]},
         headers=_auth_header(),
     )
 
     assert "error=1" in resp.headers["Location"]
+
+
+def test_bulk_assign_devices_to_group_without_devices_selected_shows_error(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+
+    resp = client.post("/devices/bulk-assign-group", data={"group_id": group_id}, headers=_auth_header())
+
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_bulk_delete_devices_removes_every_selected_device(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:26"}, headers=_auth_header())
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:27"}, headers=_auth_header())
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:28"}, headers=_auth_header())
+    to_delete = [
+        r["id"] for r in db_conn.execute(
+            "SELECT id FROM devices WHERE mac_address IN (?, ?)", ("aa:bb:cc:dd:ee:26", "aa:bb:cc:dd:ee:27")
+        )
+    ]
+    keep_mac = "aa:bb:cc:dd:ee:28"
+
+    resp = client.post(
+        "/devices/bulk-delete", data={"device_ids": [str(i) for i in to_delete]}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith("/devices")
+    remaining = {r["mac_address"] for r in db_conn.execute("SELECT mac_address FROM devices")}
+    assert remaining == {keep_mac}
+
+
+def test_bulk_delete_devices_without_selection_shows_error(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:29"}, headers=_auth_header())
+
+    resp = client.post("/devices/bulk-delete", data={}, headers=_auth_header())
+
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) c FROM devices").fetchone()["c"] == 1
 
 
 def test_group_detail_page_renders(client, db_conn):
@@ -3037,13 +3116,27 @@ def test_devices_migration_adds_last_seen_at_to_an_existing_database(tmp_path, m
 
 
 def _insert_device_with_last_seen(db_conn, mac, days_ago):
+    """days_ago=None means genuinely never seen -- no device_bindings row
+    at all, same as a device added by hand that's never actually shown
+    up on the network. Otherwise inserts a real device_bindings row with
+    a backdated last_seen_at -- the REAL data source _stale_devices()
+    reads (fixed 2026-09-07, RoadMap.md's dated entry): devices.
+    last_seen_at itself is never written by anything real, so a test
+    that only set THAT column (as this helper used to) would validate a
+    scenario that can never actually occur in production."""
     import db as db_mod
-    ts = None if days_ago is None else db_mod.iso_secs_ago(days_ago * 86400)
     db_conn.execute(
-        "INSERT INTO devices (mac_address, last_seen_at, created_at) VALUES (?, ?, datetime('now'))",
-        (mac, ts),
+        "INSERT INTO devices (mac_address, created_at) VALUES (?, datetime('now'))", (mac,)
     )
     db_conn.commit()
+    if days_ago is not None:
+        ts = db_mod.iso_secs_ago(days_ago * 86400)
+        db_conn.execute(
+            "INSERT INTO device_bindings (mac_address, ipv4_address, first_seen_at, last_seen_at, source) "
+            "VALUES (?, ?, ?, ?, 'rtnetlink')",
+            (mac, f"192.168.1.{200 + abs(hash(mac)) % 50}", ts, ts),
+        )
+        db_conn.commit()
 
 
 def test_update_device_stale_days_validates_input(client):
@@ -3064,6 +3157,32 @@ def test_settings_page_shows_correct_stale_device_count(client, db_conn):
     client.post("/settings/device-stale-days", data={"device_stale_days": "30"}, headers=_auth_header())
     resp = client.get("/settings", headers=_auth_header())
     assert b"<strong>1</strong>" in resp.data
+
+
+def test_settings_page_shows_a_clickable_table_of_which_devices_are_stale(client, db_conn):
+    """Real live-testing feedback (RoadMap.md's dated entry): the old
+    card only ever showed a bare count -- no way to see WHICH devices,
+    or their MAC/label/assignment, without going elsewhere first."""
+    import db as db_mod
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, label, created_at) VALUES (?, ?, datetime('now'))",
+        ("aa:bb:cc:dd:ee:43", "Old Tablet"),
+    )
+    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:43'").fetchone()["id"]
+    ts = db_mod.iso_secs_ago(100 * 86400)
+    db_conn.execute(
+        "INSERT INTO device_bindings (mac_address, ipv4_address, first_seen_at, last_seen_at, source) "
+        "VALUES (?, '192.168.1.99', ?, ?, 'rtnetlink')",
+        ("aa:bb:cc:dd:ee:43", ts, ts),
+    )
+    db_conn.commit()
+
+    client.post("/settings/device-stale-days", data={"device_stale_days": "30"}, headers=_auth_header())
+    resp = client.get("/settings", headers=_auth_header())
+
+    assert b"Old Tablet" in resp.data
+    assert b"aa:bb:cc:dd:ee:43" in resp.data
+    assert f'href="/devices/{device_id}"'.encode() in resp.data
 
 
 def test_cleanup_stale_devices_only_removes_devices_with_an_old_real_timestamp(client, db_conn):
@@ -3976,6 +4095,31 @@ def test_update_household_time_zone_rejects_garbage(client, db_conn):
     )
     assert "error=1" in resp.headers["Location"]
     assert db_mod.get_setting(db_conn, "household_time_zone", "UTC") == "UTC"
+
+
+def test_household_time_zone_is_genuinely_unset_on_a_fresh_install(db_conn):
+    """Real live-testing feedback (RoadMap.md's dated entry): this used
+    to be hardcoded to "UTC" at container boot, which always won over
+    the Settings page's own browser-side auto-detect the first time an
+    admin ever loaded it -- "default to wherever the admin's device is"
+    only means something if the setting is still genuinely absent for
+    that first page load to act on."""
+    import db as db_mod
+    assert db_mod.get_setting(db_conn, "household_time_zone") is None
+
+
+def test_settings_page_includes_the_auto_detect_script_when_never_configured(client):
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Intl.DateTimeFormat" in resp.data
+    assert b'id="tzAutoDetectNote"' in resp.data
+
+
+def test_settings_page_omits_the_auto_detect_script_once_explicitly_saved(client):
+    client.post(
+        "/settings/household-time-zone", data={"household_time_zone": "America/Chicago"}, headers=_auth_header()
+    )
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Intl.DateTimeFormat" not in resp.data
 
 
 def test_settings_page_shows_safesearch_toggle(client):

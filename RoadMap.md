@@ -4753,6 +4753,110 @@ the VM afterward: **748 passed, 0 skipped** on Linux.
 
 ---
 
+## Live-testing round 2: devices bulk actions, outdated-device visibility, time-zone default, report-page device tracing (2026-09-07)
+
+More real feedback from continued live use, worked through with
+interception still deliberately off (none of these touch nftables/ARP):
+
+1. **Devices page "getting really clunky," no bulk actions.** The
+   per-row "Add to group" select added earlier the same day (item 2's
+   own fix, above) turned out to make this worse, not better -- every
+   row now carried an extra form on top of Manage/Domains/Bypass/Pause/
+   Delete. Replaced it with real bulk actions instead: checkboxes per
+   row (plus "select all"), and a "Bulk actions" panel below the table
+   with **Assign to group** and **Delete selected**, mirroring the
+   Domains page's own bulk-access panel (item 3, above) -- same
+   checkboxes-live-outside-the-form-so-nested-forms-don't-break
+   JS pattern, same one-transaction-per-batch discipline. New routes
+   `bulk_assign_devices_to_group()` and `bulk_delete_devices()`; the
+   assignment logic itself was factored out of `bulk_add_to_group()`
+   into a shared `_batch_assign_devices_to_group()`, which also picked
+   up an explicit `BEGIN IMMEDIATE` it had been missing (a latent
+   version of the same autocommit-per-row bug `common/category_fetch.py`
+   was fixed for earlier -- harmless in practice at real household
+   scale, but a real gap all the same). The same-day
+   `quick_add_device_to_group()` route and its 5 tests were removed
+   entirely, superseded.
+2. **"Remove outdated devices" showed only a bare count** -- no way to
+   see which devices, or their MAC/label/assignment, without going
+   elsewhere first. Turned into a real, clickable table (MAC, label,
+   assigned-to, real last-seen, a Manage link). Fixing this properly
+   surfaced a genuinely dormant bug: both this card's count AND the
+   "Clean up now" button's actual `DELETE` had always filtered on
+   `devices.last_seen_at` -- a column nothing in this entire codebase
+   ever writes to (see `common/db.py`'s own schema comment, already
+   known from the devices-list-page fix days earlier). This meant
+   "Clean up now" had never deleted a single row, in any configuration,
+   the entire time this feature existed. New shared `_stale_devices()`
+   helper reads the REAL last-seen data (`device_bindings`, the same
+   correlated-subquery source `devices()`/`device_detail()` already use)
+   instead, used by both the review table and the delete route, so what
+   an admin reviews is exactly what gets removed.
+3. **Household time zone defaulted to UTC for every fresh install**,
+   with no way to get anything else short of an admin manually picking
+   their own zone out of a ~400-entry dropdown. The project owner's own
+   words: "should default to the default timezone the device is located
+   [in] but allow the admin to change it." Since the server itself has
+   no way to know where the household actually is (a headless box can be
+   anywhere), and the container-boot-time seeding code that used to
+   hardcode `"UTC"` runs with no browser in scope at all, the fix moved
+   to where a real answer is available: the Settings page now leaves
+   this setting genuinely unset until an admin first loads it, at which
+   point a small inline `<script>` reads the BROWSER's own
+   `Intl.DateTimeFormat().resolvedOptions().timeZone`, and -- if it's
+   one of this project's own valid IANA zone options -- both shows it
+   selected and saves it immediately via a background POST to the same
+   route the Save button already uses. Never fires again once a real
+   value is on record (including whatever it itself just saved), so the
+   admin's own later choice always wins from there on. `HOUSEHOLD_TIME_ZONE`
+   in `.env` still works as an explicit override for anyone who already
+   knew about it.
+4. **Report page couldn't tell you which device a blocked row came
+   from.** A row for an unauthenticated device shows `(unauthenticated)`
+   as its "User," by design (`device_identity.log_identity_fields()`) --
+   accurate, but useless for tracking down which physical device is
+   actually having trouble. `access_log.device_id` was already being
+   written for exactly this reason (2026-08-31, GH #9), just never
+   surfaced on this page. Added a "Device" column (label/MAC, linking to
+   that device's own Manage page) via a `LEFT JOIN devices` on the
+   activity table's own query -- `LEFT`, not `INNER`, so a since-deleted
+   device's historical rows still show, just without the extra detail.
+
+14 new tests in `tests/test_dashboard.py` (5 removed alongside --
+`quick_add_device_to_group()`'s own -- for a net +9). **861 → 870
+passed, 34 skipped**, zero regressions, re-verified after every item
+above, not just at the end.
+
+**Tracked for later, not built now** -- both explicitly deferred by the
+project owner, needing their own design pass rather than a quick patch
+alongside the above:
+
+- **Configuration export/import (backup/restore)**: no way currently to
+  export the whole household's configuration (users, devices, domains,
+  categories, schedules, settings) to a file and re-import it later --
+  useful before a risky change, or when moving to new hardware.
+- **Domain/user assignment UX, several related complaints that all point
+  at the same underlying design gap**: (a) adding a domain from a
+  specific user's own Manage page doesn't check whether that domain
+  already exists elsewhere first, so trying to add one that's already in
+  the system (just not yet assigned to this user) fails with a plain
+  duplicate-pattern error instead of just assigning the existing one --
+  forcing an awkward round-trip through the separate Domains page to fix
+  it by hand; (b) the Domains page's own new bulk-access checkboxes
+  (item 3, earlier this session) aren't aware of an active `?user_id=`/
+  `?group_id=`/`?device_id=` filter -- checking domains while viewing
+  "sites assigned to Alex" and clicking Apply doesn't obviously connect
+  to Alex at all unless the admin re-picks her in the Users combobox
+  underneath, which looks like the checkboxes "don't do anything" from
+  that filtered context. Both are really the same problem: domain
+  access/assignment is modeled and presented independently of whichever
+  person/group/device the admin is actually thinking about at the time,
+  and patching either symptom alone would just move the seam somewhere
+  else. Needs a real redesign of how a domain gets connected to a
+  person, not a fix to either page in isolation.
+
+---
+
 ## Cross-cutting: security-by-design
 
 Security is designed in from the start on every phase above, not

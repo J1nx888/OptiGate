@@ -579,8 +579,16 @@ this dashboard route never talks to either enforcement path directly.
   string-interpolated -- safe from injection) against `access_log`, capped
   at `LIMIT 200`, newest first (`ORDER BY id DESC`). Also surfaces
   `db.get_setting(conn, "cr_resolver_last_error")` so a failing Crunchyroll
-  metadata resolver shows a banner at the top of the page. Renders
-  `REPORT_BODY`.
+  metadata resolver shows a banner at the top of the page. **2026-09-07
+  (RoadMap.md's dated entry)**: the activity table's own row query now
+  `LEFT JOIN`s `devices` on `access_log.device_id` and renders a "Device"
+  column (label/MAC, linking to that device's Manage page) -- real
+  live-testing feedback that a blocked row showing `(unauthenticated)` as
+  its User gave no way to trace which physical device was actually
+  involved, even though `device_id` was already being written
+  (2026-08-31, GH #9). `LEFT` (not `INNER`) so a since-deleted device's
+  historical rows still show, just without the extra column filled in.
+  Renders `REPORT_BODY`.
   - `?status=` (`blocked`/`allowed`) -- unchanged.
   - **Who/what filter, reworked 2026-08-31 (GH #9)**: the plain
     `<select name="user">` was replaced with the same shared combobox
@@ -756,12 +764,18 @@ text here still said "not built" until now).
   making the feature look missing rather than just not yet applicable --
   it now always renders, showing an explanatory "no devices assigned
   yet" message (and no pause form) in that case instead of disappearing.
-- `POST /devices/cleanup` -> `cleanup_stale_devices()` -- deletes every
-  device whose `last_seen_at` is older than the `device_stale_days`
-  setting (see below); a device never observed at all (`last_seen_at IS
-  NULL`) is never matched, so this can't mass-delete devices just because
-  nothing populates `last_seen_at` yet (see `common/db.py`'s schema
-  comment). Redirects to `devices`.
+- `POST /devices/cleanup` -> `cleanup_stale_devices()` -- deletes exactly
+  the devices `_stale_devices()` (shared with `settings_page()`'s own
+  review table, see below) returns for the current `device_stale_days`
+  setting; a device never observed at all is never matched, so this
+  can't mass-delete devices just because nothing has ever seen them.
+  **Fixed 2026-09-07 (RoadMap.md's dated entry)**: this used to filter
+  on `devices.last_seen_at`, a column nothing in this codebase ever
+  writes to (see `common/db.py`'s schema comment) -- meaning this button
+  had never actually deleted a single row, in any configuration, the
+  entire time it existed. Now reads the real last-seen data from
+  `device_bindings` instead (same source `devices()`/`device_detail()`
+  already use). Redirects to `devices`.
 - `POST /groups/add` -> `add_group()` -- form field `name` (required, <=
   100 chars). Inserts into `groups`; duplicate name -> error flash.
 - `POST /groups/delete` -> `delete_group()` -- form field `group_id`.
@@ -792,15 +806,31 @@ text here still said "not built" until now).
   label/`bump_enabled`/`bypass_login`). Redirects to `group_detail` with
   an error flash if no devices were selected or the group no longer
   exists.
-- `POST /devices/quick-add-to-group` -> `quick_add_device_to_group()`
+- `POST /devices/bulk-assign-group` -> `bulk_assign_devices_to_group()`
   (added 2026-09-07, live-testing follow-up to `/groups/add-devices`
-  above -- its combobox needs the device's exact label/MAC to find it,
+  above -- its combobox needs devices' exact labels/MACs to find them,
   which doesn't scale past `SHOW_ALL_THRESHOLD` devices) -- form fields
-  `device_id`, `group_id`. Same narrow `UPDATE` as `bulk_add_to_group()`
-  above, for exactly one device, from an inline `<select>` on that
-  device's own row on the Devices list. Redirects to `devices` (not
-  `group_detail`), so working through several devices' rows in a row
-  doesn't bounce the admin away each time.
+  `group_id`, `device_ids` (multi-value, collected client-side from
+  checkboxes on the Devices list -- see that page's own inline
+  `<script>`; same nested-`<form>`-avoidance reasoning as `/domains/
+  bulk-access`). Same `_batch_assign_devices_to_group()` helper as
+  `bulk_add_to_group()` above, redirecting to `devices` (not
+  `group_detail`) instead -- picked from the full device list, so
+  staying there to keep working it makes more sense than being bounced
+  to whichever group was just picked. **Supersedes a same-day, shorter-
+  lived predecessor**: an inline per-row "Add to group" `<select>`
+  (`quick_add_device_to_group()`, route `/devices/quick-add-to-group`)
+  shipped earlier the same day and was removed a few hours later once
+  live use showed it made the table more cluttered, not less -- the
+  checkbox + bulk-panel shape here handles both the one-device and
+  many-device case with a single control instead.
+- `POST /devices/bulk-delete` -> `bulk_delete_devices()` (added
+  2026-09-07, same live-testing feedback as above -- "lacks the ability
+  to take bulk actions such as deleting multiple devices") -- form field
+  `device_ids` (multi-value, same checkbox-collection mechanism). Plain
+  `DELETE ... WHERE id IN (...)` in one statement. Redirects to `devices`
+  with a count of devices removed, or an error flash if none were
+  selected.
 - `POST /groups/pause` / `POST /groups/resume` -> `pause_group()` /
   `resume_group()` (added 2026-09-06 -- the one pause granularity that
   was entirely missing; per-device and per-user pause both already
@@ -890,17 +920,32 @@ the project owner asked for, not only an operational-health trail.
 
 - `GET /settings` -> `settings_page()` -- reads `local_network`,
   `admin_username`, `block_page_mode` (default `"terminate"`),
-  `adguard_url`, `adguard_username`, `household_time_zone` (Phase 8,
-  default `"UTC"`), `optigate_hostname_prefix` (2026-09-07, default
-  `"optigate"`) settings. Renders `SETTINGS_BODY`. (Never reads or
-  displays `admin_password_hash` or `adguard_password` -- both password
-  fields are always blank/write-only.)
+  `adguard_url`, `adguard_username`, `household_time_zone`, `device_stale_days`
+  (also computes `_stale_devices()` for the review table when set),
+  `optigate_hostname_prefix` (2026-09-07, default `"optigate"`) settings.
+  Renders `SETTINGS_BODY`. (Never reads or displays `admin_password_hash`
+  or `adguard_password` -- both password fields are always blank/write-only.)
+  **`household_time_zone` fixed 2026-09-07 (RoadMap.md's dated entry)**:
+  no longer seeded with a hardcoded `"UTC"` at container boot (see
+  `bootstrap_admin()`'s own comment) -- `get_setting(..., "")` distinguishes
+  "genuinely never saved" from "explicitly saved as UTC", passed to the
+  template as `household_time_zone_unset`, which gates a browser-side
+  auto-detect `<script>` (see below).
 - `POST /settings/household-time-zone` -> `update_household_time_zone()`
   (Phase 8) -- form field `household_time_zone`, validated against
   `zoneinfo.available_timezones()`. Only used as the default a new
   Schedule's own `time_zone` is created with (see
   `docs/database/schema.md`'s `schedules` table) -- changing it never
-  moves an already-created schedule's meaning.
+  moves an already-created schedule's meaning. **2026-09-07**: while
+  `household_time_zone_unset` is true, `SETTINGS_BODY` includes an inline
+  `<script>` that reads the admin's own browser `Intl.DateTimeFormat().
+  resolvedOptions().timeZone` and, if it's a valid option, both pre-selects
+  it and POSTs it to this same route in the background -- so a fresh
+  install's real default is wherever the admin's own device is, not UTC,
+  without needing them to pick it from a ~400-entry dropdown by hand
+  first. Never fires again once any real value is on record. `HOUSEHOLD_TIME_ZONE`
+  in `.env` still works as an explicit override, seeded at boot only when
+  actually set.
 - `POST /settings/local-network` -> `update_local_network()` -- form field
   `local_network` (space-separated CIDRs). No format validation beyond
   `.strip()` -- an invalid CIDR just fails silently at match time in

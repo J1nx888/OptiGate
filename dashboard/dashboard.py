@@ -138,8 +138,22 @@ def bootstrap_admin() -> None:
         # Phase 8: default IANA time zone new schedules are created with --
         # each schedule still stores its OWN time_zone once created (see
         # common/db.py's schedules table comment), so changing this later
-        # never silently moves an existing schedule's meaning.
-        db.set_setting_if_absent(conn, "household_time_zone", os.environ.get("HOUSEHOLD_TIME_ZONE", "UTC"))
+        # never silently moves an existing schedule's meaning. Deliberately
+        # NOT seeded with a hardcoded "UTC" fallback here (fixed
+        # 2026-09-07, RoadMap.md's dated entry) -- this runs at container
+        # boot, with no browser/request in scope to detect a real time
+        # zone from, so hardcoding UTC here would always win over the
+        # Settings page's own browser-side auto-detect (SETTINGS_BODY's
+        # inline <script>, settings_page()) the FIRST time an admin loads
+        # it, defeating the whole point of "default to wherever the
+        # admin's own device is." Left genuinely absent unless
+        # HOUSEHOLD_TIME_ZONE is explicitly set in .env (an existing,
+        # still-supported override for anyone who already knows to use
+        # it) -- settings_page()'s own get_setting(..., "UTC") fallback
+        # still keeps new-schedule-creation safe in the narrow window
+        # before any admin has visited Settings at all.
+        if os.environ.get("HOUSEHOLD_TIME_ZONE"):
+            db.set_setting_if_absent(conn, "household_time_zone", os.environ["HOUSEHOLD_TIME_ZONE"])
         # G3: SafeSearch/Restricted Mode defaults OFF -- an admin opts in
         # explicitly from Settings, since this changes real search-engine
         # behavior network-wide the moment it's turned on (see
@@ -2276,9 +2290,10 @@ DEVICES_BODY = """
 {% if devices %}<input type="search" data-filter-table="devicesTable" placeholder="Search devices&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
 <table id="devicesTable">
-  <tr><th>MAC address</th><th>Label</th><th>Assigned to</th><th>Status</th><th>SSL-Bump</th><th>Bypass login</th><th>Last seen</th><th></th></tr>
+  <tr><th>{% if devices %}<input type="checkbox" id="deviceSelectAll" title="Select all">{% endif %}</th><th>MAC address</th><th>Label</th><th>Assigned to</th><th>Status</th><th>SSL-Bump</th><th>Bypass login</th><th>Last seen</th><th></th></tr>
   {% for d in devices %}
   <tr>
+    <td><input type="checkbox" class="bulk-device-check" value="{{ d.id }}"></td>
     <td><code>{{ d.mac_address }}</code></td>
     <td>{{ d.label or '' }}</td>
     <td>
@@ -2299,16 +2314,6 @@ DEVICES_BODY = """
     <td>
       <a class="btn small" href="{{ url_for('device_detail', device_id=d.id) }}">Manage</a>
       <a class="btn small" href="{{ url_for('domains', device_id=d.id) }}">Domains</a>
-      {% if groups %}
-      <form class="inline" method="post" action="{{ url_for('quick_add_device_to_group') }}">
-        <input type="hidden" name="device_id" value="{{ d.id }}">
-        <select name="group_id" style="width:auto;" title="Add {{ d.label or d.mac_address }} to a group">
-          <option value="" selected disabled>Add to group&hellip;</option>
-          {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
-        </select>
-        <button class="btn small" type="submit">Add</button>
-      </form>
-      {% endif %}
       {% if d.pending %}
       <form class="inline" method="post" action="{{ url_for('bypass_login_device') }}">
         <input type="hidden" name="device_id" value="{{ d.id }}">
@@ -2335,10 +2340,70 @@ DEVICES_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="8"><em>No devices tracked yet.</em></td></tr>
+  <tr><td colspan="9"><em>No devices tracked yet.</em></td></tr>
   {% endfor %}
 </table>
 </div>
+<script>
+(function () {
+  var selectAll = document.getElementById("deviceSelectAll");
+  if (selectAll) {
+    selectAll.addEventListener("change", function () {
+      document.querySelectorAll(".bulk-device-check").forEach(function (box) { box.checked = selectAll.checked; });
+    });
+  }
+  function wireBulkForm(formId) {
+    var form = document.getElementById(formId);
+    if (!form) return;
+    form.addEventListener("submit", function (event) {
+      // Checkboxes live in #devicesTable, not inside either bulk form --
+      // nesting a <form> around the table would break each row's own
+      // Bypass/Pause/Resume/Delete forms (HTML forms can't nest) -- so
+      // they're collected into hidden inputs here instead, right before
+      // submit. Same pattern as the Domains page's own bulk-access form.
+      var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-device-check:checked"));
+      if (!checked.length) {
+        event.preventDefault();
+        alert("Check at least one device above first.");
+        return;
+      }
+      form.querySelectorAll("input[name=device_ids]").forEach(function (el) { el.remove(); });
+      checked.forEach(function (box) {
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "device_ids";
+        hidden.value = box.value;
+        form.appendChild(hidden);
+      });
+    });
+  }
+  wireBulkForm("bulkDeviceGroupForm");
+  wireBulkForm("bulkDeviceDeleteForm");
+})();
+</script>
+</div>
+
+{% if devices %}
+<div class="card">
+<h2>Bulk actions</h2>
+<p class="hint">Check devices in the table above, then act on all of them at once.</p>
+<form id="bulkDeviceGroupForm" class="add-form" method="post" action="{{ url_for('bulk_assign_devices_to_group') }}">
+  <select name="group_id" required>
+    <option value="" selected disabled>Assign to group&hellip;</option>
+    {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+  </select>
+  <button class="add" type="submit" {{ 'disabled' if not groups }}>Assign checked devices</button>
+</form>
+{% if not groups %}<p class="hint">No groups yet -- add one above first.</p>{% endif %}
+<form id="bulkDeviceDeleteForm" class="add-form" method="post" action="{{ url_for('bulk_delete_devices') }}"
+      onsubmit="return confirm('Delete every checked device? This cannot be undone.');">
+  <button class="danger" type="submit">Delete checked devices</button>
+</form>
+</div>
+{% endif %}
+
+<div class="card">
+<h2>Add a device</h2>
 <form class="add-form" method="post" action="{{ url_for('add_device') }}">
   <input type="text" name="mac_address" placeholder="aa:bb:cc:dd:ee:ff" required>
   <input type="text" name="label" placeholder="Label, e.g. Alex's iPad">
@@ -4129,36 +4194,30 @@ def group_detail(group_id: int):
     return render("devices", body)
 
 
-@app.route("/devices/quick-add-to-group", methods=["POST"])
-@require_admin
-def quick_add_device_to_group():
-    """Devices list's per-row "Add to group" quick action -- real live-
-    testing feedback (RoadMap.md's 2026-09-07 entry): the group page's own
-    bulk-add form (below) needs you to already know the device's label/MAC
-    to find it in a search-only combobox, which is backwards when you're
-    looking right at the device's row already. This goes the other
-    direction: pick the group inline on the row, no navigation or typing
-    needed, and stays on the Devices page so you can keep going row by row.
-    Same narrow UPDATE as bulk_add_to_group() below -- only ever touches
-    user_id/group_id/ignored, never label/bump_enabled/bypass_login (unlike
-    update_device(), which rewrites the whole row from a full form)."""
-    device_id = request.form.get("device_id", "")
-    group_id = request.form.get("group_id", "")
-    conn = get_db()
-    d = conn.execute("SELECT mac_address, label FROM devices WHERE id = ?", (device_id,)).fetchone()
-    if d is None:
-        return flash_redirect("devices", "That device no longer exists.", error=True)
-    if not group_id:
-        return flash_redirect("devices", "Pick a group first.", error=True)
-    g = conn.execute("SELECT name FROM groups WHERE id = ?", (group_id,)).fetchone()
-    if g is None:
-        return flash_redirect("devices", "That group no longer exists.", error=True)
-    conn.execute(
-        "UPDATE devices SET user_id = NULL, group_id = ?, ignored = 0 WHERE id = ?",
-        (group_id, device_id),
-    )
-    conn.commit()
-    return flash_redirect("devices", f"Added {d['label'] or d['mac_address']} to {g['name']}.")
+def _batch_assign_devices_to_group(conn, device_ids: set[int], group_id) -> None:
+    """Mirrors update_device()'s own "group:<id>" assignment exactly --
+    user_id/group_id stay mutually exclusive (see
+    _parse_device_assignment's own doc comment), and ignored is cleared
+    since picking a real group is an explicit un-ignore, same as the
+    single-device form already does. Label/bump_enabled/bypass_login
+    deliberately untouched -- this only ever changes the assignment,
+    nothing else about a device already set up. One explicit transaction
+    for the whole batch (conn opens with isolation_level=None -- see
+    common/db.py -- so an un-wrapped executemany here would autocommit
+    per row, the same bug class common/category_fetch.py's own fix
+    closed at a much larger scale), shared by bulk_add_to_group() and
+    bulk_assign_devices_to_group() below."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            "UPDATE devices SET user_id = NULL, group_id = ?, ignored = 0 WHERE id = ?",
+            [(group_id, device_id) for device_id in device_ids],
+        )
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.commit()
 
 
 @app.route("/groups/add-devices", methods=["POST"])
@@ -4172,22 +4231,64 @@ def bulk_add_to_group():
         return flash_redirect("devices", "That group no longer exists.", error=True)
     if not device_ids:
         return flash_redirect("group_detail", "No devices selected.", error=True, group_id=group_id)
-    # Mirrors update_device()'s own "group:<id>" assignment exactly --
-    # user_id/group_id stay mutually exclusive (see
-    # _parse_device_assignment's own doc comment), and ignored is
-    # cleared since picking a real group is an explicit un-ignore, same
-    # as the single-device form already does. Label/bump_enabled/
-    # bypass_login deliberately untouched -- this only ever changes the
-    # assignment, nothing else about a device already set up.
-    conn.executemany(
-        "UPDATE devices SET user_id = NULL, group_id = ?, ignored = 0 WHERE id = ?",
-        [(group_id, device_id) for device_id in device_ids],
-    )
-    conn.commit()
+    _batch_assign_devices_to_group(conn, device_ids, group_id)
     return flash_redirect(
         "group_detail",
         f"Added {len(device_ids)} device{'s' if len(device_ids) != 1 else ''} to {g['name']}.",
         group_id=group_id,
+    )
+
+
+@app.route("/devices/bulk-assign-group", methods=["POST"])
+@require_admin
+def bulk_assign_devices_to_group():
+    """Devices list's own bulk-actions panel -- real live-testing
+    feedback (RoadMap.md's dated entry): the devices table was "getting
+    really clunky" and needed real bulk actions (assign several devices
+    to a group, or delete several at once) instead of one-row-at-a-time.
+    Same _batch_assign_devices_to_group() as bulk_add_to_group() above,
+    just redirecting back to `devices` (not `group_detail`) -- picked
+    from the full device list, not a specific group's own page, so
+    staying there to keep working the list makes more sense than being
+    bounced to whichever group was just picked. Supersedes the previous
+    per-row quick-add-to-group select (2026-09-07 same day) -- that
+    row-level form added exactly the clutter this was meant to fix; the
+    bulk bar below the table handles both the one-device and many-device
+    case with a single control."""
+    group_id = request.form.get("group_id", "")
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+    if not group_id:
+        return flash_redirect("devices", "Pick a group first.", error=True)
+    conn = get_db()
+    g = conn.execute("SELECT name FROM groups WHERE id = ?", (group_id,)).fetchone()
+    if g is None:
+        return flash_redirect("devices", "That group no longer exists.", error=True)
+    if not device_ids:
+        return flash_redirect("devices", "No devices selected.", error=True)
+    _batch_assign_devices_to_group(conn, device_ids, group_id)
+    return flash_redirect(
+        "devices", f"Added {len(device_ids)} device{'s' if len(device_ids) != 1 else ''} to {g['name']}."
+    )
+
+
+@app.route("/devices/bulk-delete", methods=["POST"])
+@require_admin
+def bulk_delete_devices():
+    """Devices list's bulk-delete -- see bulk_assign_devices_to_group()'s
+    own docstring for the same live-testing feedback this answers.
+    Plain `DELETE ... WHERE id IN (...)` in one statement (not a Python
+    loop) -- SQLite's own atomicity covers a single statement without
+    needing an explicit BEGIN IMMEDIATE wrapper the way a multi-statement
+    executemany loop does elsewhere in this file."""
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+    if not device_ids:
+        return flash_redirect("devices", "No devices selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(device_ids))
+    conn.execute(f"DELETE FROM devices WHERE id IN ({placeholders})", tuple(device_ids))
+    conn.commit()
+    return flash_redirect(
+        "devices", f"Deleted {len(device_ids)} device{'s' if len(device_ids) != 1 else ''}."
     )
 
 
@@ -4309,11 +4410,16 @@ REPORT_BODY = """
 <h2>Recent activity</h2>
 <div class="table-scroll">
 <table>
-  <tr><th>Time (UTC)</th><th>User</th><th>Domain</th><th>Show / Path</th><th>Result</th><th></th></tr>
+  <tr><th>Time (UTC)</th><th>User</th><th>Device</th><th>Domain</th><th>Show / Path</th><th>Result</th><th></th></tr>
   {% for row in rows %}
   <tr>
     <td>{{ row.ts }}</td>
     <td>{{ row.username }}</td>
+    <td>
+      {% if row.device_id %}
+      <a href="{{ url_for('device_detail', device_id=row.device_id) }}">{{ row.device_label or row.device_mac or ('#' ~ row.device_id) }}</a>
+      {% else %}&mdash;{% endif %}
+    </td>
     <td><code>{{ row.domain }}</code></td>
     <td>{{ row.series_name or row.series_id or row.path or '' }}</td>
     <td><span class="badge {{ 'allowed' if row.allowed else 'blocked' }}">{{ 'allowed' if row.allowed else 'blocked' }}</span></td>
@@ -4336,7 +4442,7 @@ REPORT_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="6"><em>No activity logged yet.</em></td></tr>
+  <tr><td colspan="7"><em>No activity logged yet.</em></td></tr>
   {% endfor %}
 </table>
 </div>
@@ -4469,8 +4575,18 @@ def report():
     elif filter_status == "allowed":
         where_sql += " AND allowed = 1"
 
+    # Real live-testing feedback (RoadMap.md's dated entry): a blocked row
+    # for an unauthenticated device shows "(unauthenticated)" as its
+    # "User" -- true, but useless for tracking down WHICH physical device
+    # is having trouble without separately cross-referencing device_id
+    # against the Devices page. access_log already carries device_id for
+    # exactly this (see log_identity_fields()'s own docstring); this just
+    # surfaces it. LEFT JOIN (not INNER) -- a device later deleted must
+    # still show its historical rows, just without the MAC/label alongside.
     rows = conn.execute(
-        f"SELECT * FROM access_log {where_sql} ORDER BY id DESC LIMIT 200", params
+        f"SELECT access_log.*, devices.mac_address AS device_mac, devices.label AS device_label "
+        f"FROM access_log LEFT JOIN devices ON devices.id = access_log.device_id {where_sql} "
+        "ORDER BY access_log.id DESC LIMIT 200", params
     ).fetchall()
 
     # Chart/stat data reflects every matching row under the current filter,
@@ -4966,14 +5082,50 @@ SETTINGS_BODY = """
 <div class="card">
 <h2>Household time zone</h2>
 <p class="hint">The default time zone new <a href="{{ url_for('schedules') }}">schedules</a> are created with. Each schedule stores its own time zone once created, so changing this later never moves an existing schedule's meaning.</p>
-<form class="add-form" method="post" action="{{ url_for('update_household_time_zone') }}">
-  <select name="household_time_zone">
+<form class="add-form" method="post" action="{{ url_for('update_household_time_zone') }}" id="householdTimeZoneForm">
+  <select name="household_time_zone" id="householdTimeZoneSelect">
     {% for tz in available_time_zones %}
     <option value="{{ tz }}" {{ 'selected' if tz == household_time_zone }}>{{ tz }}</option>
     {% endfor %}
   </select>
   <button class="add" type="submit">Save</button>
 </form>
+<p class="hint" id="tzAutoDetectNote"></p>
+{% if household_time_zone_unset %}
+<script>
+(function () {
+  // Real live-testing feedback (RoadMap.md's dated entry): this never
+  // had any real default before -- every fresh install silently started
+  // at UTC until an admin happened to visit this page and pick their
+  // own zone by hand out of a ~400-entry list. Runs only while
+  // household_time_zone has never been explicitly saved (server-side
+  // flag, household_time_zone_unset): detects the browser's own IANA
+  // zone and, if it's one of the options this <select> actually offers,
+  // both shows it selected AND saves it as the real default immediately
+  // (a plain background POST to the same route the Save button uses) --
+  // "default to wherever the admin's own device is" only means
+  // something if it happens before they'd otherwise have to pick UTC by
+  // hand first. Never fires again once a real value is on record,
+  // including whatever this save itself just set -- the admin's own
+  // later choice from the dropdown always wins from here on.
+  var detected;
+  try { detected = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return; }
+  var select = document.getElementById("householdTimeZoneSelect");
+  var note = document.getElementById("tzAutoDetectNote");
+  if (!detected || !select) return;
+  var matched = Array.prototype.some.call(select.options, function (o) { return o.value === detected; });
+  if (!matched) return;
+  select.value = detected;
+  var body = new URLSearchParams();
+  body.set("household_time_zone", detected);
+  fetch(document.getElementById("householdTimeZoneForm").action, { method: "POST", body: body })
+    .then(function () {
+      if (note) note.textContent = "Detected your device's time zone (" + detected + ") and set it as the default.";
+    })
+    .catch(function () {});
+})();
+</script>
+{% endif %}
 </div>
 
 <div class="card">
@@ -5023,11 +5175,12 @@ SETTINGS_BODY = """
 <div class="card">
 <h2>Remove outdated devices</h2>
 <p class="hint">
-  Devices whose "last seen" time is older than this many days can be cleaned up in one click.
-  <strong>Requires the interception layer to actually populate "last seen" first</strong> -- until
-  that exists, no device has one at all, so this will never match anything yet. A device that's
-  never been seen is left alone regardless of this setting -- only a real, old timestamp counts,
-  never "we don't know."
+  Devices whose real last-seen time (from network observation -- ARP/DHCP
+  discovery, active scans, or AdGuard's own query log; NOT the unused
+  <code>devices.last_seen_at</code> column) is older than this many days
+  can be reviewed below and cleaned up in one click. A device that's
+  never been seen at all is left alone regardless of this setting --
+  only a real, old timestamp counts, never "we don't know."
 </p>
 <form class="add-form" method="post" action="{{ url_for('update_device_stale_days') }}">
   <input type="number" name="device_stale_days" min="1" step="1" value="{{ device_stale_days or '' }}" placeholder="e.g. 90" style="width:6rem;">
@@ -5036,11 +5189,32 @@ SETTINGS_BODY = """
 </form>
 {% if device_stale_days %}
 <p class="hint">
-  <strong>{{ stale_device_count }}</strong> device{{ 's' if stale_device_count != 1 else '' }}
+  <strong>{{ stale_devices|length }}</strong> device{{ 's' if stale_devices|length != 1 else '' }}
   currently not seen in over {{ device_stale_days }} day{{ 's' if device_stale_days != 1 else '' }}.
 </p>
+{% if stale_devices %}
+<div class="table-scroll">
+<table>
+  <tr><th>MAC address</th><th>Label</th><th>Assigned to</th><th>Last seen</th><th></th></tr>
+  {% for d in stale_devices %}
+  <tr>
+    <td><code>{{ d.mac_address }}</code></td>
+    <td>{{ d.label or '' }}</td>
+    <td>
+      {% if d.ignored %}<span class="badge pending">Ignored</span>
+      {% elif d.display_name %}{{ d.display_name }}
+      {% elif d.group_name %}<span class="badge mode-trusted">{{ d.group_name }}</span>
+      {% else %}<em>Unassigned</em>{% endif %}
+    </td>
+    <td>{{ d.network_last_seen }}</td>
+    <td><a class="btn small" href="{{ url_for('device_detail', device_id=d.id) }}">Manage</a></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
 <form method="post" action="{{ url_for('cleanup_stale_devices') }}" onsubmit="return confirm('Delete these outdated devices? This cannot be undone.');">
-  <button class="danger" type="submit" {{ 'disabled' if not stale_device_count }}>Clean up now</button>
+  <button class="danger" type="submit" {{ 'disabled' if not stale_devices }}>Clean up all {{ stale_devices|length }} now</button>
 </form>
 {% endif %}
 </div>
@@ -5111,6 +5285,33 @@ def _adguard_ui_url(adguard_url: str) -> str | None:
     return f"http://{browser_host}:{adguard_port}"
 
 
+def _stale_devices(conn, days: int) -> list:
+    """Devices whose REAL last-seen time (device_bindings, populated by
+    ARP/DHCP discovery, active scans, or AdGuard's own query log) is
+    older than `days` -- NOT `devices.last_seen_at`, which is never
+    written by anything (see common/db.py's own schema comment; this was
+    a genuinely dormant feature before this fix, since cleanup_stale_
+    devices()'s old query against that dead column could never match a
+    single row, in any configuration). A device that's never been seen
+    at all (network_last_seen IS NULL) is excluded, same "only a real,
+    old timestamp counts" policy as before this fix -- never treating
+    "we don't know" the same as "definitely stale". Shared by
+    settings_page() (the review table) and cleanup_stale_devices()
+    (deletes exactly what's shown), so the two can never disagree about
+    which devices qualify."""
+    cutoff = db.iso_secs_ago(days * 86400)
+    return conn.execute(
+        "SELECT d.*, u.display_name, g.name AS group_name, "
+        "(SELECT MAX(last_seen_at) FROM device_bindings WHERE mac_address = d.mac_address) AS network_last_seen "
+        "FROM devices d "
+        "LEFT JOIN users u ON u.id = d.user_id "
+        "LEFT JOIN groups g ON g.id = d.group_id "
+        "WHERE (SELECT MAX(last_seen_at) FROM device_bindings WHERE mac_address = d.mac_address) < ? "
+        "ORDER BY network_last_seen",
+        (cutoff,),
+    ).fetchall()
+
+
 @app.route("/settings")
 @require_admin
 def settings_page():
@@ -5119,25 +5320,29 @@ def settings_page():
     admin_username = db.get_setting(conn, "admin_username", "")
     block_page_mode = db.get_setting(conn, "block_page_mode", "terminate")
     device_stale_days = db.get_setting(conn, "device_stale_days", "")
-    stale_device_count = 0
-    if device_stale_days:
-        stale_device_count = conn.execute(
-            "SELECT COUNT(*) c FROM devices WHERE last_seen_at IS NOT NULL AND last_seen_at < ?",
-            (db.iso_secs_ago(int(device_stale_days) * 86400),),
-        ).fetchone()["c"]
+    stale_devices = _stale_devices(conn, int(device_stale_days)) if device_stale_days else []
     adguard_url = db.get_setting(conn, "adguard_url", "")
     adguard_username = db.get_setting(conn, "adguard_username", "admin")
     adguard_password = db.get_setting(conn, "adguard_password", "")
-    household_time_zone = db.get_setting(conn, "household_time_zone", "UTC")
+    # "" (genuinely never saved) vs "UTC" (explicitly saved as UTC) are
+    # deliberately distinguished here -- see bootstrap_admin()'s own
+    # comment on why this setting isn't seeded with a hardcoded UTC
+    # fallback at boot. household_time_zone_unset drives the Settings
+    # page's own browser-side auto-detect (SETTINGS_BODY's inline
+    # <script>); household_time_zone still falls back to "UTC" for the
+    # <select>'s own pre-JS rendering either way.
+    household_time_zone_raw = db.get_setting(conn, "household_time_zone", "")
+    household_time_zone = household_time_zone_raw or "UTC"
     safesearch_enabled = db.get_setting(conn, "safesearch_enabled", "0") == "1"
     body = render_template_string(
         SETTINGS_BODY, local_network=local_network, admin_username=admin_username,
         block_page_mode=block_page_mode, device_stale_days=device_stale_days,
-        stale_device_count=stale_device_count, adguard_url=adguard_url,
+        stale_devices=stale_devices, adguard_url=adguard_url,
         adguard_username=adguard_username,
         adguard_configured=bool(adguard_url and adguard_password),
         adguard_ui_url=_adguard_ui_url(adguard_url),
         household_time_zone=household_time_zone,
+        household_time_zone_unset=not household_time_zone_raw,
         available_time_zones=sorted(zoneinfo.available_timezones()),
         safesearch_enabled=safesearch_enabled,
         ca_cert_info=_ca_cert_info(CA_CERT_PATH),
@@ -5261,15 +5466,24 @@ def update_device_stale_days():
 @app.route("/devices/cleanup", methods=["POST"])
 @require_admin
 def cleanup_stale_devices():
+    """Deletes exactly what the Settings page's own review table just
+    showed -- same _stale_devices() query, so what an admin reviewed
+    before clicking "Clean up" is exactly what gets removed, never a
+    silently different set. Fixed 2026-09-07 (RoadMap.md's dated entry):
+    this used to filter on devices.last_seen_at, a column nothing ever
+    writes to -- meaning this button had never actually deleted anything,
+    in any configuration, the entire time it existed."""
     conn = get_db()
     days = db.get_setting(conn, "device_stale_days", "")
     if not days:
         return flash_redirect("settings_page", "Set a threshold first.", error=True)
-    cutoff = db.iso_secs_ago(int(days) * 86400)
-    cur = conn.execute("DELETE FROM devices WHERE last_seen_at IS NOT NULL AND last_seen_at < ?", (cutoff,))
-    count = cur.rowcount
+    stale = _stale_devices(conn, int(days))
+    if not stale:
+        return flash_redirect("settings_page", "Nothing to clean up.")
+    placeholders = ",".join("?" * len(stale))
+    conn.execute(f"DELETE FROM devices WHERE id IN ({placeholders})", tuple(d["id"] for d in stale))
     conn.commit()
-    return flash_redirect("settings_page", f"Removed {count} device{'s' if count != 1 else ''}.")
+    return flash_redirect("settings_page", f"Removed {len(stale)} device{'s' if len(stale) != 1 else ''}.")
 
 
 @app.route("/settings/local-network", methods=["POST"])
