@@ -1664,6 +1664,102 @@ the intended behavior being validated, not an oversight.
 3 days without a real outage" -- to be assessed at the end of the
 window based on what actually happens.
 
+### Soak test paused after ~15 minutes: a real, previously-undiscovered traffic black hole (2026-09-07)
+
+A real bug report from the project owner ("my test tablet is stuck
+loading, not redirecting to the captive portal, just times out") led to
+pausing the soak test almost immediately after it started, and to
+finding something no prior session had ever actually verified: **no
+device has ever gotten real end-to-end internet access through this
+interception mechanism** -- every previous test (including the full
+2026-09-02 G1 matrix pass and 2026-09-07's discovery/arp-worker
+composition test earlier this same day) only confirmed traffic *arrived*
+at the Beelink via ARP redirection, never that a page actually loaded on
+the other end.
+
+**Root cause**: Docker's own `ip filter` table sets the `FORWARD` chain's
+policy to `drop` by default (Docker 20.10+) -- and every service in this
+project runs with `network_mode: host`, so Docker's bridge-network
+NAT/isolation logic provides literally nothing here, but its drop policy
+was still silently killing real forwarded traffic regardless of category
+(`bypass_v4`, `authenticated_v4` -- the two categories meant to actually
+reach the internet). `nftables-manager` had never had any `forward`-hook
+logic at all -- only redirect rules for locally-terminating services
+(captive portal, DNS, SSL-bump). This was invisible in every prior test
+because they all either poisoned a single manually-inserted target and
+only checked "does traffic arrive at the Beelink" (never "does the
+response come back"), or -- for the discovery/arp-worker composition
+test earlier the same day -- only exercised devices that got marked
+`ignored=1` (ARP-redirection alone was verified, not a working page load
+for anything that stayed a live target).
+
+**A confounding factor almost led to the wrong conclusion**: Bark Home
+was still enabled the whole time this investigation started (the
+project owner had turned it back on when the earlier composition test
+ended, and hadn't yet re-disabled it for this session) -- and Bark Home
+does its own ARP spoofing on this same network. With both Bark Home and
+this project's own `arp-worker` poisoning the same client
+simultaneously, an initial "the fix works, the page loaded!" observation
+turned out to be Bark Home's own already-correct mechanism handling the
+traffic, not this project's fix -- confirmed by a `ct mark` counter this
+fix adds staying at exactly zero despite the page loading successfully,
+and by conntrack showing zero real TCP connections tracked through the
+Beelink for that device at all. Once Bark Home was disabled again, the
+device correctly stopped getting free internet access -- proof the
+earlier "success" belonged to Bark Home, not this fix. Documented here
+because it's a real trap: a live household test against a real ARP
+mesh, run at a time another ARP-spoofing device happens to also be
+active, can look like it passed for the wrong reason.
+
+**The fix, at knftables_adapter.go's `ensureDockerUserException`**: sets
+are table-scoped in nftables, so a rule in Docker's own `ip filter`
+table can't reference `parental_proxy`'s own `@bypass_v4`/
+`@authenticated_v4` sets directly. `baselineRules` now tags every
+`bypass_v4`/`authenticated_v4` connection with `ct mark set 0x1` (a
+kernel-wide, table-independent property, unlike `meta mark`, which
+wouldn't still be attached by the time this matters) as it's evaluated
+in `parental_proxy`'s own `prerouting` chain; a new rule inserted into
+Docker's own `DOCKER-USER` chain -- the one chain Docker guarantees it
+creates once and never overwrites the contents of, specifically so
+operators can add exactly this kind of exception -- then accepts
+anything carrying that mark, before Docker's own drop policy ever
+applies. Chosen over the two alternatives considered (documented,
+manually-run host setup steps -- editing `/etc/docker/daemon.json` to
+disable Docker's iptables management entirely, or a one-off `nft`
+command) specifically because it needed to work from a clean install
+with zero manual host configuration, per the project owner's explicit
+requirement that this project stay self-contained and reproducible for
+others, not something anyone has to remember to patch on their own box.
+Idempotent across restarts the same way `EnsureBaseline`'s own
+Flush-then-readd already is for its own table -- identifies its one rule
+by a comment tag and replaces only that, since `DOCKER-USER` isn't this
+project's own chain to flush.
+
+**Live-verified**: the real rule and its `ct mark` tagging are correctly
+installed on the production box (confirmed via direct inspection, not
+just the fake-backed unit tests). The captive-portal half of the fix is
+confirmed working end-to-end for real: with Bark Home off, an
+unauthenticated device's HTTPS traffic now correctly gets nothing (by
+design, matching real-world captive portal behavior) rather than the
+FORWARD-chain black hole silently eating it, and the device's own OS
+-- once given a genuinely fresh network join, a WiFi toggle needed to be
+retried once before it took -- correctly surfaced its own captive-portal
+sign-in prompt and completed login through this project's real portal.
+**Not yet live-verified**: the `authenticated_v4` half (a "vouched" IoT
+device's ordinary, non-captive-portal-gated traffic actually reaching
+the internet) -- none of the vouched devices registered earlier this
+session had generated an active binding/real traffic during this
+window. `bypass_v4`'s own `ct mark` tag is honest to note as
+practically unreachable in normal operation too: a fully-ignored device
+(the gateway, the Orbi satellite, the alarm system) is never an
+arp-worker target in the first place, so its traffic never physically
+reaches the Beelink to be evaluated by this rule at all -- the tag is
+defense-in-depth for a device transitioning categories mid-connection,
+not something exercised by ordinary bypass traffic.
+
+Soak test not yet resumed as of this section -- resuming it is the
+natural next step once the project owner is ready.
+
 ### New database tables planned
 
 - `device_bindings` — MAC/IPv4 pairs with first/last-seen timestamps,

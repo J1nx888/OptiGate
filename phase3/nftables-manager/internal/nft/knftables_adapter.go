@@ -16,6 +16,7 @@ package nft
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"sigs.k8s.io/knftables"
 
@@ -23,10 +24,17 @@ import (
 )
 
 // Manager wraps a knftables.Interface scoped to the dedicated
-// "parental_proxy" table -- nothing here ever touches any other table
-// on the box, so this can't interfere with other firewall rules.
+// "parental_proxy" table for everything except one deliberate,
+// narrow exception: dockerUserNft, used only to fix the FORWARD-chain
+// black hole documented on ensureDockerUserException below. Every
+// other method on this type only ever touches "parental_proxy".
 type Manager struct {
 	nft knftables.Interface
+
+	// dockerUserNft is scoped to the "ip filter" table Docker itself
+	// creates and manages -- see ensureDockerUserException's own doc
+	// comment for why this single, narrow exception exists.
+	dockerUserNft knftables.Interface
 }
 
 // allManagedSets is every nftables set this package creates and reads
@@ -40,13 +48,19 @@ type Manager struct {
 var allManagedSets = append(append([]policy.SetName{}, policy.AllSetNames...), policy.SetBump)
 
 // New opens a knftables interface for the `inet` family's
-// "parental_proxy" table. Requires CAP_NET_ADMIN.
+// "parental_proxy" table, plus a second interface scoped to Docker's
+// own "ip filter" table (see ensureDockerUserException). Requires
+// CAP_NET_ADMIN.
 func New() (*Manager, error) {
 	nft, err := knftables.New(knftables.InetFamily, "parental_proxy")
 	if err != nil {
 		return nil, fmt.Errorf("open knftables interface: %w", err)
 	}
-	return &Manager{nft: nft}, nil
+	dockerUserNft, err := knftables.New(knftables.IPv4Family, "filter")
+	if err != nil {
+		return nil, fmt.Errorf("open knftables interface for docker's ip filter table: %w", err)
+	}
+	return &Manager{nft: nft, dockerUserNft: dockerUserNft}, nil
 }
 
 // EnsureBaseline creates the table, the five named sets (allManagedSets), and the
@@ -97,7 +111,93 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 		tx.Add(&knftables.Rule{Chain: "prerouting", Rule: rule})
 	}
 
-	return m.nft.Run(ctx, tx)
+	if err := m.nft.Run(ctx, tx); err != nil {
+		return err
+	}
+
+	return m.ensureDockerUserException(ctx)
+}
+
+// dockerUserComment tags the one rule this project ever adds outside
+// its own table, so ensureDockerUserException can find and replace
+// exactly that rule (and nothing else a human or another tool put in
+// DOCKER-USER) on every restart, instead of accumulating a duplicate
+// copy each time -- the same idempotency goal EnsureBaseline's own
+// Flush-then-readd achieves within "parental_proxy" itself, just done
+// by comment-matching here since flushing the whole chain would be
+// unsafe (DOCKER-USER isn't ours to clear).
+const dockerUserComment = "parental_proxy: allow marked connections (see knftables_adapter.go)"
+
+// ensureDockerUserException fixes a real gap discovered live 2026-09-07:
+// every container in this project runs with network_mode: host, so
+// Docker's own bridge-network NAT/isolation rules (the "ip filter"
+// table's DOCKER*/DOCKER-USER chains, auto-created the moment the
+// Docker daemon starts, independent of whether any bridge container
+// ever runs) provide this project literally nothing -- but its FORWARD
+// base chain's policy is still `drop` by default (Docker 20.10+), and
+// nothing before this fix ever told it otherwise. A base chain's own
+// `accept` policy or an early same-hook chain's `accept` verdict does
+// NOT override a *different* base chain's later `drop` policy at the
+// same hook (verified against a real box, not assumed -- an `accept`
+// verdict only means "this particular chain is done with the packet,"
+// or a *jumped-to* sub-chain, netfilter still runs every other base
+// chain registered at that hook afterward, and any one of them
+// returning `drop` is immediately final). The one chain Docker
+// guarantees it creates once and never overwrites the contents of --
+// specifically so operators can add exactly this kind of exception --
+// is DOCKER-USER, jumped to from the very first line of Docker's own
+// FORWARD chain, before its policy=drop fallback ever applies.
+//
+// Sets are table-scoped in nftables, so a rule living in "ip filter"
+// can't reference "parental_proxy"'s own @bypass_v4/@authenticated_v4
+// sets directly -- conntrack marks bridge the two tables instead:
+// baselineRules (in "parental_proxy", evaluated first, at the
+// prerouting/dstnat hook) tags every bypass_v4/authenticated_v4
+// connection with `ct mark set 0x1`, a kernel-wide, table-independent
+// property; this function's one rule in DOCKER-USER then just checks
+// that mark. `ct mark` (not `meta mark`) specifically because it
+// persists for the connection's whole lifetime once set on its first
+// packet, not just the packet that set it -- exactly what's needed
+// since the mark is set in prerouting but read again later at the
+// forward hook.
+//
+// Deliberately does NOT touch DOCKER-USER at all if it doesn't exist
+// (ListRules returns an error) -- most likely explanation is Docker's
+// own iptables/nftables management is disabled entirely (e.g.
+// "iptables": false in daemon.json), in which case there's no
+// Docker-installed drop policy to work around in the first place, and
+// forcing the chain into existence here would be reaching further
+// into Docker's own management than this project has any business
+// doing. Logged, not fatal -- EnsureBaseline's caller decides whether
+// that's acceptable for its environment.
+func (m *Manager) ensureDockerUserException(ctx context.Context) error {
+	if m.dockerUserNft == nil {
+		// A Manager built directly (every existing test, and any future
+		// caller that only needs the "parental_proxy" side) rather than
+		// via New() -- same "nothing to do" outcome as the chain not
+		// existing below, just without a real interface to even try.
+		return nil
+	}
+	existing, err := m.dockerUserNft.ListRules(ctx, "DOCKER-USER")
+	if err != nil {
+		log.Printf("DOCKER-USER chain not found (%v) -- skipping the forwarding-permit rule; "+
+			"this is expected if Docker's own iptables management is disabled, otherwise "+
+			"forwarded traffic for bypass/authenticated devices may be silently dropped", err)
+		return nil
+	}
+
+	tx := m.dockerUserNft.NewTransaction()
+	for _, rule := range existing {
+		if rule.Comment != nil && *rule.Comment == dockerUserComment {
+			tx.Delete(&knftables.Rule{Chain: "DOCKER-USER", Handle: rule.Handle})
+		}
+	}
+	tx.Insert(&knftables.Rule{
+		Chain:   "DOCKER-USER",
+		Rule:    "ct mark 0x1 counter accept",
+		Comment: knftables.PtrTo(dockerUserComment),
+	})
+	return m.dockerUserNft.Run(ctx, tx)
 }
 
 // baselineRules are the redirect rules from the design skeleton,
@@ -151,13 +251,35 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 // destination beyond this box's own :5353 either way once port 853 is
 // closed off, since PREAUTH's only other open door is tcp/80 to the
 // captive portal.
+//
+// The two `ct mark set 0x1` statements, added 2026-09-07: real traffic
+// for bypass_v4 (its ordinary, non-redirected browsing) and
+// authenticated_v4 (its ordinary web traffic, as opposed to the DNS
+// ports redirected above) needs to actually be forwarded back out this
+// single-NIC box to reach the real internet -- a genuine `redirect` to
+// a local port isn't the right tool for that (there's no local service
+// for it to terminate at), so unlike every other line here it doesn't
+// end in a terminal verdict. `ct mark` is the intentional choice over
+// `meta mark`: it's read again much later, at the forward hook, by
+// ensureDockerUserException's rule in a completely different table --
+// `ct mark` persists for a connection's whole lifetime once set on its
+// first packet, `meta mark` would not still be attached by then. See
+// that function's own doc comment for the full story (a real,
+// previously-undiscovered bug: nothing ever actually verified a client
+// could reach the real internet through this box end-to-end, only that
+// its traffic arrived here via ARP redirection). unauthenticated_v4
+// deliberately gets no such rule -- its only legitimate paths are the
+// locally-terminating redirects above; anything else (e.g. a raw HTTPS
+// request bypassing the captive portal) is meant to fail, the same as
+// any real-world captive portal.
 var baselineRules = []string{
-	"ip saddr @bypass_v4 return",
+	"ip saddr @bypass_v4 ct mark set 0x1 return",
 	"ip saddr @bump_v4 tcp dport 80 redirect to :3129",
 	"ip saddr @bump_v4 tcp dport 443 redirect to :3130",
 	"ip saddr @authenticated_v4 udp dport 53 redirect to :5353",
 	"ip saddr @authenticated_v4 tcp dport 53 redirect to :5353",
 	"ip saddr @authenticated_v4 tcp dport 853 redirect to :5353",
+	"ip saddr @authenticated_v4 ct mark set 0x1",
 	"ip saddr @unauthenticated_v4 udp dport 53 redirect to :5353",
 	"ip saddr @unauthenticated_v4 tcp dport 853 redirect to :5353",
 	"ip saddr @unauthenticated_v4 tcp dport 80 redirect to :3131",

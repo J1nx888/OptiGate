@@ -256,6 +256,145 @@ func TestBaselineRules_RedirectsDNSOverTLS(t *testing.T) {
 // EnsureBaseline actually installs both port-853 rules into the real
 // prerouting chain (via knftables' own in-memory Fake), not just that
 // the Go source slice happens to contain the right strings.
+// TestBaselineRules_MarkForwardableTraffic is a regression test for the
+// real bug found live 2026-09-07 (documented in full on
+// ensureDockerUserException's own doc comment): before this fix,
+// bypass_v4 and authenticated_v4 devices' ordinary (non-redirected)
+// traffic had no way to signal "this connection is allowed to actually
+// leave the box" to the separate DOCKER-USER exception rule, so it was
+// silently dropped by Docker's own FORWARD chain policy even though
+// nftables-manager's own table never intended to block it.
+func TestBaselineRules_MarkForwardableTraffic(t *testing.T) {
+	want := []string{
+		"ip saddr @bypass_v4 ct mark set 0x1 return",
+		"ip saddr @authenticated_v4 ct mark set 0x1",
+	}
+	for _, w := range want {
+		found := false
+		for _, r := range baselineRules {
+			if r == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected baselineRules to contain %q (forwarding ct mark), it did not -- full ruleset: %v", w, baselineRules)
+		}
+	}
+}
+
+// TestEnsureDockerUserException_NilManagerIsANoOp covers a Manager built
+// directly (every test above does this, and any future caller that only
+// needs the "parental_proxy" side) rather than via New() -- dockerUserNft
+// is nil in that case, and EnsureBaseline must not panic calling into it.
+func TestEnsureDockerUserException_NilManagerIsANoOp(t *testing.T) {
+	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	m := &Manager{nft: fake}
+	if err := m.EnsureBaseline(context.Background()); err != nil {
+		t.Fatalf("EnsureBaseline with a nil dockerUserNft: %v", err)
+	}
+}
+
+// TestEnsureDockerUserException_MissingChainIsANoOp covers the case
+// documented on ensureDockerUserException: DOCKER-USER not existing at
+// all (most likely because Docker's own iptables/nftables management is
+// disabled) must be logged, not treated as a fatal error -- there's no
+// drop policy to work around in that case.
+func TestEnsureDockerUserException_MissingChainIsANoOp(t *testing.T) {
+	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	dockerFake := knftables.NewFake(knftables.IPv4Family, "filter")
+	// Deliberately never add a DOCKER-USER chain to dockerFake.
+	m := &Manager{nft: fake, dockerUserNft: dockerFake}
+	if err := m.EnsureBaseline(context.Background()); err != nil {
+		t.Fatalf("EnsureBaseline with no DOCKER-USER chain present: %v", err)
+	}
+}
+
+// TestEnsureDockerUserException_InsertsExactlyOneAcceptRule_AgainstFake
+// is the real end-to-end check: given a DOCKER-USER chain that already
+// exists (simulating what Docker itself creates at daemon startup,
+// independent of this project), EnsureBaseline must insert exactly one
+// rule accepting ct-marked traffic, tagged with dockerUserComment so a
+// later call can find and replace it.
+func TestEnsureDockerUserException_InsertsExactlyOneAcceptRule_AgainstFake(t *testing.T) {
+	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	dockerFake := knftables.NewFake(knftables.IPv4Family, "filter")
+	ctx := context.Background()
+
+	// Simulate Docker having already created its own chain (and, as
+	// Docker itself would, some rule of its own already in it -- this
+	// project must never touch that rule).
+	setupTx := dockerFake.NewTransaction()
+	setupTx.Add(&knftables.Table{})
+	setupTx.Add(&knftables.Chain{Name: "DOCKER-USER"})
+	setupTx.Add(&knftables.Rule{Chain: "DOCKER-USER", Rule: "iifname \"docker0\" accept"})
+	if err := dockerFake.Run(ctx, setupTx); err != nil {
+		t.Fatalf("simulating Docker's own DOCKER-USER setup: %v", err)
+	}
+
+	m := &Manager{nft: fake, dockerUserNft: dockerFake}
+	if err := m.EnsureBaseline(ctx); err != nil {
+		t.Fatalf("EnsureBaseline: %v", err)
+	}
+
+	rules, err := dockerFake.ListRules(ctx, "DOCKER-USER")
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules in DOCKER-USER (Docker's own + ours), got %d: %+v", len(rules), rules)
+	}
+	var ours, dockersOwnStillPresent bool
+	for _, r := range rules {
+		if r.Rule == "ct mark 0x1 counter accept" && r.Comment != nil && *r.Comment == dockerUserComment {
+			ours = true
+		}
+		if r.Rule == "iifname \"docker0\" accept" {
+			dockersOwnStillPresent = true
+		}
+	}
+	if !ours {
+		t.Errorf("expected our ct-mark accept rule in DOCKER-USER, got %+v", rules)
+	}
+	if !dockersOwnStillPresent {
+		t.Errorf("expected Docker's own pre-existing rule to survive untouched, got %+v", rules)
+	}
+}
+
+// TestEnsureDockerUserException_IsIdempotentAcrossRepeatedCalls mirrors
+// TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls for the DOCKER-USER
+// side: a restart must replace our one rule, not accumulate a duplicate
+// copy of it every time, while still never touching anyone else's rules
+// in that shared chain.
+func TestEnsureDockerUserException_IsIdempotentAcrossRepeatedCalls(t *testing.T) {
+	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	dockerFake := knftables.NewFake(knftables.IPv4Family, "filter")
+	ctx := context.Background()
+
+	setupTx := dockerFake.NewTransaction()
+	setupTx.Add(&knftables.Table{})
+	setupTx.Add(&knftables.Chain{Name: "DOCKER-USER"})
+	if err := dockerFake.Run(ctx, setupTx); err != nil {
+		t.Fatalf("simulating Docker's own DOCKER-USER setup: %v", err)
+	}
+
+	m := &Manager{nft: fake, dockerUserNft: dockerFake}
+	if err := m.EnsureBaseline(ctx); err != nil {
+		t.Fatalf("EnsureBaseline (first call): %v", err)
+	}
+	if err := m.EnsureBaseline(ctx); err != nil {
+		t.Fatalf("EnsureBaseline (second call, simulating a restart): %v", err)
+	}
+
+	rules, err := dockerFake.ListRules(ctx, "DOCKER-USER")
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected exactly 1 rule after two EnsureBaseline calls, got %d (duplicated instead of replaced): %+v", len(rules), rules)
+	}
+}
+
 func TestEnsureBaseline_InstallsDNSOverTLSRedirect_AgainstFake(t *testing.T) {
 	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
 	m := &Manager{nft: fake}

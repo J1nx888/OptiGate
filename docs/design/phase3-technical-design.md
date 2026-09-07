@@ -262,7 +262,7 @@ table inet parental_proxy {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
 
-        ip saddr @bypass_v4 return
+        ip saddr @bypass_v4 ct mark set 0x1 return
 
         ip saddr @authenticated_v4 udp dport 53  redirect to :5353   # -> AdGuard Home
         ip saddr @authenticated_v4 tcp dport 53  redirect to :5353
@@ -272,6 +272,8 @@ table inet parental_proxy {
         # instead of, its authenticated_v4 membership).
         ip saddr @bump_v4 tcp dport 80  redirect to :3129   # -> Squid, HTTP (intercept mode)
         ip saddr @bump_v4 tcp dport 443 redirect to :3130   # -> Squid, HTTPS (intercept + ssl-bump)
+
+        ip saddr @authenticated_v4 ct mark set 0x1   # see the FORWARD-chain note below
 
         ip saddr @unauthenticated_v4 udp dport 53 redirect to :5353  # still gets DNS
         ip saddr @unauthenticated_v4 tcp dport 80 redirect to :3131  # -> future portal
@@ -283,6 +285,22 @@ table inet parental_proxy {
     }
 }
 ```
+
+**`ct mark set 0x1` addition, 2026-09-07**: a real bug (see RoadMap.md's
+dated section, "Soak test paused after ~15 minutes") -- Docker's own
+`ip filter` table sets its `FORWARD` chain's policy to `drop` by
+default, and since every service in this project runs with
+`network_mode: host`, nothing here ever needed Docker's own
+bridge-network firewalling, but its drop policy was still silently
+dropping every `bypass_v4`/`authenticated_v4` device's real (non-
+redirected) traffic -- no device had ever actually gotten real
+end-to-end internet access through this mechanism before that fix.
+Sets are table-scoped, so a permit rule elsewhere can't reference
+`@bypass_v4`/`@authenticated_v4` directly; `ct mark` bridges the two
+tables instead -- see `phase3/nftables-manager/internal/nft/
+knftables_adapter.go`'s `ensureDockerUserException` for the permit rule
+this mark feeds and the full reasoning for why that (not a documented
+manual host prerequisite) is the fix.
 
 The hard-deny invariant for `mode='bump'` domains on a device that
 *isn't* in `bump_v4` (e.g. a kid trying Crunchyroll on a DNS-only
