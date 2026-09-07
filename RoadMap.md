@@ -55,7 +55,7 @@ Pi-hole setup:
 | 18 | Editable category subscription URLs; 4th blocklist format (full URL per line) | ✅ Done, live-verified |
 | 19 | Schedule-categories picker: combobox → checkbox list | ✅ Done, live-verified |
 | 20 | Live post-soak-test fixes: per-device info page, bulk-add devices to a group, `PeriodicTask` immediate-first-run fix (category sync) | ✅ Done, live-verified |
-| 21 | Devices-page quick-add-to-group; global-sites visibility on user/group pages; bulk domain access assignment; `optigate.home` memorable-URL + device-status page | ✅ Built and unit-tested; `optigate.home` not yet enabled/verified on the real production box (needs `DASHBOARD_URL` set there first) |
+| 21 | Devices-page quick-add-to-group; global-sites visibility on user/group pages; bulk domain access assignment; `optigate.home` memorable-URL + device-status page | ✅ Done, live-verified on the real production box (DNS resolution + page render confirmed; the AdGuard rewrite was pushed by hand since `controller`/interception is still deliberately off, so it isn't self-healing yet) |
 
 ---
 
@@ -2019,10 +2019,35 @@ documentation/memory alone. 34 new tests across
 `tests/test_adguard_client.py`, `tests/test_controller_adguard_sync.py`,
 `tests/test_block_page_server.py`, and `tests/test_dashboard.py`.
 
-**Not yet done**: actually setting `DASHBOARD_URL` on the real
-production box and confirming `optigate.home` resolves and renders
-end-to-end there -- deliberately not flipped live without asking first,
-since it's the household's live gate box.
+**Live-verified on the real production box same day, after asking
+first.** Set `DASHBOARD_URL=http://192.168.1.250:8787` in `.env`,
+`docker compose up -d --build dashboard` (Compose also recreated
+`proxy` since it reads the same env var for its own `deny_info` line --
+`adguard` untouched; confirmed no `interception`-profile container
+started or was touched, per the project owner's explicit "don't turn
+back on arp spoofing yet"). Dashboard logs confirmed `block_page_server`
+now actually listening (`block page server listening on
+http://0.0.0.0:80` -- it hadn't been at all before this, since
+`DASHBOARD_URL` had been blank in production the whole time, see above).
+
+`controller` isn't running (the project owner deliberately kept
+interception off), so `sync_optigate_rewrite()`'s automatic push has
+never actually fired in production yet -- pushed the one rewrite entry
+by hand, via the same `/control/rewrite/add` call the real function
+makes, purely to verify the rest of the stack works: `dig @127.0.0.1 -p
+5353 optigate.home` returned `192.168.1.250` (real resolution, not
+`0.0.0.0`/NXDOMAIN), and `curl -H "Host: optigate.home"
+http://127.0.0.1:80/` returned a real `200` with the actual device-info
+page ("Not recognized on this network yet" -- correct, since the
+request's source IP has no `device_bindings` row). A control request
+(`Host: netflix.com`) still got the ordinary `403` blocked page,
+confirming no regression. **Caveat this leaves open**: since `controller`
+isn't running, this one rewrite entry won't self-heal (a prefix rename,
+or the box's IP changing, needs `controller` running to reconcile) until
+interception is turned back on -- and no real household device is
+actually using this AdGuard resolver for its DNS yet either, since
+that's the ARP-spoofing/interception mechanism itself, deliberately
+still off. Both close together the moment interception resumes.
 
 ### New database tables planned
 
