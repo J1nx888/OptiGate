@@ -37,7 +37,7 @@ Pi-hole setup:
 | 1 | Dashboard modernization (design system, charts, PWA) | ✅ Done |
 | 2 | Device/group data model groundwork | ✅ Done |
 | — | Filter/picker UI scaling (GH #8) | ✅ Done |
-| 3 | Network-level interception (the actual Bark Home replacement mechanism) | 🔶 Milestones 1–9 real, tested, verified live in Docker-bridge/veth harnesses **and now against the real Orbi mesh — G1 is a GO (2026-09-02)**, see [Path to deployment](#path-to-deployment) below. **Discovery + arp-worker composition verified live (2026-09-07)** and **full back-to-back matrix pass done** — only the soak test (Milestone 10) remains. |
+| 3 | Network-level interception (the actual Bark Home replacement mechanism) | 🔶 Milestones 1–9 real, tested, verified live in Docker-bridge/veth harnesses **and now against the real Orbi mesh — G1 is a GO (2026-09-02)**, see [Path to deployment](#path-to-deployment) below. **Discovery + arp-worker composition verified live (2026-09-07)** and **full back-to-back matrix pass done** — **the soak test (Milestone 10) started 2026-09-07**, first 3-day window, in progress. |
 | 4 | Captive-portal forced enrollment | ✅ Done (Milestones 1–3 + reminder screens + portal admin-add) |
 | 5 | Admin dashboard: responsive layout, installable PWA, control surface | 🔶 Begun — mobile/tablet audit done, one bug fixed |
 | 6 | YouTube channel/creator-level filtering | ⬜ Assessed only, 0% built (G2) |
@@ -80,8 +80,8 @@ real deployment decision:
 discovery + arp-worker composition that motivated disabling
 `--no-discovery`/`--no-rtnetlink`/`--no-active-scan` on 2026-09-02 is
 now verified safe (2026-09-07, see below), and the full back-to-back
-matrix pass is done. What's left is the soak-test window decision
-(Milestone 10).
+matrix pass is done. The soak test (Milestone 10) started 2026-09-07 --
+first 3-day window, in progress, Bark Home paused for the duration.
 
 **After G1 passes, before decommissioning Bark Home**: the soak test
 (Milestone 10 in Phase 3 below) — a real multi-day household run with
@@ -1592,10 +1592,77 @@ cover" in `docs/deployment/g1-runbook.md`) needs its own decision here.
   to the ARP mechanism, not investigated during this session since it
   doesn't affect interception itself.
 
-**Still not done**: the one full back-to-back matrix pass (no stopping
-between rows) and the soak test (Milestone 10) -- this session was
-scoped specifically to the discovery/arp-worker composition question,
-not a re-run of the matrix itself.
+**Still not done as of this section**: the back-to-back matrix pass and
+the soak test (Milestone 10) -- this session was scoped specifically to
+the discovery/arp-worker composition question. Both are now addressed;
+see the back-to-back pass note and the soak test start below.
+
+### Soak test (Milestone 10) started 2026-09-07, ~09:19 EDT
+
+First 3-day window. Unlike every prior session, this is running with
+production-representative settings, not a testing-only safety
+configuration -- no `docker-compose.override.yml` at all, just the base
+`docker-compose.yml`'s own `restart: unless-stopped` and default
+`--poll-interval` (5.0s, not the 3-minute review buffer used for the
+2026-09-07 composition validation above). Bark Home is paused for the
+duration.
+
+**A real, unrelated bug was found and fixed as part of getting to this
+point**: AdGuard had been crash-looping on the production box since
+before today's session (`listen udp 0.0.0.0:5353: bind: address already
+in use`) -- root cause was `avahi-daemon`, a stock Ubuntu mDNS
+responder, already holding port 5353 on the host, colliding with
+AdGuard's own DNS listener under `network_mode: host`. Not something
+`claude-agent` can fix (no sudo) -- the project owner ran
+`sudo systemctl disable --now avahi-daemon` directly. This also
+surfaced a second, related gap: today's earlier override files for the
+composition test used a stripped-down `controller` command that
+dropped the base compose file's AdGuard-sync and dashboard-notify flags
+entirely -- fine for a narrowly-scoped ARP-mechanism test, but not
+representative of production, where AdGuard integration matters. The
+soak test uses the base compose file's full command unmodified.
+
+**AdGuard's own admin credential gap**: `ADGUARD_PASSWORD` was blank in
+`.env` (and in the `settings` table), so `adguard/entrypoint.sh`
+correctly bootstrapped AdGuard with a random generated password on
+first real boot (by design, logged once to the container's own stderr)
+-- but `controller/main.py`'s argparse refuses to start with
+`--adguard-url` set and no password, and nothing had propagated that
+generated password back into `.env`/`settings` for controller or the
+dashboard to actually use. Fixed by reading the generated password from
+the AdGuard container's boot log and writing it into both `.env` (the
+project owner ran this directly -- editing `.env` over SSH was blocked
+by this session's own permission classifier) and the `settings` table
+via a throwaway container against the `pp_config` volume. Confirmed
+working with a direct authenticated call to AdGuard's own API
+(`/control/status` -> 200), not just "the container didn't crash."
+Worth a real fix later: this bootstrap gap means any fresh deployment
+hits the same wall unless a real `ADGUARD_PASSWORD` is set in `.env`
+ahead of time.
+
+**Proactive IoT sweep, done before starting discovery for real**
+(per the project owner's own choice, given how disruptive a permanent
+captive-portal lockout would be for a device that can never complete
+the login): the Orbi satellite itself (network infrastructure, same
+treatment as the gateway -- `ignored=1`, never a target), a home alarm
+system (safety-critical, deliberately `ignored=1`/fully excluded rather
+than the "vouched" treatment below, per the project owner's explicit
+choice), and 8 vouched IoT devices (`is_authenticated=1, ignored=0` --
+skips the captive-portal gate but still normally intercepted/filtered,
+same pattern as the CSV-imported device from the 2026-09-02 near-miss:
+two Wyze cameras, a Wyze video doorbell, two smart lightbulbs, two GE
+appliances) -- plus confirming three more devices mentioned (a second
+LG-adjacent printer and TV, an appliance) were already correctly
+classified from the 2026-09-02 pass. 22 devices tracked total (14 fully
+ignored, 8 vouched) before letting the other ~40+ real household
+devices get discovered organically over the coming days. The household
+has 50+ devices total -- most have not been pre-registered and will
+hit the captive portal for the first time during this window; that's
+the intended behavior being validated, not an oversight.
+
+**Not yet decided**: what "pass" means for a soak test beyond "ran for
+3 days without a real outage" -- to be assessed at the end of the
+window based on what actually happens.
 
 ### New database tables planned
 
