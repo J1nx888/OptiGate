@@ -1801,9 +1801,29 @@ back on (none of these need real ARP interception to build or verify):
    workaround -- so every consumer now runs once immediately on
    `start()`, then waits `interval` between subsequent calls; a
    `_stop.is_set()` guard covers `stop()` racing in before the first
-   tick. Live-verified: triggered a real `sync-all` against the
-   production box's actual subscription URLs (blocklistproject.github.io)
-   after the fix landed, confirming real domains actually populate.
+   tick. **A second, more severe bug surfaced trying to live-verify
+   this one**: the first real `sync-all` attempt against the production
+   box's actual subscription URLs took over 20 minutes and then failed
+   outright with `sqlite3.OperationalError: database is locked`.
+   Root-caused to `common/category_fetch.py`'s
+   `fetch_and_sync_category()`: `conn` opens with `isolation_level=None`
+   (`common/db.py`), so its `executemany()` INSERT of the Adult category's
+   ~953K domains was autocommitting -- and fsyncing -- every single row
+   individually, never having been exercised at real scale before (this
+   was the literal first time `sync_all_categories()` had ever run
+   against real data, per the `PeriodicTask` bug above). Fixed the same
+   way `common/identity.py`'s `record_binding()` already was
+   (2026-09-02): wrap the delete+insert+update in one explicit `BEGIN
+   IMMEDIATE` transaction. **Live-verified for real after both fixes**:
+   the same sync-all that previously hung for 20+ minutes and then
+   failed completed in **16 seconds**, syncing all 8 subscription
+   categories for **1,541,762 real domains total** (Adult 953,197,
+   Gambling 278,856, Fraud & Scams 256,184, Drugs 26,023, Facebook
+   22,361, TikTok 3,722, Twitter/X 1,193, WhatsApp 226). Weapons stays
+   at 0 domains -- confirmed intentional, not a bug: `seed_defaults.py`
+   already documents that no public blocklist exists for it (or AI,
+   which keeps its own separate 1,195-domain static curated list,
+   correctly untouched by subscription sync).
 4. **AdGuard Home not reachable on the LAN IP.** `DASHBOARD_BIND` and
    `ADGUARD_WEB_BIND` were both still `127.0.0.1` (the secure-by-default
    setting) on the production box -- the project owner explicitly asked
@@ -1811,8 +1831,20 @@ back on (none of these need real ARP interception to build or verify):
    management devices. Set `DASHBOARD_BIND=0.0.0.0` on the box directly
    (a deliberate, informed choice -- flagged first that this dashboard
    has no TLS yet, so Basic Auth now travels in cleartext to anything on
-   the LAN, not just admin devices). `ADGUARD_WEB_BIND` addressed
-   separately once its own link-out feature (Phase 17) is revisited.
+   the LAN, not just admin devices). Setting `ADGUARD_WEB_BIND=0.0.0.0`
+   in `.env` and restarting the container turned out to have **no
+   effect** -- a real gap worth documenting: `adguard/entrypoint.sh`
+   only ever reads its env vars during the automated first-run bootstrap
+   (`if [ -f "$CONF" ]; then exec ... fi` -- once `AdGuardHome.yaml`
+   exists, every later start is a plain, unmodified launch, by design,
+   for idempotency). Fixed by editing the persisted config directly
+   (`http.address` in the `pp_adguard_conf` volume's `AdGuardHome.yaml`)
+   and restarting -- confirmed reachable afterward. Anyone needing to
+   change `ADGUARD_WEB_BIND` (or any other adguard/entrypoint.sh env
+   var) after first boot needs the same direct-edit approach; a real
+   fix worth considering later is having the entrypoint reconcile the
+   config file's bind address against the env var on every start, not
+   just the first.
 5. Bulk-registered several more real household devices found live
    (Orbi satellite as infrastructure alongside the gateway, a home
    alarm system explicitly chosen as fully-excluded given its
