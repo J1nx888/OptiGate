@@ -6051,6 +6051,83 @@ afterward correctly returned `192.168.1.250`, the real production
 address. The exact real-world outcome this fix was built to guarantee
 by default, confirmed, not just asserted by tests.
 
+### Soak test (Milestone 10) resumed on the rebranded, wiped-and-redeployed stack (2026-09-08)
+
+Project owner asked to resume the soak test paused since 2026-09-07
+(the Docker FORWARD-chain black hole, fixed same day -- see that
+entry). Everything since then -- the OptiGate rebrand (Phases A-C),
+backup/restore, the full wipe-and-redeploy, and the AdGuard port/
+optigate.home fixes -- happened with interception deliberately OFF, so
+none of `arp-worker`/`nftables-manager`/`controller` had been rebuilt
+or run even once since any of it. Resuming isn't just "flip the
+profile back on": every one of those changes touches something this
+profile directly depends on (the renamed nftables table, the renamed
+`/run/optigate` socket path both `arp-worker` and `controller` have to
+agree on, the new `ADGUARD_DNS_PORT`/`-dns-redirect-port` the baseline
+redirect rules point at). None of that had been exercised together
+even once.
+
+**Pre-flight, before touching the real network**: confirmed Bark Home
+was paused for the window (project owner confirmed directly -- the
+same precondition every prior soak-test session has used, and the
+same one whose absence caused real confusion investigating the
+2026-09-07 incident). Built all three interception images
+(`docker compose build arp-worker controller nftables-manager`) fresh
+against the current code first -- `arp-worker` and `controller`
+specifically had never been rebuilt post-rename at all, only
+`nftables-manager` had (to verify the DNS-port fix's Go changes
+compiled). All three built clean.
+
+**Started for real** (`docker compose --profile interception up -d`)
+and verified, not just watched for a clean `docker ps`:
+- All six containers (three default + three interception) came up and
+  stayed up.
+- `arp-worker`'s own gateway-safety check correctly rejected
+  `192.168.1.1` (the real gateway) as a poisoning target -- expected,
+  confirms the safety net is intact after the rename, not a fault.
+- A real, previously-unexercised issue surfaced immediately: both
+  `nftables-manager` and `controller` logged `database is locked`
+  (SQLITE_BUSY) a handful of times in the first ~5 seconds after all
+  six containers started simultaneously and began touching the shared
+  SQLite file at once. Watched for 30+ seconds afterward with zero
+  recurrence -- a one-time startup contention burst, not a sustained
+  problem; both processes' own retry-next-cycle design (5s
+  poll-interval) self-healed it without intervention. **Real
+  root cause found while checking, worth fixing properly later even
+  though it didn't block this resume**: `phase3/nftables-manager/
+  internal/dbsource/sqlite.go`'s `WriteHealth()` opens its
+  `modernc.org/sqlite` connection with a bare `sql.Open("sqlite",
+  dbPath)` -- no `_busy_timeout` DSN parameter at all, unlike
+  `common/db.py`'s own connections (`PRAGMA busy_timeout=5000`) on the
+  Python side. Under light contention this self-heals via the next
+  poll cycle (as observed here); under heavier, more sustained
+  contention it could fail more visibly. Tracked as a real gap, not
+  fixed in this pass -- a busy_timeout DSN parameter or explicit retry
+  wrapper is the likely fix, needs its own verification pass.
+- Confirmed genuinely healthy, not just quiet: `interception_runtime`
+  shows `mode='running'`/`nft_mode='running'`, both with a fresh
+  `*_last_healthy_at` and no fail reason. Real desired policy computed
+  correctly: the 4 real `ignored` household devices correctly excluded
+  from targeting (`bypass_v4`), 10 real devices correctly sitting in
+  `unauthenticated_v4` awaiting their first captive-portal login under
+  the freshly-wiped device roster.
+- `nft list table inet optigate` against the REAL kernel confirmed the
+  rename threaded all the way through correctly -- table name, and the
+  DNS redirect rules correctly pointing at `:5354` (not the old
+  `:5353`), matching AdGuard's actual configured port exactly.
+
+**Noted, not acted on**: the real household gateway (`192.168.1.1`)
+currently reaches `arp-worker`'s safety check at all only because
+`controller`'s own desired-state computation has no record of it as an
+explicitly `ignored` device -- the safety net caught it correctly, but
+a cleaner fix would register the router itself as `ignored` in the
+`devices` table so it's excluded upstream, not just downstream. Not
+done in this pass; flagged for the project owner.
+
+First real window of this soak test now running against the
+rebranded, wiped-and-rebuilt stack -- Bark Home stays paused for its
+duration, same as every prior window.
+
 ---
 
 ## Cross-cutting: security-by-design
