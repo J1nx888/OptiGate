@@ -9,7 +9,14 @@ architecture change itself). **Re-audited 2026-09-02** against the
 merged `fix/cross-tier-domain-enforcement` branch (Phase 8 categories/
 schedules, G3/G6, the Events page) -- §1's file tree, §7's route groups,
 and the dashboard's line count were the parts that had actually gone
-stale; everything else held up.
+stale; everything else held up. **Re-audited again 2026-09-07** after a
+long session of dashboard-only feature work (bulk-actions toolbars on
+every list page, group-level Ignore mode, the Health page's toggle-
+command display) -- the dashboard's line count and this section's
+`policy_class.py`/`groups` entries needed touching up; the request-flow/
+component-boundary material below (nothing in that work touched Squid,
+AdGuard rule generation, or the interception layer itself) held up
+unchanged.
 
 This is a parental-control **transparent, intercepting proxy**: a single
 Squid instance with SSL-Bump enabled, sitting between LAN clients and the
@@ -50,7 +57,15 @@ common/                      shared Python modules, imported by both containers
                                 auto-gate-new-devices behavior (see §9)
   policy_class.py               PolicyClass enum + classify_device() (bypass > quarantine >
                                 authenticated/preauth precedence) and bump_eligible() --
-                                consumed by controller/policy_state.py, not the proxy directly
+                                consumed by controller/policy_state.py, not the proxy directly.
+                                Both take an explicit group_ignored parameter (added
+                                2026-09-07, defaults False so every pre-existing caller stays
+                                correct unchanged) -- a device's effective BYPASS state is its
+                                own `ignored` column OR its group's (see `groups` below);
+                                every raw-SQL BYPASS filter that doesn't go through this
+                                function (controller/desired_state.py,
+                                controller/adguard_sync.py's _fetch_eligible_devices()) has its
+                                own matching LEFT JOIN fix instead
   logging_util.py              log_access() -- deduped access-log writer
   squid_helper.py              shared stdin/stdout protocol loop (run())
   series_resolve.py            Crunchyroll object-id -> series-id cache (resolve_series_ids())
@@ -677,7 +692,7 @@ back to the raw id).
 
 ## 7. Dashboard (`dashboard/dashboard.py`)
 
-Single-file Flask app (~4000 lines), imports `adguard_client`, `auth`,
+Single-file Flask app (~6500 lines), imports `adguard_client`, `auth`,
 `category_fetch`, `cr_api`, `db`, `matching`, `schedule_eval` from `common/` (via
 `sys.path.insert(0, str(Path(__file__).parent))`, since the Dockerfile
 copies `common/*.py` flat into `/app/` alongside `dashboard.py`). Served
@@ -730,7 +745,14 @@ Route groups (see the numbered `# ====` section banners in the file):
   `common/policy_class.py`, and (once Phase 3 is deployed) nftables.
   Includes CSV bulk import (`/devices/import`, G7) and the ad-hoc
   pause/resume routes (`/devices/pause`, `/devices/pause-all`,
-  `/users/pause`, G6) that write `devices.quarantined_at`.
+  `/users/pause`, G6) that write `devices.quarantined_at`. Both pages
+  got a full bulk-actions-toolbar pass (Entra-style buttons: Download
+  CSV / Enable / Disable / Delete / Manage, 2026-09-07) -- see
+  `docs/dashboard/routes.md` for the per-route detail, not repeated
+  here. `groups.ignored` (added the same day) is a real, enforced
+  policy input, not just a UI label -- see the `policy_class.py` bullet
+  above and `docs/database/schema.md`'s `groups` entry for the full
+  "additive with the device's own `ignored`" semantics.
 - **Events** (`/events`, Phase 11): read-only historical trail of every
   background loop's real failures and recoveries, from `system_events`
   (written by `controller/main.py`, never by the dashboard itself) --
@@ -752,8 +774,13 @@ Route groups (see the numbered `# ====` section banners in the file):
   dead. `render()` (the shared page-chrome wrapper every route uses)
   separately lights a sidebar "!" alarm badge from the same
   `_subsystem_unhealthy()` predicate on every page, not just `/health`
-  itself. See `docs/dashboard/routes.md`'s own "Health" section for the
-  full route reference.
+  itself. **Since 2026-09-07**: each subsystem card also shows the
+  exact `docker compose` command to flip its current state -- a
+  deliberate choice (project owner's, after being asked) over granting
+  the dashboard container Docker socket access to actually start/stop
+  those containers itself; see §9's own bullet on this. See
+  `docs/dashboard/routes.md`'s own "Health" section for the full route
+  reference.
 - **Settings** (`/settings`, `/settings/local-network`,
   `/settings/block-page-mode`, `/settings/admin`, `/settings/adguard`,
   `/settings/adguard/refresh`, `/settings/safesearch` (G3),
@@ -961,3 +988,32 @@ playback goes through `www.crunchyroll.com/playback`, already covered.
   `docs/security/overview.md` section 6 for the full brute-force-audit
   writeup this came out of, and `common/rate_limit.py` for the shared
   limiter mechanism both files now use.
+- **`groups.ignored` is additive with a device's own `ignored` bit, never
+  a replacement for it** (added 2026-09-07) -- a device's effective
+  BYPASS state is `devices.ignored OR (its group's ignored, if it
+  belongs to one)`. Turning a group's flag back off never clears any
+  member device's own column; it only stops contributing to the OR.
+  This is real, live-enforced policy (not just a dashboard label), so
+  every place that reads `devices.ignored` for actual classification --
+  not just `common/policy_class.py`'s `classify_device()`, which takes
+  it as an explicit parameter, but also the raw-SQL BYPASS filters in
+  `controller/desired_state.py` and
+  `controller/adguard_sync.py`'s `_fetch_eligible_devices()` -- had to be
+  individually audited and given a matching `LEFT JOIN groups` fix. A
+  new bug of this exact shape (a raw-SQL device query that checks
+  `ignored = 0` without also joining `groups`) is the thing to watch for
+  if this column ever grows a second consumer.
+- **The Health page's per-subsystem toggle command is deliberately not a
+  working button.** Asked (2026-09-07) to add a Settings-page on/off
+  switch for the interception containers (`controller`/`arp-worker`/
+  `nftables-manager`), the project owner was first asked how it should
+  be built, since a real one requires giving the dashboard container
+  Docker socket access to start/stop sibling containers -- a privilege
+  it has none of today, already declined once at smaller scope (an
+  AdGuard-restart convenience, earlier the same session). The decision:
+  no new privilege at all -- the Health page already shows each
+  subsystem's live status, so it now also shows the *opposite* action's
+  exact `docker compose` command right there, for the admin to run over
+  SSH. If this is ever revisited toward a real working switch, treat the
+  privilege tradeoff as a fresh decision, not something this precedent
+  already settled in favor of convenience.

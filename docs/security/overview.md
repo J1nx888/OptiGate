@@ -893,9 +893,15 @@ what's evidenced in code:
   Docker Desktop/bridge networking, at which point nftables' bump_v4 set
   membership (§3) is the only thing left gating Squid access, with no
   LAN-range check and no credential of any kind behind it.
-- No rate limiting anywhere (§6) — acceptable when the only reachable
-  parties are already on the trusted LAN, not acceptable once the dashboard
-  is reachable from an untrusted network.
+- **Correction**: both the dashboard admin login and the captive portal's
+  login now DO have rate limiting (§6, `common/rate_limit.py`, added
+  2026-09-02) — this bullet used to say "none anywhere," which stopped
+  being true that day. What's still a real gap for internet-facing use:
+  the limiter is in-memory/per-process (resets on a container restart,
+  and Squid's own IP-based identity model has no login to rate-limit at
+  all) — acceptable when the only reachable parties are already on the
+  trusted LAN, not acceptable once the dashboard is reachable from an
+  untrusted network without a persisted, restart-surviving lockout store.
 - Squid's `ssl_bump` CA trust model (§5) assumes the operator controls and
   can push CA trust to every device on the network (README's per-device
   certificate-trust install steps) — a workable assumption for a household
@@ -905,10 +911,11 @@ what's evidenced in code:
 None of this is a defect in what the project claims to be — README and
 `.env.example` are explicit that this is a home/LAN parental-control tool —
 but any future work aimed at internet-facing or multi-household/multi-tenant
-use would need to add: TLS on the dashboard, brute-force protection on its
-login (§6), and a reconsideration of what "LAN membership" is even
-supposed to mean as a trust signal once clients aren't all on one
-administratively-controlled network.
+use would need to add: TLS on the dashboard, a persisted (not in-memory)
+lockout store to replace the existing per-process rate limiter (§6),
+and a reconsideration of what "LAN membership" is even supposed to mean
+as a trust signal once clients aren't all on one administratively-controlled
+network.
 
 ## 8. Content-category and schedule enforcement (Phase 8, added 2026-08-31/09-01)
 

@@ -60,8 +60,12 @@ test (Milestone 10).
 - [ ] `main` is up to date locally (the `fix/cross-tier-domain-enforcement`
       branch has been merged in — confirm with `git log --oneline -3`
       showing `6dcf1d2` or later).
-- [ ] Full test suite green on Linux (last confirmed: 722 passed, 0
-      skipped on the smoke-test VM).
+- [ ] Full test suite green on Linux -- run `pytest` fresh on the
+      smoke-test VM before starting, don't trust a number written into
+      this doc from an earlier pass (it will always be stale by the time
+      you're reading it; 962 passed/34 skipped on Windows as of
+      2026-09-07 is this doc's own last point-in-time reference, already
+      out of date the moment more tests are added).
 - [ ] The Beelink (real production box, `192.168.1.250`) is reachable and
       has the current `main` branch checked out — this is a **different**
       box from the disposable smoke-test VM; nothing done there so far has

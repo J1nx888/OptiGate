@@ -20,7 +20,7 @@ The remaining work — YouTube channel/creator-level filtering, and the real-net
 
 ```
 common/        Shared Python modules, flat-copied into whichever image(s) need them
-  db.py              SQLite schema (SCHEMA string) + init_db() -- 27 tables total, see
+  db.py              SQLite schema (SCHEMA string) + init_db() -- 28 tables total, see
                       docs/database/schema.md for the full current list
   auth.py            password hashing/verification (PBKDF2), verify_admin_credentials()
   matching.py        domain/user/LAN-permission lookup logic, category/schedule targeting
@@ -35,6 +35,8 @@ common/        Shared Python modules, flat-copied into whichever image(s) need t
   series_resolve.py  resolves a Crunchyroll URL's ids to a series_id (with caching)
   cr_api.py          Crunchyroll CMS API client (anonymous token flow)
   adguard_client.py  AdGuard Home REST client (custom rules, SafeSearch, filter subscriptions)
+  rate_limit.py      in-memory sliding-window RateLimiter -- dashboard admin login +
+                      captive portal login brute-force protection
   system_events.py   admin-visible failure/recovery log, written by controller/'s loops
   schedule_eval.py, blocklist_parser.py, category_fetch.py -- Phase 8 (categories/schedules)
   sdnotify.py        stdlib systemd sd_notify client, used by controller/'s heartbeat pacer
@@ -50,7 +52,7 @@ proxy/         The Squid container (SSL-Bump tier)
 adguard/       The AdGuard Home container (DNS tier), thin wrapper + first-run bootstrap
 
 dashboard/     The Flask admin container
-  dashboard.py             every route + inline Jinja2 templates (single file, ~4000 lines)
+  dashboard.py             every route + inline Jinja2 templates (single file, ~6500 lines)
   captive_portal_server.py forced-enrollment login server (Phase 4)
   block_page_server.py     kid-facing DNS-tier block page
   Dockerfile               flattens common/*.py + dashboard.py into one /app directory
@@ -69,8 +71,9 @@ defaults/
                       Phase 8's starter categories)
   ai_sites_seed.py   the "AI" category's manually-curated starter domain list
 
-tests/         Tier-1 pytest suite (722 passed / 0 skipped on Linux as of 2026-09-01,
-               no Docker/network required -- Windows skips ~30 AF_UNIX-only tests)
+tests/         Tier-1 pytest suite (996 collected as of 2026-09-07; 962 passed /
+               34 skipped on Windows -- no Docker/network required, the skips are
+               AF_UNIX-only tests that run (and pass) on Linux)
 docs/          This documentation
 ```
 
@@ -83,7 +86,7 @@ docs/          This documentation
 | [Database schema](database/schema.md) | Every table (including the Phase 2/3 devices/groups/identity tables), columns/constraints/relationships, every `access_log.reason` value enumerated, seed data |
 | [Deployment](deployment/setup.md) | Local setup (`setup.sh` and manual), every env var, the CA cert, port mappings, CI |
 | [G1 runbook](deployment/g1-runbook.md) | Real-network ARP interception validation — **GO as of 2026-09-02**; back-to-back pass + soak test still remain before replacing Bark Home |
-| [Security](security/overview.md) | Auth/CSRF/password hashing, Squid's device-identity model (intercept mode, since 2026-08-30), the CA/bump trust model, known gaps (no rate limiting), LAN-only scoping |
+| [Security](security/overview.md) | Auth/CSRF/password hashing, Squid's device-identity model (intercept mode, since 2026-08-30), the CA/bump trust model, rate-limiting (in-memory/per-process, both login surfaces), LAN-only scoping |
 | [Testing](testing/overview.md) | How to run the suite, key fixtures, mutation-testing verification process, how to add a test |
 
 ## Quick start
@@ -113,7 +116,7 @@ Dashboard defaults to `http://127.0.0.1:8787` (not LAN-reachable until `DASHBOAR
 - **One shared SQLite database, no caching layer, `ttl=0`** on the `external_acl_type` helpers — every Squid decision is a live read of current dashboard state, so permission changes take effect immediately with no reconfigure/restart.
 - **`squid-openssl`, not plain `squid`** — Debian's default `squid` package is built against GnuTLS, which doesn't support SSL-Bump at all; this is an easy, silent trap when rebuilding the Dockerfile from scratch.
 - **Crunchyroll show-resolution is deliberately special-cased**, not built as a generic "any site" feature — nothing else in scope has a documented API to resolve "this URL belongs to this show," so generalizing the pattern prematurely would have added complexity with no second user.
-- **No rate-limiting/lockout on the dashboard admin login** — a known, accepted gap for the current LAN-only deployment model; see [Security overview](security/overview.md) section 6 before any internet-facing exposure.
+- **Rate-limiting on both login surfaces, in-memory/per-process by design** — the dashboard admin login and the captive portal's login (`common/rate_limit.py`, added 2026-09-02) each get their own 5-attempts/60s limiter; resetting on a container restart is an accepted tradeoff for a LAN-only deployment, not an oversight — see [Security overview](security/overview.md) section 6 for what a persisted, restart-surviving version would need before any internet-facing exposure.
 - **Squid identity is device-based, not credential-based** (since 2026-08-30) — a client's source IP is resolved through `device_bindings` to a `devices.user_id`, replacing the old per-request Basic-Auth login. This is what makes "no per-device proxy configuration, just a CA cert" possible, at the cost of a different trust boundary (whoever controls a bump-enabled device's IP is treated as its assigned user, with no credential check) — see [Security overview](security/overview.md) section 3 for the full tradeoff.
 - **"Two independent axes" as a recurring pattern, not a one-off** — bump-eligibility layered on top of base classification, a scheduled `lockout_all` overlay layered on top of (never mutating) an admin's own manual quarantine, category assignment separate from schedule gating. Each pair composes rather than one silently overriding the other's own state.
 - **Categories/schedules are a block-list, the opposite polarity from every other domain-assignment table** — `domains`/`user_domains`/etc. are allow-lists (denied unless assigned); assigning a category or schedule means *block*. Same junction-table shape, reused deliberately, inverted meaning — see [Architecture](architecture/overview.md) §9 before assuming "assigned" means "allowed" anywhere in that code.

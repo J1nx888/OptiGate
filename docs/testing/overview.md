@@ -954,11 +954,89 @@ skipped** (Windows). Live-verified against the real dev database's real
 all 10 rendered as checkboxes with no typing required, and checking one
 and saving round-tripped correctly on reload.
 
+**2026-09-07, extended dashboard-UX session (a long session; the entries
+below cover it end to end, picking up from Phase 19's 819 passed above
+-- table counts through the middle of this session are reconstructed
+from the session's own summary rather than independently re-verified
+per-commit, since a mid-session context compaction lost the exact
+incremental numbers; everything from "Domains toolbar" onward was
+directly re-run and confirmed)**:
+
+- **AdGuard/dashboard credential unification** -- replaced an insecure
+  plaintext-password-reveal Settings card with a real fix:
+  `dashboard/adguard_config_sync.py` (new file) writes a bcrypt hash
+  directly into AdGuard's own `AdGuardHome.yaml` on the shared
+  `pp_adguard_conf` volume whenever the dashboard admin password
+  changes, closing the loop so one password change updates both
+  logins. 9 new tests in `tests/test_adguard_config_sync.py`
+  (hash-verifiability, multi-user isolation, preserves unrelated
+  YAML keys/fields, raises on missing-file/malformed-YAML/non-mapping
+  input, fresh salt per call). Live-verified against the real
+  production AdGuard instance: real OpenAPI-spec-confirmed absence of
+  a password-change endpoint, a real bcrypt cross-language
+  compatibility proof (Python `bcrypt` vs. AdGuard's Go
+  `x/crypto/bcrypt`), and AdGuard's own "permcheck" startup behavior
+  (resets the config file's permissions on every boot) traced via real
+  container logs, which is what `adguard/entrypoint.sh` was
+  restructured to apply the dashboard's write-access fix AFTER, not
+  before.
+- **Bulk-actions toolbar extended to every list page** (Users,
+  Categories, Schedules, then Domains -- Devices already had it from
+  an earlier pass): Download-CSV / Delete on every page, plus
+  Enable/Disable on Users (maps to the existing pause/resume
+  mechanism) and a "Manage access"/"Manage" toggle panel on Domains/
+  Devices for their existing bulk-assign forms. 18 new tests for
+  Users/Categories/Schedules, 7 more for Domains (`export_domains_csv()`,
+  `bulk_delete_domains()` with built-in-Crunchyroll-domain protection).
+  910 -> 928 -> 939 passed (34 skipped), zero regressions across both
+  passes.
+- **Bump-mode path enforcement redesigned**: `add_path()` now takes a
+  plain pasted path or full URL (`_extract_path()`) instead of
+  hand-written regex, and a bump-mode domain with zero path rules now
+  denies everything except the bare root (`/`) by default, closing a
+  real "bump mode allows the whole site by default" gap (project owner's
+  explicit direction, confirmed via `AskUserQuestion` before deploying
+  to the always-live `proxy` container specifically, since it could
+  affect live traffic immediately, unlike other changes this session).
+  Covered in `tests/test_helpers_protocol.py`.
+- **Category "Add many domains at once"**: a textarea accepting one
+  bare domain / domain+path / full URL per line
+  (`_extract_domain()`, same paste-anything philosophy as
+  `_extract_path()` above), used to import ~90 real manga-reading
+  sites (verified by hand against the live page's own DOM after a
+  first pass via a web-fetch tool fabricated several domain names
+  outright) into a "Manga" block-category in one paste. 5 new tests.
+  934 -> 939 passed.
+- **Group-level "Ignore mode" + devices bulk-ignore action**: new
+  `groups.ignored` column, additive with a device's own `ignored` bit
+  -- required auditing every raw-SQL BYPASS filter in
+  `controller/desired_state.py`, `controller/policy_state.py`, and
+  `controller/adguard_sync.py`'s `_fetch_eligible_devices()` (the one
+  that's actually live against real AdGuard today), not just
+  `common/policy_class.py`'s `classify_device()`, which took an
+  explicit new `group_ignored` parameter. Devices toolbar gained
+  "Set to Ignore"/"Remove Ignore" bulk buttons alongside the
+  pre-existing group-assign form. 19 new tests across
+  `tests/test_dashboard.py`, `tests/test_policy_class.py`,
+  `tests/test_controller_desired_state.py`,
+  `tests/test_controller_policy_state.py`, and
+  `tests/test_controller_adguard_sync.py`. 939 -> 958 passed.
+- **Health page "run this command" toggle**: asked for a Settings-page
+  on/off switch for the interception containers; asked how it should be
+  built first, since a real one needs Docker socket access the
+  dashboard deliberately has none of (declined at smaller scope earlier
+  the same session, for an AdGuard-restart convenience). Decision: no
+  new privilege at all -- each subsystem card on the existing Health
+  page now shows the exact `docker compose` command to flip its current
+  state. 4 new tests. 958 -> 962 passed.
+
+Full suite as of this entry: **962 passed, 34 skipped** (Windows),
+`pytest --collect-only -q` reports **996 collected**.
+
 Run `pytest --collect-only -q` against `tests/` for a live,
-authoritative total (552 as of 2026-08-31 -- `AF_UNIX`-only files still
-skip on Windows, where `socket.AF_UNIX` doesn't exist, so a Windows run
-of the same suite at this commit collects 522 passed, 30 skipped, while
-Linux collects all 552) rather than trusting the sum of this table.
+authoritative total rather than trusting the sum of this table --
+skip counts and the Linux/Windows split shift slightly release to
+release as `AF_UNIX`-only files are added.
 
 ### Representative pattern: `tests/test_logging_dedupe.py`
 

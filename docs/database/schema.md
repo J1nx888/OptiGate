@@ -10,31 +10,45 @@ SQLite's own `INTEGER PRIMARY KEY` rowid aliasing.
 ## Where the schema lives
 
 **File:** `common/db.py`
-**Constant:** `SCHEMA` (a single multi-statement SQL string, lines 18-97)
-**Applied by:** `init_db(conn)` (line 110), which just runs
-`conn.executescript(SCHEMA)`.
+**Constant:** `SCHEMA` (a single multi-statement SQL string)
+**Applied by:** `init_db(conn)`, which runs `conn.executescript(SCHEMA)`
+then calls `_migrate(conn)`.
 
-- **Migration style:** none. Every statement is `CREATE TABLE IF NOT EXISTS`
-  / `CREATE INDEX IF NOT EXISTS`. There is no schema-version table, no
-  ordered migration list, and no `ALTER TABLE` anywhere in the codebase.
-  Changing a column's type/constraints today means editing the `CREATE
-  TABLE` statement in place, which only takes effect for brand-new database
-  files -- an existing deployed `.db` file keeps its old column definitions
-  until someone manually migrates it (or the table is dropped and
-  recreated). Keep this in mind before assuming an edit to `SCHEMA` retrofits
-  existing installs.
+(Line numbers deliberately omitted below -- this file has grown and
+reshuffled enough times that a pinned line number goes stale within a
+session or two; grep the function/constant names instead.)
+
+- **Migration style: `CREATE TABLE IF NOT EXISTS` for new tables, a
+  hand-written idempotent `_migrate(conn)` function for new columns on
+  EXISTING tables.** **Corrected 2026-09-07** -- this section used to say
+  "none... no `ALTER TABLE` anywhere in the codebase," which was true
+  when first written but has been false for a while: `_migrate()` now
+  runs a `PRAGMA table_info(<table>)` check followed by a conditional
+  `ALTER TABLE ... ADD COLUMN` for every column added after that
+  table's initial release (`access_log.approval_requested_at`/
+  `device_id`/`ip_address`; `devices.last_seen_at`/`quarantined_at`;
+  `interception_runtime`'s Phase 6/7 columns; `schedules.is_mode`;
+  `groups.ignored`, added the same day this correction was written).
+  There is still no schema-version table or ordered migration list --
+  each check in `_migrate()` is independently idempotent (a plain
+  `if "col" not in columns:` guard), safe to run on every startup
+  against any existing database in any order, which is what makes this
+  workable without one. Changing a column's TYPE or a `CHECK`
+  constraint in place, rather than adding a new column, still has no
+  supported migration path -- that part of the original caution still
+  holds.
 - **Called from:** `init_db()` runs on every dashboard request that opens a
-  connection (`dashboard.get_db()`, dashboard.py:59-62) and on every proxy
-  container start (`proxy/entrypoint.sh` line 35, inline Python heredoc).
-  It's cheap and idempotent, so it's safe to call unconditionally rather
-  than gating it behind a "first run" check.
-- **Connection setup:** `get_conn()` (db.py:100-107) opens the file at
-  `DB_PATH`, sets `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000`,
-  `PRAGMA foreign_keys=ON`, and `row_factory = sqlite3.Row` (so query
-  results are dict-like, accessed by column name -- `row["field"]` -- for
-  every query in the codebase). WAL + a busy timeout are what let the proxy
-  container and the dashboard container hit the same file concurrently
-  without a real database server.
+  connection (`dashboard.get_db()`) and on every proxy container start
+  (`proxy/entrypoint.sh`, inline Python heredoc). It's cheap and
+  idempotent, so it's safe to call unconditionally rather than gating it
+  behind a "first run" check.
+- **Connection setup:** `get_conn()` opens the file at `DB_PATH`, sets
+  `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000`, `PRAGMA
+  foreign_keys=ON`, and `row_factory = sqlite3.Row` (so query results are
+  dict-like, accessed by column name -- `row["field"]` -- for every query
+  in the codebase). WAL + a busy timeout are what let the proxy container
+  and the dashboard container hit the same file concurrently without a
+  real database server.
 
 ## Tables
 
@@ -709,10 +723,35 @@ clients ([AdguardTeam/AdGuardHome#8103](https://github.com/AdguardTeam/AdGuardHo
 
 ## Relationships (ER summary)
 
+**Corrected 2026-09-07** -- this section used to claim only
+`user_domains`/`domain_paths`/`user_shows` have real FK constraints,
+which stopped being true the moment the Phase 2/3 (groups/devices) and
+Phase 8 (categories/schedules) tables shipped; it was never updated
+after either. Not attempting a full ER diagram of all 28 tables here --
+see `common/db.py`'s own `SCHEMA` string for the authoritative,
+exhaustive list of every `REFERENCES`/`ON DELETE` clause. Summary by
+group:
+
 ```
 users (1) ──< user_domains >── (1) domains ──< domain_paths
   │                                  │
   └──< user_shows                    └── (self-contained: mode/kind/is_global)
+
+groups (1) ──< group_domains >── (1) domains
+devices (1) ──< device_domains >── (1) domains
+
+categories (1) ──< category_domains
+                ──< category_overrides
+                ──< category_users >── (1) users
+                ──< category_groups >── (1) groups
+                ──< category_devices >── (1) devices
+
+schedules (1) ──< schedule_categories >── (1) categories
+              ──< schedule_users >── (1) users
+              ──< schedule_groups >── (1) groups
+              ──< schedule_devices >── (1) devices
+              ──< schedule_overrides (nullable user_id/group_id/device_id --
+                                       at most one set per row)
 
 access_log: loosely references users.id via user_id (nullable, no FK
 constraint -- a log row must survive its user being deleted, so history
@@ -725,16 +764,24 @@ series_cache: standalone, keyed by Crunchyroll object_id, not related to
 any other table by a real key (series_id values it stores are compared as
 plain strings against user_shows.series_id, no FK).
 
-settings: standalone key/value, unrelated to any other table.
+settings, interception_runtime, network_events, system_events: standalone
+key/value or singleton/log tables, unrelated to any other table by a real key.
 ```
 
-Only `user_domains`, `domain_paths`, and `user_shows` have real foreign-key
-constraints (all `ON DELETE CASCADE`, all enforced live because
-`PRAGMA foreign_keys=ON` is set on every connection in `get_conn()`).
-`access_log.user_id` is intentionally just a plain nullable INTEGER with no
-`REFERENCES` clause -- deleting a user must not delete their history, and a
-row logged for an unrecognized login string never had a real `user_id` to
-reference in the first place.
+Every junction table above (`*_domains`, `category_*`, `schedule_*`) uses
+`ON DELETE CASCADE` on both sides -- deleting either party silently drops
+the association row, all enforced live because `PRAGMA foreign_keys=ON`
+is set on every connection in `get_conn()`. The one deliberate exception
+to CASCADE is `devices.user_id`/`devices.group_id`
+(`ON DELETE SET NULL`) and `device_bindings.device_id`
+(`ON DELETE SET NULL`) -- deleting a user, group, or device must
+unassign/orphan the dependent row rather than delete it outright (a
+device shouldn't vanish because its owner did; a network observation
+shouldn't be discarded because the device record it was matched to was
+removed). `access_log.user_id` is intentionally just a plain nullable
+INTEGER with no `REFERENCES` clause at all -- deleting a user must not
+delete their history, and a row logged for an unrecognized login string
+never had a real `user_id` to reference in the first place.
 
 ## Enum-like columns, exhaustively
 

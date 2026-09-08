@@ -139,14 +139,26 @@ IP, but everything else works everywhere.
 A collapsible left sidebar covers everything: **Report** (below), **Users**
 (add a person, set/reset their password, see their approved shows/sites),
 **Domains** (every domain's mode, global-vs-per-user access, per-domain
-allowed paths), **Devices** (MAC-based device tracking, user/group
-assignment, SSL-Bump toggle, group management), **Health** (only
-meaningful once the interception layer's compose profile is running --
-live status of the ARP/nftables pipeline, flagged as "stale" rather than
-a false "healthy" if a component has crashed and stopped reporting), and
-**Settings** (admin login, LAN CIDR, blocked-site experience, AdGuard
-connection + filter-refresh, stale-device cleanup, CA certificate
-download).
+allowed paths), **Categories** (subscribed or hand-curated block-lists --
+the opposite of Domains: assigning one blocks a site, rather than allowing
+it -- Adult/Gambling/Social-media-style lists plus your own), **Schedules**
+(time-based blocking, e.g. a bedtime full lockout or a homework-hours
+category block, per person/group/device or everyone), **Devices**
+(MAC-based device tracking, user/group assignment, SSL-Bump toggle, group
+management, including a group-wide **Ignore mode** for a whole shared-device
+category like guest devices), **Health** (only meaningful once the
+interception layer's compose profile is running -- live status of the
+ARP/nftables pipeline, flagged as "stale" rather than a false "healthy" if
+a component has crashed and stopped reporting, plus the exact `docker
+compose` command to start or stop each piece), **Events** (a running trail
+of real background-loop failures and recoveries -- AdGuard sync, device
+discovery, failed logins -- so a problem shows up here before you'd have to
+go digging through container logs), and **Settings** (admin login, LAN
+CIDR, blocked-site experience, AdGuard connection + filter-refresh,
+stale-device cleanup, CA certificate download). Users/Domains/Categories/
+Schedules/Devices all share the same bulk-actions toolbar for working on
+several rows at once (CSV export, delete, and per-page actions like
+enable/disable or reassigning to a group) instead of one row at a time.
 
 **Report page:**
 
@@ -302,6 +314,9 @@ common/            shared Python, flat-copied into every Python container's
                        identity resolved at all" -- see matching.device_domain_reason())
   identity.py         record_binding() etc. -- writes device_bindings rows
   adguard_client.py   HTTP client for AdGuard Home's admin API
+  rate_limit.py       in-memory per-IP sliding-window brute-force limiter,
+                      shared by the dashboard admin login and the captive
+                      portal login
 
 proxy/              the Squid container (squid-openssl, not plain squid --
                     Debian's default build can't SSL-Bump at all)
@@ -317,8 +332,10 @@ proxy/              the Squid container (squid-openssl, not plain squid --
 
 dashboard/          single-file Flask app, waitress-served
   dashboard.py    users, domains, per-domain paths, per-user shows,
-                  devices/groups, health, report + approve, settings,
-                  CA cert download -- the only place an admin edits config
+                  categories/schedules (block-list, opposite polarity from
+                  domains), devices/groups, health, events, report +
+                  approve, settings, CA cert download -- the only place an
+                  admin edits config
   block_page_server.py   tiny HTTP-only server for the friendly
                           AdGuard-blocked-domain landing page
   static/         CSS design system, vendored Chart.js, PWA manifest +

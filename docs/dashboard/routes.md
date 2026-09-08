@@ -1,6 +1,6 @@
 # Dashboard: routes and UI reference
 
-Source of truth: `dashboard/dashboard.py` (~4000 lines). This is the **entire**
+Source of truth: `dashboard/dashboard.py` (~6500 lines). This is the **entire**
 web app -- one Flask file with routes and Jinja2 templates defined as Python
 string constants, rendered via `render_template_string`. There is no separate
 JSON API, no frontend build, no static template files. To change the UI you

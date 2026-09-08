@@ -1,12 +1,23 @@
 # Phase 3 Technical Design: ARP Worker, Controller, nftables-manager
 
-Status: **design only, nothing in this document is built yet.** This is
-the concrete follow-on to the architecture decision recorded in
-[`RoadMap.md`](../../RoadMap.md) — that file has the "what and why," this
-file has the "with which libraries and roughly what code." Nothing here
-has been compiled or tested (this dev environment has no Go or Rust
-toolchain installed), so treat every code sketch below as illustrative,
-not verified.
+Status: **historical design sketch, superseded by the real, built, and
+live-validated implementation.** Everything below was written before a
+single line of `phase3/arp-worker`, `phase3/nftables-manager`, or
+`controller/` existed; Phase 3 has since been fully built, tested, and
+(as of 2026-09-02) validated live against the real household network --
+see [`docs/architecture/overview.md`](../architecture/overview.md) for
+what actually got built (file locations, exact behavior) and
+[`RoadMap.md`](../../RoadMap.md) for the "what and why" plus current
+deployment status. This document is kept as-is, unedited, as the
+original library/approach reasoning trail -- it is NOT re-audited
+against the final implementation, so treat any code sketch below as the
+plan that was followed loosely, not a description of the code as it
+exists today.
+
+Original framing, left unchanged below: "design only, nothing in this
+document is built yet... Nothing here has been compiled or tested (this
+dev environment has no Go or Rust toolchain installed), so treat every
+code sketch below as illustrative, not verified."
 
 ---
 

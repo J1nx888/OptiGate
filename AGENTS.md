@@ -145,7 +145,7 @@ proxy/      The Squid container. squid-openssl (NOT plain squid — Debian's
               authz_helper.py   external_acl_type for the decrypted HTTP-layer decision
               squid.conf.template / entrypoint.sh
 
-dashboard/  Single-file Flask app (~4000 lines, inline Jinja2), served by
+dashboard/  Single-file Flask app (~6500 lines, inline Jinja2), served by
             waitress on :8787. The ONLY place an admin edits config.
 
 defaults/seed_defaults.py   idempotent first-run seed data
@@ -218,13 +218,24 @@ These are the ones most likely to waste your time; the full list is
   string-replace back, never `git checkout`/`git stash`** — those blow away
   unrelated uncommitted work. See `docs/testing/overview.md` "Mutation-testing
   verification approach".
+- **`docker compose up -d --build dashboard` can restart `proxy` too**,
+  not just dashboard, even though `proxy` wasn't named. `dashboard`
+  declares `depends_on: [proxy]`, and any edit to `common/*.py` changes
+  BOTH images' content (both Dockerfiles `COPY` it in) — Compose then
+  recreates the now-stale `proxy` container to satisfy that dependency,
+  a brief live Squid restart nobody asked for by name. Harmless when
+  interception is off (confirmed live 2026-09-07), but call it out to
+  whoever's watching before running a `common/`-touching dashboard
+  rebuild against production.
 
 ## Working conventions
 
 - **Security is built in from the start, not retrofitted.** Flag security
   tradeoffs proactively. `docs/security/overview.md` tracks the known,
-  accepted gaps (e.g. no dashboard login rate-limiting for the LAN-only
-  model) — check it before doing anything internet-facing.
+  accepted gaps (e.g. both login surfaces DO have rate-limiting since
+  2026-09-02, but it's in-memory/per-process — resets on a restart, an
+  accepted tradeoff for the LAN-only model, not an oversight) — check it
+  before doing anything internet-facing.
 - **Keep docs current in the same change.** `README.md` describes today,
   `RoadMap.md` tracks the plan (append, don't snapshot), `docs/` is the
   reference. A behavior change that lands without a matching doc update is
