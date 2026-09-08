@@ -5494,6 +5494,26 @@ worked, and the active `q=` was confirmed carried into a Next link.
 search-box assertion test for the new `name="q"` markup instead of
 `data-filter-table`). 992 → 999 passed, 34 skipped, zero regressions.
 
+### Group-detail's "Assigned sites" pagination (2026-09-08)
+
+Natural follow-up flagged in the prior entry and requested by the
+project owner: "do the same for group-details assignment." Identical
+shape to `user_detail()`'s own "Assigned sites" pagination two entries
+up -- `group_detail()`'s domain list was a single unfiltered
+`group_domains` JOIN query with no per-row Python logic, so it gets the
+same `LIMIT`/`OFFSET` treatment (page-size picker + Prev/Next, both
+above and below the table), not Python-slicing. No search box added --
+unlike Devices/Domains, this list is naturally bounded by how many
+sites an admin has actually assigned to one group, not a potentially
+huge global or subscription-backed list, so the same reasoning that
+kept `user_detail()`'s equivalent list search-free applies here too.
+Live-verified in the dev server: assigned 87 real domains to a
+scratch group, confirmed "Assigned sites (87)", "showing 1-50 of 87",
+"Page 1 of 2", and Next correctly advancing to "Page 2 of 2".
+
+3 new tests in `tests/test_dashboard.py`. 999 → 1002 passed, 34
+skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

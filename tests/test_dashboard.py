@@ -3389,6 +3389,68 @@ def test_group_detail_shows_global_domains_separately_from_assigned(client, db_c
     assert b"Google static assets" in resp.data
 
 
+def test_group_detail_assigned_sites_paginates_with_a_default_page_size(client, db_conn):
+    """Added 2026-09-08, natural follow-up to user_detail's identical
+    "Assigned sites" pagination the day before -- same shape, same
+    reasoning: a heavily-assigned group's own site list only ever
+    grows."""
+    client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    for i in range(60):
+        client.post(
+            "/domains/add", data={"pattern": f"site{i:04d}\\.example", "mode": "splice"}, headers=_auth_header()
+        )
+    domain_ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+    client.post(
+        "/domains/bulk-access",
+        data={"domain_ids": [str(i) for i in domain_ids], "group_ids": [str(group_id)]},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/groups/{group_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Assigned sites (60)" in body
+    assert "Page 1 of 2" in body
+    assert "showing 1-50 of 60" in body
+
+
+def test_group_detail_assigned_sites_second_page_shows_the_rest(client, db_conn):
+    client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    for i in range(60):
+        client.post(
+            "/domains/add", data={"pattern": f"site{i:04d}\\.example", "mode": "splice"}, headers=_auth_header()
+        )
+    domain_ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+    client.post(
+        "/domains/bulk-access",
+        data={"domain_ids": [str(i) for i in domain_ids], "group_ids": [str(group_id)]},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/groups/{group_id}?page=2", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert "Page 2 of 2" in resp.data.decode()
+
+
+def test_group_detail_assigned_sites_small_list_shows_no_pagination_controls(client, db_conn):
+    client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    domain_id = db_conn.execute("SELECT id FROM domains").fetchone()["id"]
+    client.post(
+        "/domains/access", data={"domain_id": domain_id, "group_ids": [str(group_id)]}, headers=_auth_header()
+    )
+
+    resp = client.get(f"/groups/{group_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Page 1 of" not in resp.data
+
+
 def test_group_detail_unknown_id_redirects_with_error(client):
     resp = client.get("/groups/999999", headers=_auth_header())
     assert "error=1" in resp.headers["Location"]

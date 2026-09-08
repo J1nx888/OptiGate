@@ -5382,7 +5382,31 @@ GROUP_DETAIL_BODY = """
 </div>
 
 <div class="card">
-<h2>Assigned sites</h2>
+<h2>Assigned sites ({{ domain_count }})</h2>
+{% if domain_count %}
+<div class="toolbar" style="justify-content:space-between;">
+  <form method="get" action="{{ url_for('group_detail', group_id=g.id) }}" class="inline">
+    <input type="hidden" name="page" value="1">
+    <label class="hint" style="margin:0;">Show
+      <select name="per_page" onchange="this.form.submit()">
+        {% for opt in domains_page_size_options %}
+        <option value="{{ opt }}" {{ 'selected' if opt == domains_per_page }}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+      per page &mdash; showing {{ domains_range_start }}-{{ domains_range_end }} of {{ domain_count }}
+    </label>
+  </form>
+  {% if domains_total_pages > 1 %}
+  <span>
+    {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('group_detail', group_id=g.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+    <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
+    {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('group_detail', group_id=g.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+  </span>
+  {% endif %}
+</div>
+{% endif %}
 <div class="table-scroll">
 <table>
   <tr><th>Domain</th><th>Mode</th></tr>
@@ -5393,6 +5417,15 @@ GROUP_DETAIL_BODY = """
   {% endfor %}
 </table>
 </div>
+{% if domains_total_pages > 1 %}
+<div class="toolbar" style="justify-content:flex-end;">
+  {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('group_detail', group_id=g.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+  <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
+  {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('group_detail', group_id=g.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+</div>
+{% endif %}
 <p class="hint">Manage assignment from the <a href="{{ url_for('domains', group_id=g.id) }}">Domains</a> page -- pick the site there and check this group.</p>
 </div>
 
@@ -5406,10 +5439,23 @@ def group_detail(group_id: int):
     g = conn.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
     if g is None:
         return flash_redirect("devices", "That group no longer exists.", error=True)
+    # Paginated (added 2026-09-08, RoadMap.md's dated entry, natural
+    # follow-up to user_detail()'s identical "Assigned sites" pagination
+    # the day before -- same shape, same reasoning: a heavily-assigned
+    # group's own site list only ever grows).
+    domain_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM group_domains WHERE group_id = ?", (group_id,)
+    ).fetchone()["c"]
+    domains_page, domains_per_page = _parse_pagination(
+        request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS,
+    )
+    domains_total_pages = max(1, math.ceil(domain_count / domains_per_page))
+    domains_page = min(domains_page, domains_total_pages)
     assigned_domains = conn.execute(
         "SELECT d.pattern, d.mode FROM domains d "
         "JOIN group_domains gd ON gd.domain_id = d.id "
-        "WHERE gd.group_id = ? ORDER BY d.pattern", (group_id,),
+        "WHERE gd.group_id = ? ORDER BY d.pattern LIMIT ? OFFSET ?",
+        (group_id, domains_per_page, (domains_page - 1) * domains_per_page),
     ).fetchall()
     # Same ignored-device exclusion as user_detail()'s user_devices query
     # -- an ignored device can't actually be paused (BYPASS outranks
@@ -5436,6 +5482,10 @@ def group_detail(group_id: int):
         active_schedules=active_schedules,
         addable_devices_combo=_entity_combo(addable_devices, lambda dev: dev["label"] or dev["mac_address"]),
         global_domains=_global_domains(conn),
+        domain_count=domain_count, domains_page=domains_page, domains_per_page=domains_per_page,
+        domains_total_pages=domains_total_pages, domains_page_size_options=LIST_PAGE_SIZE_OPTIONS,
+        domains_range_start=0 if domain_count == 0 else (domains_page - 1) * domains_per_page + 1,
+        domains_range_end=min(domains_page * domains_per_page, domain_count),
     )
     return render("devices", body)
 

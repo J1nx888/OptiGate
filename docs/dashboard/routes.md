@@ -944,7 +944,13 @@ text here still said "not built" until now).
   shows a bulk-add-devices form (see `/groups/add-devices` below) and a
   `GLOBAL_SITES_CARD` listing every `is_global` domain (see that
   template's own comment in `dashboard.py` for the visibility gap this
-  closed).
+  closed). **Since 2026-09-08**: the "Assigned sites" list is paginated
+  the same way `user_detail()`'s own "Assigned sites" list is
+  (`?page=`/`?per_page=`, `LIST_PAGE_SIZE_OPTIONS`, real SQL
+  `LIMIT`/`OFFSET` on the `group_domains` JOIN) -- no search box, since
+  unlike Devices/Domains this list is bounded by how many sites an
+  admin has actually assigned to one group, not a huge global or
+  subscription-backed list.
 - `POST /groups/add-devices` -> `bulk_add_to_group()` (added 2026-09-07,
   RoadMap.md's dated entry) -- form fields `group_id`, `device_ids`
   (multi-value, from the shared `data-combobox` widget in
