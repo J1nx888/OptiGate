@@ -5804,6 +5804,98 @@ Full local pytest suite re-run clean after every code-level rename
 above: 1028 passed, 34 skipped, zero regressions (no test asserted a
 literal old container/volume/path name).
 
+### Wipe-and-redeploy test finds and permanently fixes a recurring AdGuard/avahi port conflict (2026-09-08)
+
+Immediately after Phase C shipped, project owner proceeded with the
+actual wipe-and-redeploy: `docker compose down -v --remove-orphans` on
+the real production Beelink box (after taking a fresh backup via the
+new backup/restore feature -- see that entry above -- both through the
+dashboard's own export and, since host-level SSH access was already
+available, directly via `docker exec` calling `backup.export_config()`
+against the live DB, as an extra local copy), then `git pull` +
+`docker compose up -d --build` against the fresh Phase C code. Real
+household data confirmed in the backup before wiping: 4 users, 14
+devices, 29 domains, 11 categories, 1286 manual category-domain rows.
+Two stray leftover volumes/containers from earlier interception-profile
+testing sessions (`parental-proxy-nftables-manager`/`-controller`/
+`-arp-worker`, stopped but still holding `pp_config`/`pp_run`) had to
+be removed by hand first -- `docker compose down -v` alone doesn't
+touch a different compose profile's already-stopped containers.
+
+**The fresh build/deploy itself succeeded cleanly** -- new
+`optigate-*`-named images, containers, and volumes
+(`parental_proxy_optigate_config` etc., the `parental_proxy_` prefix
+coming from the still-unchanged host directory name, not touched by
+this rename) all created from scratch with zero build errors. This is
+the actual proof the project owner was after: a stranger cloning this
+repo fresh and running `docker compose up -d --build` gets a working
+stack.
+
+**But `optigate-adguard` came up crash-looping** (`listen udp
+0.0.0.0:5353: bind: address already in use`) -- the exact same
+`avahi-daemon`/mDNS port conflict already documented earlier in this
+file (2026-09-07, "Soak test paused after ~15 minutes" section and the
+entry right after it), which the project owner had already fixed once
+that day via `sudo systemctl disable --now avahi-daemon`. It came back
+anyway -- most likely `avahi-daemon.socket`'s own socket activation
+outliving the plain service unit's `disable`, though not confirmed
+without deeper host access. Project owner's own framing, and the
+reason this got a real fix instead of "disable it again": **this will
+keep coming up, for this box and for anyone else who deploys the
+software** -- `avahi-daemon` is a common default package on many Linux
+distributions, not a household-specific quirk, so hardcoding AdGuard's
+DNS listener onto mDNS's own well-known port was always going to be a
+landmine for someone.
+
+**The real fix**: made the port genuinely configurable instead of
+picking a different hardcoded number. `docker-compose.yml`'s
+`ADGUARD_DNS_PORT` changed from a bare `5353` to
+`${ADGUARD_DNS_PORT:-5354}` (new default, still just a default -- a
+box where even `5354` collides with something can override it in
+`.env`, now documented there). `phase3/nftables-manager`'s Go side
+had the exact same problem one layer down: `internal/nft/
+knftables_adapter.go`'s `baselineRules` was a hardcoded `:5353`
+literal with no way to change it at all. Restructured as
+`(*Manager).baselineRules()`, a method reading a new `dnsRedirectPort`
+field (zero value falls back to a new exported
+`DefaultDNSRedirectPort = 5354`, so every existing test's plain
+`Manager{...}` struct literal keeps working unchanged with zero edits
+needed), wired to a new `-dns-redirect-port` CLI flag on
+`pp-nftables-manager` that `docker-compose.yml` feeds the same
+`${ADGUARD_DNS_PORT:-5354}` value into, so AdGuard and the (currently
+disabled) interception profile can never silently drift onto different
+ports. Two existing tests that hardcoded the literal `":5353"` string
+for comparison (`TestBaselineRules_RedirectsDNSOverTLS`,
+`TestEnsureBaseline_InstallsDNSOverTLSRedirect_AgainstFake`) updated to
+reference `DefaultDNSRedirectPort` instead of a literal, so they stay
+meaningful if the default ever changes again.
+
+No Go toolchain available locally to run `go test`/`go vet` directly
+(same long-standing sandbox limitation this project has always had for
+its Go components) -- verified instead by having the production
+Beelink box (which has Docker, hence a Go toolchain inside the build
+stage) actually build the `nftables-manager` image after pulling this
+fix; a real `go build` failure would have failed that build outright.
+The interception profile itself was NOT started (still deliberately
+off) -- this only proves the code compiles, not that the new flag
+behaves correctly against a real kernel; that's still owed a real
+verification pass whenever the interception profile is actually turned
+back on.
+
+Docs updated to match: `.env.example` gained a real `ADGUARD_DNS_PORT`
+entry (previously not user-facing at all, since the old value was
+hardcoded), `docs/deployment/setup.md`'s port table and env-var
+reference table, `docs/security/overview.md`'s architecture note.
+`docs/design/phase3-technical-design.md` (explicitly frozen, "kept
+as-is, unedited") and this file's own prior dated entries describing
+the original 2026-09-07 avahi incident deliberately left untouched --
+accurate history, not superseded by this fix.
+
+After `optigate-adguard` was rebuilt with the port fix and restarted,
+it came up clean. The full restore-from-backup step (proving the
+other half of the wipe-and-redeploy plan -- getting the real household
+data back) follows in the next entry.
+
 ---
 
 ## Cross-cutting: security-by-design

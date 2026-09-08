@@ -41,9 +41,16 @@ func main() {
 		"bootstrap-only", false,
 		"Create the baseline table/sets/chain and exit, without a reconciliation loop.",
 	)
+	dnsRedirectPort := flag.Int(
+		"dns-redirect-port", nft.DefaultDNSRedirectPort,
+		"Local port the baseline ruleset redirects DNS/DoT traffic to (AdGuard's own DNS listener, "+
+			"docker-compose.yml's ADGUARD_DNS_PORT). Added 2026-09-08 after a real deployment found the "+
+			"previous hardcoded 5353 conflicting with avahi-daemon (mDNS), a common default service on "+
+			"many Linux distributions -- keep this in sync with ADGUARD_DNS_PORT, whatever it's set to.",
+	)
 	flag.Parse()
 
-	mgr, err := nft.New()
+	mgr, err := nft.New(*dnsRedirectPort)
 	if err != nil {
 		log.Fatalf("open nftables interface (needs CAP_NET_ADMIN): %v", err)
 	}

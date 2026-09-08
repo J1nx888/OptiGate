@@ -65,7 +65,15 @@ services:
       # wired up (not yet in this compose file -- see RoadMap.md).
       - ADGUARD_USERNAME=${ADGUARD_USERNAME:-admin}
       - ADGUARD_PASSWORD=${ADGUARD_PASSWORD:-}
-      - ADGUARD_DNS_PORT=5353
+      # 5354, not 5353: avahi-daemon (mDNS), a common default service on
+      # many Linux distributions, already binds 5353 -- a real deployment
+      # found this the hard way (2026-09-08). Genuinely overridable, not
+      # just a different hardcoded number, since some other box may have
+      # its own unrelated thing sitting on 5354 too -- if so, override it
+      # here AND keep nftables-manager's own -dns-redirect-port below in
+      # sync (the interception profile has no way to discover this value
+      # automatically; the two must agree by hand).
+      - ADGUARD_DNS_PORT=${ADGUARD_DNS_PORT:-5354}
       # First-run only: subscribes to a curated set of uBlockOrigin/uAssets
       # domain-blocking lists (badware/privacy/resource-abuse/unbreak/
       # filters), layered on top of AdGuard's own default filter (already
@@ -233,6 +241,9 @@ services:
     command:
       - -db-path=/config/optigate.db
       - -poll-interval=${NFTABLES_POLL_INTERVAL:-5s}
+      # Must match adguard's own ADGUARD_DNS_PORT above -- see that
+      # variable's own comment.
+      - -dns-redirect-port=${ADGUARD_DNS_PORT:-5354}
 
   controller:
     build:

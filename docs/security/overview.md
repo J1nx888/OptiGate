@@ -863,7 +863,8 @@ all, with no LAN-range check or credential behind it.
 The new `adguard` service (2026-08-30, see §3's hard-deny note below)
 runs with `network_mode: host` for the same underlying reason —
 `phase3/nftables-manager`'s DNS-tier redirect (`udp/tcp dport 53
-redirect to :5353`) also fires in the host's own namespace, and
+redirect to` `ADGUARD_DNS_PORT`, default `5354`) also fires in the
+host's own namespace, and
 AdGuard's own per-client `$client=` rules need to see devices' real LAN
 IPs to mean anything at all. Its own admin UI (separate from this
 project's dashboard) defaults to `127.0.0.1`-only via `ADGUARD_WEB_BIND`,

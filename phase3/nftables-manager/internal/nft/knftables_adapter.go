@@ -35,7 +35,31 @@ type Manager struct {
 	// creates and manages -- see ensureDockerUserException's own doc
 	// comment for why this single, narrow exception exists.
 	dockerUserNft knftables.Interface
+
+	// dnsRedirectPort is the local port baselineRules() redirects
+	// port-53/853 traffic to -- AdGuard's own DNS listener. Zero value
+	// (every existing test's plain Manager{...} struct literal, and any
+	// caller that doesn't care) falls back to DefaultDNSRedirectPort in
+	// baselineRules() below, so this field is optional in practice, not
+	// just in name. Added 2026-09-08: a real deployment found
+	// avahi-daemon (mDNS) already squatting the previous hardcoded
+	// :5353 default -- a port conflict any other user running this on a
+	// typical Debian/Ubuntu box (avahi is a common default package) was
+	// always going to hit sooner or later, not a one-off. Making this
+	// genuinely configurable, not just picking a different hardcoded
+	// number, is the actual fix -- see docker-compose.yml's
+	// ADGUARD_DNS_PORT and this binary's own -dns-redirect-port flag.
+	dnsRedirectPort int
 }
+
+// DefaultDNSRedirectPort is used whenever a Manager's dnsRedirectPort is
+// left at its zero value -- see that field's own comment. 5354, not
+// 5353: the latter is IANA-registered for mDNS and a common default
+// package (avahi-daemon) on many Linux distributions already binds it,
+// so picking a merely-different-by-convention neighbor keeps this
+// project from being the second thing fighting over the same
+// well-known port on someone else's box.
+const DefaultDNSRedirectPort = 5354
 
 // allManagedSets is every nftables set this package creates and reads
 // -- policy.AllSetNames' four mutually-exclusive classes plus the
@@ -50,8 +74,9 @@ var allManagedSets = append(append([]policy.SetName{}, policy.AllSetNames...), p
 // New opens a knftables interface for the `inet` family's
 // "optigate" table, plus a second interface scoped to Docker's
 // own "ip filter" table (see ensureDockerUserException). Requires
-// CAP_NET_ADMIN.
-func New() (*Manager, error) {
+// CAP_NET_ADMIN. dnsRedirectPort of 0 means DefaultDNSRedirectPort --
+// see that field's own comment.
+func New(dnsRedirectPort int) (*Manager, error) {
 	nft, err := knftables.New(knftables.InetFamily, "optigate")
 	if err != nil {
 		return nil, fmt.Errorf("open knftables interface: %w", err)
@@ -60,7 +85,7 @@ func New() (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open knftables interface for docker's ip filter table: %w", err)
 	}
-	return &Manager{nft: nft, dockerUserNft: dockerUserNft}, nil
+	return &Manager{nft: nft, dockerUserNft: dockerUserNft, dnsRedirectPort: dnsRedirectPort}, nil
 }
 
 // EnsureBaseline creates the table, the five named sets (allManagedSets), and the
@@ -107,7 +132,7 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 	// (empty chain), and what makes a restart not duplicate rules.
 	tx.Flush(&knftables.Chain{Name: "prerouting"})
 
-	for _, rule := range baselineRules {
+	for _, rule := range m.baselineRules() {
 		tx.Add(&knftables.Rule{Chain: "prerouting", Rule: rule})
 	}
 
@@ -272,18 +297,40 @@ func (m *Manager) ensureDockerUserException(ctx context.Context) error {
 // locally-terminating redirects above; anything else (e.g. a raw HTTPS
 // request bypassing the captive portal) is meant to fail, the same as
 // any real-world captive portal.
-var baselineRules = []string{
-	"ip saddr @bypass_v4 ct mark set 0x1 return",
-	"ip saddr @bump_v4 tcp dport 80 redirect to :3129",
-	"ip saddr @bump_v4 tcp dport 443 redirect to :3130",
-	"ip saddr @authenticated_v4 udp dport 53 redirect to :5353",
-	"ip saddr @authenticated_v4 tcp dport 53 redirect to :5353",
-	"ip saddr @authenticated_v4 tcp dport 853 redirect to :5353",
-	"ip saddr @authenticated_v4 ct mark set 0x1",
-	"ip saddr @unauthenticated_v4 udp dport 53 redirect to :5353",
-	"ip saddr @unauthenticated_v4 tcp dport 853 redirect to :5353",
-	"ip saddr @unauthenticated_v4 tcp dport 80 redirect to :3131",
-	"ip saddr @quarantine_v4 counter drop",
+//
+// The DNS/DoT redirect target (:5353 below, historically -- see
+// DefaultDNSRedirectPort's own comment on why that changed) comes from
+// (*Manager).baselineRules() below, not this literal slice -- this
+// package-level var exists only so every existing test that references
+// `baselineRules` directly by name keeps working unchanged, built via a
+// zero-value Manager so it reflects DefaultDNSRedirectPort exactly like
+// any other caller that doesn't override the port.
+var baselineRules = (&Manager{}).baselineRules()
+
+// baselineRules builds the redirect ruleset using this Manager's own
+// dnsRedirectPort (DefaultDNSRedirectPort if left at zero -- see that
+// field's own comment). A method, not a package-level literal, so the
+// same box's chosen port (e.g. because :5354 also collided with
+// something) is reflected everywhere this ruleset gets used, not just
+// baked in once at compile time.
+func (m *Manager) baselineRules() []string {
+	port := m.dnsRedirectPort
+	if port == 0 {
+		port = DefaultDNSRedirectPort
+	}
+	return []string{
+		"ip saddr @bypass_v4 ct mark set 0x1 return",
+		"ip saddr @bump_v4 tcp dport 80 redirect to :3129",
+		"ip saddr @bump_v4 tcp dport 443 redirect to :3130",
+		fmt.Sprintf("ip saddr @authenticated_v4 udp dport 53 redirect to :%d", port),
+		fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 53 redirect to :%d", port),
+		fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 853 redirect to :%d", port),
+		"ip saddr @authenticated_v4 ct mark set 0x1",
+		fmt.Sprintf("ip saddr @unauthenticated_v4 udp dport 53 redirect to :%d", port),
+		fmt.Sprintf("ip saddr @unauthenticated_v4 tcp dport 853 redirect to :%d", port),
+		"ip saddr @unauthenticated_v4 tcp dport 80 redirect to :3131",
+		"ip saddr @quarantine_v4 counter drop",
+	}
 }
 
 // ReadActual reads the live membership of all five sets (allManagedSets)

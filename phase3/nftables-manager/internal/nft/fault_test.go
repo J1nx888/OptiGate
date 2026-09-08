@@ -3,6 +3,7 @@ package nft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"sigs.k8s.io/knftables"
@@ -234,8 +235,8 @@ func TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls(t *testing.T) {
 // removal of these two lines would be caught at.
 func TestBaselineRules_RedirectsDNSOverTLS(t *testing.T) {
 	want := []string{
-		"ip saddr @authenticated_v4 tcp dport 853 redirect to :5353",
-		"ip saddr @unauthenticated_v4 tcp dport 853 redirect to :5353",
+		fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 853 redirect to :%d", DefaultDNSRedirectPort),
+		fmt.Sprintf("ip saddr @unauthenticated_v4 tcp dport 853 redirect to :%d", DefaultDNSRedirectPort),
 	}
 	for _, w := range want {
 		found := false
@@ -409,8 +410,8 @@ func TestEnsureBaseline_InstallsDNSOverTLSRedirect_AgainstFake(t *testing.T) {
 		t.Fatalf("ListRules: %v", err)
 	}
 
-	wantAuth := "ip saddr @authenticated_v4 tcp dport 853 redirect to :5353"
-	wantUnauth := "ip saddr @unauthenticated_v4 tcp dport 853 redirect to :5353"
+	wantAuth := fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 853 redirect to :%d", DefaultDNSRedirectPort)
+	wantUnauth := fmt.Sprintf("ip saddr @unauthenticated_v4 tcp dport 853 redirect to :%d", DefaultDNSRedirectPort)
 	var gotAuth, gotUnauth bool
 	for _, r := range rules {
 		switch r.Rule {

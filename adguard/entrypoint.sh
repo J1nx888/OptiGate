@@ -124,8 +124,10 @@ done
 # operator-supplied ADGUARD_USERNAME/ADGUARD_PASSWORD containing either
 # doesn't break the request body. Web port is always left at the
 # image's own default (3000) -- only DNS gets a non-default port
-# (5353, matching phase3/nftables-manager's baselineRules redirect
-# target) -- so this script never has to guess which port to poll
+# (ADGUARD_DNS_PORT, default 5354 -- matching
+# phase3/nftables-manager's own -dns-redirect-port flag, see
+# docker-compose.yml's own comment on keeping the two in sync) -- so
+# this script never has to guess which port to poll
 # above, and there's no live web-port change to verify (DNS's port DID
 # need confirming: the running process picks up the new DNS port
 # immediately after configure, live, with no restart -- confirmed
@@ -149,7 +151,7 @@ PASSWORD_JSON=$(_json_escape "$ADGUARD_PASSWORD")
 # not). ADGUARD_WEB_BIND is applied as a second step below instead.
 wget -q -O /dev/null \
   --header 'Content-Type: application/json' \
-  --post-data "{\"web\":{\"ip\":\"0.0.0.0\",\"port\":3000},\"dns\":{\"ip\":\"0.0.0.0\",\"port\":${ADGUARD_DNS_PORT:-5353}},\"username\":\"$USERNAME_JSON\",\"password\":\"$PASSWORD_JSON\"}" \
+  --post-data "{\"web\":{\"ip\":\"0.0.0.0\",\"port\":3000},\"dns\":{\"ip\":\"0.0.0.0\",\"port\":${ADGUARD_DNS_PORT:-5354}},\"username\":\"$USERNAME_JSON\",\"password\":\"$PASSWORD_JSON\"}" \
   http://127.0.0.1:3000/control/install/configure
 
 if [ ! -f "$CONF" ]; then
@@ -259,5 +261,5 @@ fi
 
 _wait_for_control_api || echo "AdGuard Home did not respond to its own control API within 30s -- continuing to wait on it anyway" >&2
 _grant_dashboard_access
-echo "AdGuard Home configured (DNS on :${ADGUARD_DNS_PORT:-5353}, admin UI on 0.0.0.0:3000)." >&2
+echo "AdGuard Home configured (DNS on :${ADGUARD_DNS_PORT:-5354}, admin UI on 0.0.0.0:3000)." >&2
 wait "$PID"
