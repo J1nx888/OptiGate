@@ -6076,7 +6076,11 @@ REPORT_BODY = """
     </td>
     <td><code>{{ row.domain }}</code></td>
     <td>{{ row.series_name or row.series_id or row.path or '' }}</td>
-    <td><span class="badge {{ 'allowed' if row.allowed else 'blocked' }}">{{ 'allowed' if row.allowed else 'blocked' }}</span></td>
+    <td>
+      <span class="badge {{ 'allowed' if row.allowed else 'blocked' }}">{{ 'allowed' if row.allowed else 'blocked' }}</span>
+      {% set label = reason_label(row.reason) %}
+      {% if label %}<br><span class="hint" style="font-size:.8em;">{{ label }}</span>{% endif %}
+    </td>
     <td>
       {% if not row.allowed and row.user_id %}
       <form class="inline" method="post" action="{{ url_for('approve_from_report') }}">
@@ -6193,6 +6197,48 @@ def _report_redirect_kwargs(source) -> dict:
     return kwargs
 
 
+# Fixed 2026-09-08, real gap found live (RoadMap.md's dated entry,
+# project owner's own example: "speedtest.net was blocked on Matthews
+# device but I need to know WHY"): access_log.reason was already
+# populated with a specific, real value for essentially every ALLOW
+# and DENY decision this project makes (authz_helper.py's decide() and
+# _decide_crunchyroll(), block_page_server.py's DNS-tier denial log,
+# common/matching.py's device_domain_reason()) -- the gap was never
+# missing data, it was that the Report page's Activity table only ever
+# rendered a bare "allowed"/"blocked" badge and never looked at
+# row.reason at all. This is every reason code that actually gets
+# logged anywhere in the codebase (grepped for `reason="` and
+# `reason=reason`/ternaries across proxy/, dashboard/, common/) --
+# keep this in sync if a new one is ever added; an unrecognized code
+# falls back to showing the raw value verbatim (REPORT_BODY's own
+# `or row.reason` fallback) rather than silently hiding it.
+_ACCESS_LOG_REASON_LABELS = {
+    # Allowed
+    "global_domain": "globally allowed domain",
+    "user_domain": "assigned directly to this user",
+    "group_domain": "assigned to this device's group",
+    "device_domain": "assigned directly to this device",
+    "show_approved": "this show is approved",
+    # Blocked
+    "outside_lan": "request didn't come from the configured LAN range",
+    "unknown_domain": "not a domain configured anywhere in this system",
+    "not_bump_mode": "domain isn't in bump mode (unconfigured, or splice-only)",
+    "domain_not_assigned": "domain exists, but isn't assigned to this user/group/device",
+    "show_requires_user": "Crunchyroll show rules need a real user, this device has none assigned",
+    "path_not_allowed": "this specific path isn't in the allowed list for this domain",
+    "blocked_shape": "Crunchyroll URL shape this project deliberately never allows",
+    "resolution_failed": "couldn't resolve show/episode metadata to check it",
+    "show_not_approved": "this specific show hasn't been approved for this user",
+    "dns_tier_denied": "blocked at the DNS/category layer (AdGuard) before reaching the proxy",
+}
+
+
+def _reason_label(reason: str | None) -> str | None:
+    if not reason:
+        return None
+    return _ACCESS_LOG_REASON_LABELS.get(reason, reason)
+
+
 @app.route("/report")
 @require_admin
 def report():
@@ -6282,6 +6328,7 @@ def report():
     all_devices = conn.execute("SELECT * FROM devices ORDER BY COALESCE(label, mac_address)").fetchall()
     body = render_template_string(
         REPORT_BODY, rows=rows, all_users=all_users, pending_requests=pending_requests,
+        reason_label=_reason_label,
         report_target=report_target, report_filter_combo=_report_filter_combo(all_users, all_groups, all_devices),
         filter_status=filter_status, days=days, day_options=REPORT_DAY_OPTIONS,
         filters_active=bool(filtered_user or filtered_group or filtered_device or filter_status or days != REPORT_DEFAULT_DAYS),

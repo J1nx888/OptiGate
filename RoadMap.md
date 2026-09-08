@@ -6364,24 +6364,46 @@ or their explicit real-time approval in a live conversation turn.**
    owner spot-checking `http://optigate.home` (bare, no port) themselves
    once back, to confirm it now reads clearly and behaves as expected
    on their own devices, but this is otherwise considered closed.
-5. **The Report page shows a domain was blocked but not *why*.**
-   Concrete example given: `speedtest.net` blocked on Matthew's device,
-   no indication whether that was a category match, a plain
-   not-assigned domain, a path restriction, or something else. Real
-   gap, and NOT a simple "just display an existing hidden field" fix --
-   `access_log.reason` already exists and is populated by
-   `common/matching.py`'s `device_domain_reason()`, but that function's
-   own reason values (`global_domain`/`user_domain`/`group_domain`/
-   `device_domain`) explain why something was ALLOWED, not why it was
-   BLOCKED, and category-tier blocks happen at the DNS layer via
-   AdGuard's own `$client=` custom rules (`controller/adguard_sync.py`)
-   *before* Squid ever sees the connection at all -- meaning a
-   category-blocked domain may never reach `access_log`'s own
-   Squid-driven logging path in the first place. Needs real
-   investigation into what's actually loggable and where (Squid-side
-   `access_log.reason` vs. AdGuard's own query log vs. something new)
-   before designing the fix, not an assumption that the data already
-   exists somewhere just waiting to be displayed.
+5. **DONE (implemented + tested 2026-09-08, while the project owner was
+   away): the Report page shows a domain was blocked but not *why*.**
+   This entry originally guessed the fix would need real new logging
+   infrastructure -- **that guess was wrong, corrected by actually
+   checking the live production DB before assuming.** `access_log.reason`
+   was ALREADY populated with a specific, real value for essentially
+   every allow AND deny decision this project makes:
+   `proxy/authz_helper.py`'s `decide()`/`_decide_crunchyroll()` log
+   `outside_lan`/`unknown_domain`/`not_bump_mode`/`domain_not_assigned`/
+   `show_requires_user`/`path_not_allowed`/`blocked_shape`/
+   `resolution_failed`/`show_not_approved` for denials (this runs for
+   BOTH plain HTTP, always, AND bump-mode HTTPS -- not only the narrow
+   "already allowed" case this entry originally assumed was the whole
+   story), and `dashboard/block_page_server.py` already logs
+   `dns_tier_denied` for the DNS/AdGuard-tier block page hit. Confirmed
+   directly against the live production `access_log`: a REAL blocked
+   row for `www.netflix.com` with `reason='unknown_domain'` was already
+   sitting there, from earlier today, despite `block_page_mode` being
+   `'terminate'` (plain-HTTP denials go through `authz_helper.py`
+   regardless of that setting -- it only gates the HTTPS/ssl_bump
+   side). **The actual gap was purely a template one**: the Report
+   page's Activity table rendered a bare "allowed"/"blocked" badge and
+   never looked at `row.reason` at all. Fixed: new
+   `_ACCESS_LOG_REASON_LABELS` dict + `_reason_label()` helper in
+   `dashboard.py` (translates every reason code this codebase actually
+   logs into a real sentence, falls back to the raw code verbatim for
+   anything unmapped rather than hiding it), wired into `REPORT_BODY`'s
+   Result column as a small hint line under the badge. 2 new tests.
+   This directly resolves item 9's netflix.com confusion too --
+   the Report page will now say "not a domain configured anywhere in
+   this system" right on the row, rather than leaving that to be
+   reverse-engineered from the database by hand. The one thing this
+   entry's original caution about DNS-tier blocks got right and still
+   applies: a domain AdGuard denies via a bare `0.0.0.0`/NXDOMAIN
+   answer with NO rewrite to this box's own block page never generates
+   any HTTP hit here at all, so genuinely nothing gets logged for that
+   specific path -- `dns_tier_denied` only covers the subset that hits
+   the friendly block page (requires `DASHBOARD_URL` configured, which
+   this deployment already has). Not deployed live yet, same reasoning
+   as items 1/2/4/10/12 above.
 6. **SSL-Bump enabled on Matthew's device, but nothing is actually
    getting bumped.** Reported first against Crunchyroll, then the user
    clarified it's not site-specific -- Asurascans doesn't get bumped
@@ -6474,6 +6496,32 @@ or their explicit real-time approval in a live conversation turn.**
    out of the bump_v4 redirect, or a Squid-side always-allow rule for
    `optigate.home` specifically) once the test window is over, not a
    quick patch decided under time pressure.
+
+   **CONFIRMED, not just hypothesized (2026-09-08, while the project
+   owner was away):** read `baselineRules()` directly --
+   `"ip saddr @bump_v4 tcp dport 80 redirect to :3129"` matches on
+   SOURCE IP and destination PORT only, no destination-IP exception
+   for the box's own address. So yes, a bump_v4 member's request to
+   `http://optigate.home` (which resolves to this box's own IP) is
+   unconditionally redirected into Squid, which then applies its
+   normal domain-assignment check to the literal string
+   `optigate.home` as if it were any other internet domain -- correctly
+   denying it, by Squid's own rules, as `unknown_domain`. Two real fix
+   paths, neither attempted here (a genuine design choice, not a
+   quick patch, and not safely live-testable without interception
+   running): (a) nftables-side -- exclude `ip daddr <this box's LAN
+   IP>` from the bump_v4/authenticated_v4 redirect rules, which needs
+   `nftables-manager` to actually know its own host IP (a new
+   `-self-ip` flag, mirroring `-dns-redirect-port`'s own precedent); or
+   (b) Squid-side -- a new `sni_helper.py`/`authz_helper.py`-style
+   dynamic external-ACL check against `db.optigate_hostname(conn)`
+   that unconditionally splices/allows a match, bypassing the normal
+   domain-assignment gate for this one synthetic hostname specifically.
+   (a) is more architecturally correct (traffic addressed at the
+   gateway itself never needed Squid's involvement in the first place)
+   but touches privileged Go code; (b) is a smaller, more contained
+   change but adds a special case to Squid's decision chain. Worth
+   deciding deliberately, not defaulting to whichever is less code.
 8. **The "this page is blocked" message doesn't display for any
    blocked page.** User's own hypothesis, worth taking seriously: this
    could be an SSL/TLS limitation, not a bug in the block-page code
@@ -6487,6 +6535,31 @@ or their explicit real-time approval in a live conversation turn.**
    turn out to be a direct symptom of item 6's root cause rather than
    an independent bug -- needs re-testing AFTER 6 is fixed before
    concluding there's a second, separate problem here.
+
+   **LIKELY EXPLAINED, a config choice not a bug (2026-09-08, while the
+   project owner was away):** checked the live production `settings`
+   table directly -- `block_page_mode` is `'terminate'`, which is this
+   deployment's current value (also the documented default). The
+   Settings page's own option text says exactly what this means:
+   "Just fail the connection (default -- safe for devices that haven't
+   installed the certificate yet)" vs. the other option, "Show a
+   friendly page (requires the CA certificate already trusted on the
+   device)." `squid.conf.template`'s own comment confirms this isn't
+   an accident: `'terminate'` deliberately means "nothing here is ever
+   decrypted" for the catch-all/unconfigured-domain case, by design, as
+   the safer default for a household with devices that may not all
+   have the CA cert trusted yet. Since most of the modern web is
+   HTTPS-only, this setting alone would explain "no nice message for
+   basically any blocked page" almost completely, independent of
+   item 6's still-unresolved bump question -- and Matthew's device, at
+   least, already has bump_enabled=1 (meaning it should already trust
+   the CA cert, or bump wouldn't work for it at all regardless of this
+   setting), so it's a real candidate to safely flip to `'redirect'`
+   for. Not changed here -- this is a genuine setting the project
+   owner should choose deliberately (it's exactly the tradeoff the UI
+   already describes), not something to flip unilaterally while
+   unsupervised, and it interacts with item 6 in ways worth confirming
+   live rather than assuming.
 9. **LIKELY NOT A BUG (investigated 2026-09-08, while the project owner
    was away): netflix.com is blocked, but no category is configured to
    block it.** Checked the live production DB directly: `domains` has

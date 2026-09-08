@@ -844,6 +844,42 @@ def test_report_page_falls_back_to_raw_ip_for_a_never_recognized_device(client, 
     assert b"192.168.1.77" in resp.data
 
 
+def test_report_page_explains_why_a_blocked_row_was_blocked(client, db_conn):
+    """Real gap found live (RoadMap.md's dated entry, project owner's
+    own example: speedtest.net blocked on Matthew's device with no
+    indication why). access_log.reason was already populated with a
+    real value for essentially every allow/deny decision this project
+    makes -- the bug was that the Activity table only ever rendered a
+    bare "blocked" badge and never looked at row.reason at all."""
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (datetime('now'), NULL, '(unauthenticated)', 'netflix.com', NULL, 0, 'unknown_domain')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"not a domain configured anywhere in this system" in resp.data
+
+
+def test_report_page_shows_the_raw_reason_code_for_an_unrecognized_value(client, db_conn):
+    """_reason_label() falls back to the raw code rather than silently
+    hiding an unmapped value -- e.g. a future reason this label map
+    hasn't been updated for yet should still show SOMETHING, not
+    nothing."""
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (datetime('now'), NULL, '(unauthenticated)', 'example.com', NULL, 0, 'brand_new_reason_code')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"brand_new_reason_code" in resp.data
+
+
 def test_report_page_shows_dash_for_a_row_with_no_device(client, db_conn):
     db_conn.execute(
         "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
