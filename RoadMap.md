@@ -6248,7 +6248,7 @@ still watching for the "internet super slow" report specifically,
 which has no confirmed root cause yet and needs the project owner's
 own real-world usage to actually confirm one way or the other.
 
-### Ten more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
+### Eleven more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
 
 Project owner asked to log these now (so they survive regardless of
 how long this window runs or any context/session boundary in between)
@@ -6401,6 +6401,30 @@ test.
     actually configured in AdGuard itself, e.g. after AdGuard's admin
     password was changed directly rather than through the dashboard?).
     Don't guess at a fix without first confirming which side is stale.
+11. **Device MAC `76:33:41:e8:8a:0e` still has full internet access and
+    isn't getting blocked/intercepted at all.** Checked read-only
+    against the live production DB (2026-09-08, mid soak-test): this
+    MAC has ZERO footprint anywhere -- no row in `devices`, no
+    `device_bindings`, no `network_events`, no `system_events`
+    mentioning it. This is a materially different (and more concerning)
+    class of gap than items 1-10 above: it isn't a misclassified or
+    misconfigured device sitting in `unauthenticated`/`bypass`/etc, it's
+    a device the ARP-worker's own discovery has apparently never seen
+    at all -- so no desired-policy entry, no nftables set membership,
+    and no interception of any kind was ever computed for it in the
+    first place. Needs checking, once the test window is over: whether
+    this device is actually on the same L2 segment the ARP-worker scans
+    (a different VLAN/SSID would explain a total blind spot by design,
+    not a bug); whether the ARP-worker's scan range/interval is missing
+    it for some other reason (arrived after the last full scan and
+    hasn't triggered a gratuitous-ARP re-scan yet?); or whether there's
+    a genuine gap in how new devices get onboarded into `devices` in
+    the first place. This is the kind of finding that could mean other
+    devices on the network are in the same fully-invisible state
+    without anyone noticing -- worth prioritizing a full-network sweep
+    (compare ARP-worker's own view of "what's on this LAN right now"
+    against `devices`) once investigation resumes, not just fixing this
+    one MAC.
 
 ---
 
