@@ -5892,9 +5892,79 @@ the original 2026-09-07 avahi incident deliberately left untouched --
 accurate history, not superseded by this fix.
 
 After `optigate-adguard` was rebuilt with the port fix and restarted,
-it came up clean. The full restore-from-backup step (proving the
-other half of the wipe-and-redeploy plan -- getting the real household
-data back) follows in the next entry.
+it came up clean: fresh AdGuard bootstrap, all uBlockOrigin/uAssets
+filter lists subscribed successfully, listening on `:5354` (confirmed
+via `dig @127.0.0.1 -p 5354 doubleclick.net` correctly returning
+`0.0.0.0`). Also caught and verified NOT a regression along the way:
+restarting `optigate-proxy` after manually placing the restored CA
+cert/key printed an old, already-in-the-log "Generating a new
+SSL-bump CA certificate..." line from the container's very first boot
+(Docker's default log driver appends across restarts, it doesn't
+truncate) -- momentarily looked like the restore had been silently
+overwritten, but the cert's own SHA-256 fingerprint before and after
+the restart matched exactly (`06:A9:D1:9F:...`), and `docker logs
+--since 30s` showed zero new output from the restart itself, confirming
+`entrypoint.sh` correctly found the existing files and skipped
+generation as designed.
+
+### Wipe-and-redeploy completed: real household data restored (2026-09-08)
+
+With all three default containers (`optigate-proxy`,
+`optigate-adguard`, `optigate-dashboard`) healthy under the new names
+and the port fix live, restored the pre-wipe backup (taken from the
+old, still-running stack before any of this started -- see the entry
+above) directly via `common/backup.py`'s `restore_config()`, run
+through `docker exec` against the live database (same mechanism used
+to take the backup in the first place, bypassing the need for the
+dashboard's own HTTP Basic Auth credentials entirely -- host-level
+Docker access was already available). The CA certificate/key were
+restored the same way, copied directly into the fresh `/config/ssl_cert/`
+on the `optigate_config` volume.
+
+**Verified for real, not just "the restore call didn't error"**:
+- All 4 real users back (`emily`, `jacob`, `joshua`, `matthew`), 14
+  devices, 29 domains, all 11 categories (`AI`, `Adult`, `Drugs`,
+  `Facebook`, `Fraud & Scams`, `Gambling`, `Manga`, `TikTok`,
+  `Twitter/X`, `Weapons`, `WhatsApp`).
+- Settings correctly restored: `admin_username=admin`,
+  `household_time_zone=US/Eastern`, `local_network=192.168.1.0/24`,
+  `adguard_username=admin` -- the real household configuration, not
+  defaults.
+- **CA certificate continuity confirmed**: SHA-256 fingerprint
+  identical before and after the entire wipe-and-redeploy
+  (`06:A9:D1:9F:27:51:3D:1A:0D:A0:28:EF:15:E8:A9:BF:71:F8:6B:91:B3:69:
+  39:39:01:D7:12:13:0D:73:5A:ED`) -- the actual point of including the
+  CA cert in the backup in the first place: no device needs to re-trust
+  anything after this redeploy.
+- Dashboard and AdGuard's own admin UI both correctly back to
+  requiring authentication (401 on an unauthenticated request) --
+  neither left wide open by the fresh bootstrap.
+
+Sensitive scratch files (the backup zip, the extracted CA private key)
+cleaned up from the production box's `/tmp` and the container
+filesystems afterward -- a local copy of the backup zip remains on the
+project owner's own machine as a genuine, verified, restorable backup
+of the pre-wipe state, not just a disaster-recovery artifact this
+session generated and discarded.
+
+**Known pre-existing gap, not introduced by this wipe**: the
+`optigate.home` memorable-hostname DNS rewrite
+(`controller/adguard_sync.py`'s `sync_optigate_rewrite()`) is normally
+pushed by the `controller` service, which only runs under the
+`interception` profile -- deliberately still off. Per the existing
+Phase 21 note ("the AdGuard rewrite was pushed by hand since
+controller/interception is still deliberately off, so it isn't
+self-healing yet"), this needs the same one-time manual push again now
+that AdGuard is a fresh instance with no rewrites configured -- not
+done as part of this session, flagged for the project owner.
+
+**Overall result**: the wipe-and-redeploy plan's actual goal --
+proving a stranger cloning this repo fresh and running `docker compose
+up -d --build` gets a working stack, without losing anything real in
+the process -- is now demonstrated, not just claimed. A real,
+previously-undocumented deployment bug (the avahi/5353 conflict) was
+found and permanently fixed as a direct result of actually doing this,
+not something a smaller-scope test would have surfaced.
 
 ---
 
