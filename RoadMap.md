@@ -6248,7 +6248,7 @@ still watching for the "internet super slow" report specifically,
 which has no confirmed root cause yet and needs the project owner's
 own real-world usage to actually confirm one way or the other.
 
-### Twelve more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
+### Thirteen more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
 
 Project owner asked to log these now (so they survive regardless of
 how long this window runs or any context/session boundary in between)
@@ -6462,6 +6462,37 @@ test.
     sufficient on its own -- no separate manual step required, and no
     silent stale-redirect state left behind for the next person to
     discover the hard way.
+
+13. **Reference: https://github.com/v2fly/domain-list-community/tree/master
+    -- a large, actively-maintained, per-service/per-category set of
+    domain lists, possibly worth integrating as `categories.subscription_url`
+    sources later.** Ties directly to the earlier question this same
+    session about why a `github.com/.../blob/master/data/youtube` URL
+    doesn't work as a subscription: that's GitHub's HTML-rendered file
+    view, not raw text -- the actual content lives at
+    `raw.githubusercontent.com/v2fly/domain-list-community/master/data/youtube`.
+    BUT even the raw URL is not yet a drop-in fit: `common/blocklist_parser.py`'s
+    `parse_hostlist()` (checked while writing this note) only recognizes
+    four line shapes -- full-line comments, AdGuard/uBlock `||domain^`,
+    hosts-file `0.0.0.0 example.com`, a bare URL, or a bare domain -- and
+    v2fly's own format uses none of those: every line is `domain:example.com`,
+    `full:example.com`, `keyword:somefragment`, `regexp:...`, or
+    `include:other-list-name` (that last one recursively pulls in
+    another file from the same repo). A `domain:`/`full:`-prefixed line
+    would currently fall through `parse_hostlist()`'s "matches none of
+    these shapes" path and be silently skipped -- so pointing a
+    category's `subscription_url` straight at one of these raw files
+    today would likely yield zero or near-zero domains, not an error,
+    which could look deceptively like "it worked" until someone checks
+    the actual `category_domains` count. Real integration, if pursued
+    later, needs either (a) a fifth `parse_hostlist()` branch
+    recognizing the `domain:`/`full:` prefixes (dropping `keyword:`/
+    `regexp:` entries, since those aren't literal domains a static list
+    can represent) and following `include:` references, or (b) fetching
+    via v2fly's own separate release artifacts (they publish pre-built
+    plain files for some consumers) instead of the raw per-category
+    source files directly -- worth checking their README for that
+    before building a custom parser branch.
 
 ### Soak test stopped (2026-09-08)
 
