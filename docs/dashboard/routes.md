@@ -1288,6 +1288,42 @@ the project owner asked for, not only an operational-health trail.
   reconfigure` (plus clear Squid's `ssl_db` leaf-cert cache, since cached
   certs were signed by the old CA) -- judged not worth the extra moving
   part for a rare, deliberate admin action.
+- `GET /settings/backup/download` -> `download_backup()` (built
+  2026-09-08 -- tracked as a deferred item in RoadMap.md since before
+  2026-09-07, revisited by the project owner as the actual mechanism
+  for wiping and redeploying the production box clean without losing
+  anything). Calls `common/backup.py`'s `export_config()` (see that
+  module's own docstring for exactly which tables are included/excluded
+  and why -- notably: every admin-configured table, but NOT
+  `access_log`/`system_events` (historical, not config) and NOT a
+  category's `subscription`-sourced domains, only its `manual` ones, so
+  a 900,000-row subscription category doesn't bloat every backup --
+  the next sync repopulates those from the `subscription_url` already
+  in the backup). Zips that JSON together with the CA certificate/key
+  (`CA_CERT_PATH`/`CA_KEY_PATH`, omitted if not generated yet) so a
+  restore elsewhere doesn't need every device to re-trust a new CA.
+  Filename `optigate-backup-<UTC timestamp>.zip`.
+- `POST /settings/backup/restore` -> `restore_backup()` -- multipart
+  form field `backup_file`. Validates the zip has a `config.json`
+  (parseable JSON) before touching anything; delegates the actual
+  replace to `backup.restore_config()`, which raises `RestoreError`
+  (caught here as a flash error, database left completely untouched)
+  on a missing/malformed section or a `format_version` mismatch. **A
+  full replace, not a merge** -- every included table is cleared and
+  reinserted with original row ids preserved (see `restore_config()`'s
+  own docstring for why that's safe under this project's
+  `PRAGMA foreign_keys=ON`). If the zip's `ca_cert.pem`/`ca_key.pem` are
+  present, validates them with the same `_validate_ca_cert_pair()` the
+  manual-upload feature uses and swaps them in via the same
+  `_replace_ca_cert_pair()` -- a bad/mismatched pair only skips the CA
+  half (the DB configuration still restores) rather than failing the
+  whole request. **Live-verified 2026-09-08, real bug found and fixed**:
+  restoring the SAME backup a box's own CA cert came from (the common
+  case -- reverting unrelated config on the same install) must not
+  claim every device needs to re-trust a certificate that never
+  actually changed -- compares the restored bytes against what's
+  currently on disk first and only calls `_replace_ca_cert_pair()` (and
+  shows `CA_CERT_RESTART_NOTICE`) when they actually differ.
 
 ## Notable UI/UX behaviors
 

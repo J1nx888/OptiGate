@@ -4845,10 +4845,8 @@ above, not just at the end.
 project owner, needing their own design pass rather than a quick patch
 alongside the above:
 
-- **Configuration export/import (backup/restore)**: no way currently to
-  export the whole household's configuration (users, devices, domains,
-  categories, schedules, settings) to a file and re-import it later --
-  useful before a risky change, or when moving to new hardware.
+- ~~**Configuration export/import (backup/restore)**~~ -- built
+  2026-09-08, see that dated entry below.
 - **Domain/user assignment UX, several related complaints that all point
   at the same underlying design gap**: (a) adding a domain from a
   specific user's own Manage page doesn't check whether that domain
@@ -5627,6 +5625,95 @@ find-and-replace:
   one-time cleanup of the AdGuard managed-rules marker so the next
   sync cycle doesn't orphan the old block.
 
+### Configuration backup/restore (2026-09-08)
+
+Tracked as a deferred item since before 2026-09-07 ("no way currently
+to export the whole household's configuration... useful before a risky
+change, or when moving to new hardware"). Revisited by the project
+owner in the context of Phase C above: asked whether wiping the
+Beelink and redeploying clean would be simpler than an in-place
+infrastructure rename. Answer given at the time still stands (a true
+wipe destroys real accumulated household state -- every registered
+device, every kid's account, the hand-curated Domains/Categories/
+Schedules, and critically the CA certificate every device already
+trusts) -- but it named the actual missing piece that would make
+"wipe and redeploy" genuinely safe: a real backup/restore. Built that
+instead of touching Phase C.
+
+New `common/backup.py`. **What counts as "configuration"**, deliberately
+scoped: every admin-decided table (settings via an explicit allowlist
+-- not the whole table, see below -- users, domains, user_domains,
+domain_paths, user_shows, groups, group_domains, devices,
+device_domains, categories, category_domains where `source='manual'`
+only, category_overrides, category_users/groups/devices, schedules,
+schedule_categories/users/groups/devices, schedule_overrides).
+**Deliberately excluded**: `category_domains` where
+`source='subscription'` (re-fetched mechanically from the category's
+own `subscription_url` -- the Adult category alone holds 953,197 of
+these; including them would make an ordinary backup enormous for zero
+benefit, since the categories row's `subscription_url` is all a
+restore needs to have the rest come back on the next sync),
+`series_cache`/`device_bindings`/`interception_runtime`/
+`network_events` (runtime/observational, self-healing), and
+`access_log`/`system_events` (historical audit records, not
+configuration). The settings allowlist itself excludes `secret_key`
+(Flask's session-signing key -- regenerating it is harmless, and a
+restore shouldn't overwrite a fresh install's own with an old one) and
+`cr_resolver_last_error` (diagnostic-only).
+
+**Restore is a full replace, not a merge, by design**: every included
+table is cleared and reinserted with its ORIGINAL row ids preserved --
+safe under this project's own `PRAGMA foreign_keys=ON` (`common/db.py`)
+because every join table already uses `ON DELETE CASCADE` on its
+parent references, so clearing the six root tables (users/groups/
+devices/domains/categories/schedules) cascades correctly through
+everything else with zero id-remapping logic needed.
+`device_bindings`/`network_events` use `ON DELETE SET NULL` instead
+(deliberately, pre-existing) so a restore never destroys real
+network-observation history, just orphans it back to "pending" until
+discovery re-associates it. `access_log`/`system_events` have no
+`REFERENCES` clause at all (also pre-existing), so Report-page history
+and the audit log are untouched by a restore either way.
+
+**CA certificate included, on purpose** -- this is what actually makes
+"redeploy on fresh hardware" painless rather than just less painful:
+without it, every device with the old CA trusted would show
+certificate errors on bump-mode sites until manually walked through
+re-trusting a new one. `dashboard.py`'s new `download_backup()`/
+`restore_backup()` routes bundle `common/backup.py`'s JSON export
+together with `CA_CERT_PATH`/`CA_KEY_PATH` in one zip, reusing the
+existing `_validate_ca_cert_pair()`/`_replace_ca_cert_pair()` the
+manual CA-upload feature already uses -- a bad/mismatched pair inside
+the zip just skips the CA half rather than failing the whole restore.
+Settings page gained a "Backup & restore" card: a plain download link,
+and an upload form behind a blunt confirm() (this replaces everything,
+it doesn't merge).
+
+**A real bug found live-verifying this, before it ever shipped**:
+restoring the exact same backup a box's own CA cert came from (the
+ordinary case -- reverting unrelated config on the same install)
+initially still claimed "every device needs to re-trust the new
+certificate," even though the cert was byte-identical to what was
+already installed. Caught by actually downloading a real backup from
+the dev server (real seeded data: 60 devices, 87 domains, 953,197-row
+Adult category) and restoring it onto itself via `curl`, not just unit
+tests. Fixed by comparing the restored cert/key bytes against what's
+currently on disk first, and only calling `_replace_ca_cert_pair()`
+(and showing the re-trust notice) when they actually differ.
+
+Live-verified: the real download produced a 19KB zip (not megabytes,
+confirming the subscription-domain exclusion actually works at real
+scale) with exactly the expected table counts; a real round-trip
+through the dashboard (add a device, download, delete the device,
+restore, confirm it's back with the right label) passed; the
+CA-unchanged fix confirmed via a second real restore showing "CA
+certificate unchanged" instead of the false re-trust warning.
+
+23 new tests (11 in `tests/test_backup.py`, `common/backup.py`'s own
+unit tests; 12 in `tests/test_dashboard.py`'s route-level tests,
+including the CA-unchanged regression). 1005 → 1028 passed, 34
+skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design
@@ -5642,3 +5729,14 @@ is new attack surface too (cache poisoning/spoofing resistance, not just
 split (a narrow `CAP_NET_RAW`-only worker, separate from the
 unprivileged controller and the `CAP_NET_ADMIN`-scoped nftables manager)
 is itself a security decision, not just an implementation detail.
+The backup/restore feature above is a new one worth flagging
+explicitly: the file it produces contains the admin's and every kid's
+bcrypt password hash, the CA certificate's PRIVATE KEY, and AdGuard
+Home's own admin password in PLAINTEXT (AdGuard's REST API needs the
+real password to authenticate, not a hash -- this project can't avoid
+storing it recoverably). Already behind `require_admin` like every
+other route, but the file itself must be treated as a credentials
+vault, not a casual config export -- worth a clearer in-UI warning
+than the current hint text if this ever gets used for routine
+day-to-day backups rather than the disaster-recovery case it was built
+for.

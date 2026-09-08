@@ -13,8 +13,10 @@ from __future__ import annotations
 import base64
 import importlib
 import io
+import json
 import re
 import subprocess
+import zipfile
 
 import pytest
 
@@ -5965,3 +5967,196 @@ def test_upload_ca_cert_requires_admin_auth(client, db_conn, monkeypatch, tmp_pa
     _point_ca_paths_at(monkeypatch, tmp_path)
     resp = client.post("/settings/ca-cert/upload", data={}, content_type="multipart/form-data")
     assert resp.status_code == 401
+
+
+# ============================================================
+# Backup/restore (2026-09-08) -- tracked as a deferred item in
+# RoadMap.md since before 2026-09-07, revisited by the project owner as
+# the actual mechanism for wiping and redeploying the production box
+# clean without losing anything or needing to re-trust a new CA
+# certificate on every device.
+# ============================================================
+
+def test_download_backup_produces_a_zip_with_config_and_ca_files(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, key_pem = _generate_cert_pair(tmp_path, "current", common_name="My Household CA")
+    cert_path.write_bytes(cert_pem)
+    key_path.write_bytes(key_pem)
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:40", "label": "Roku"}, headers=_auth_header())
+
+    resp = client.get("/settings/backup/download", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "application/zip"
+    assert "attachment" in resp.headers["Content-Disposition"]
+    assert "optigate-backup-" in resp.headers["Content-Disposition"]
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+        names = zf.namelist()
+        assert "config.json" in names
+        assert "ca_cert.pem" in names
+        assert "ca_key.pem" in names
+        assert zf.read("ca_cert.pem") == cert_pem
+        data = json.loads(zf.read("config.json"))
+        assert any(d["mac_address"] == "aa:bb:cc:dd:ee:40" for d in data["devices"])
+
+
+def test_download_backup_omits_ca_files_when_none_generated_yet(client, db_conn, monkeypatch, tmp_path):
+    _point_ca_paths_at(monkeypatch, tmp_path)
+
+    resp = client.get("/settings/backup/download", headers=_auth_header())
+
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+        names = zf.namelist()
+        assert "config.json" in names
+        assert "ca_cert.pem" not in names
+        assert "ca_key.pem" not in names
+
+
+def test_download_backup_requires_admin_auth(client, db_conn):
+    resp = client.get("/settings/backup/download")
+    assert resp.status_code == 401
+
+
+def _make_backup_zip(config_data, cert_pem=None, key_pem=None):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("config.json", json.dumps(config_data))
+        if cert_pem is not None:
+            zf.writestr("ca_cert.pem", cert_pem)
+        if key_pem is not None:
+            zf.writestr("ca_key.pem", key_pem)
+    buf.seek(0)
+    return buf.read()
+
+
+def _empty_config():
+    """A structurally-valid, otherwise-empty backup.RestoreError-passing
+    config dict -- every required table present as an empty list."""
+    tables = (
+        "users", "groups", "devices", "domains", "categories", "schedules",
+        "user_domains", "domain_paths", "user_shows", "group_domains", "device_domains",
+        "category_domains", "category_overrides", "category_users", "category_groups",
+        "category_devices", "schedule_categories", "schedule_users", "schedule_groups",
+        "schedule_devices", "schedule_overrides",
+    )
+    return {"format_version": 1, "settings": {}, **{t: [] for t in tables}}
+
+
+def test_restore_backup_round_trips_through_the_dashboard(client, db_conn, monkeypatch, tmp_path):
+    """Download a real backup, wipe the device, restore it -- the full
+    user-facing path, not just common/backup.py's own unit tests."""
+    _point_ca_paths_at(monkeypatch, tmp_path)
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:41", "label": "Kitchen TV"}, headers=_auth_header())
+
+    zip_bytes = client.get("/settings/backup/download", headers=_auth_header()).data
+
+    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:41'").fetchone()["id"]
+    client.post("/devices/delete", data={"device_id": device_id}, headers=_auth_header())
+    assert db_conn.execute("SELECT COUNT(*) AS c FROM devices").fetchone()["c"] == 0
+
+    resp = client.post(
+        "/settings/backup/restore",
+        data={"backup_file": (io.BytesIO(zip_bytes), "backup.zip")},
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    restored = db_conn.execute("SELECT * FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:41'").fetchone()
+    assert restored is not None
+    assert restored["label"] == "Kitchen TV"
+
+
+def test_restore_backup_also_restores_the_ca_certificate(client, db_conn, monkeypatch, tmp_path):
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, key_pem = _generate_cert_pair(tmp_path, "backedup", common_name="Backed Up CA")
+    zip_bytes = _make_backup_zip(_empty_config(), cert_pem=cert_pem, key_pem=key_pem)
+
+    resp = client.post(
+        "/settings/backup/restore",
+        data={"backup_file": (io.BytesIO(zip_bytes), "backup.zip")},
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert cert_path.read_bytes() == cert_pem
+    assert key_path.read_bytes() == key_pem
+    assert "re-trust" in resp.headers["Location"]
+
+
+def test_restore_backup_does_not_warn_about_re_trust_when_ca_is_unchanged(client, db_conn, monkeypatch, tmp_path):
+    """Live-verified bug found 2026-09-08: restoring the SAME backup a
+    box's own CA cert came from (the common case, e.g. reverting
+    unrelated config on the same install) must not falsely claim every
+    device needs to re-trust a certificate that never actually
+    changed."""
+    cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
+    cert_pem, key_pem = _generate_cert_pair(tmp_path, "current", common_name="Current CA")
+    cert_path.write_bytes(cert_pem)
+    key_path.write_bytes(key_pem)
+    zip_bytes = _make_backup_zip(_empty_config(), cert_pem=cert_pem, key_pem=key_pem)
+
+    resp = client.post(
+        "/settings/backup/restore",
+        data={"backup_file": (io.BytesIO(zip_bytes), "backup.zip")},
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert "unchanged" in resp.headers["Location"]
+    assert "re-trust" not in resp.headers["Location"]
+
+
+def test_restore_backup_rejects_a_non_zip_file(client, db_conn):
+    resp = client.post(
+        "/settings/backup/restore",
+        data={"backup_file": (io.BytesIO(b"not a zip file"), "backup.zip")},
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_restore_backup_rejects_a_zip_without_config_json(client, db_conn):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("something_else.txt", "not a backup")
+    resp = client.post(
+        "/settings/backup/restore",
+        data={"backup_file": (io.BytesIO(buf.getvalue()), "backup.zip")},
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_restore_backup_rejects_wrong_format_version(client, db_conn):
+    zip_bytes = _make_backup_zip({"format_version": 999, "settings": {}})
+    resp = client.post(
+        "/settings/backup/restore",
+        data={"backup_file": (io.BytesIO(zip_bytes), "backup.zip")},
+        headers=_auth_header(),
+        content_type="multipart/form-data",
+    )
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_restore_backup_requires_a_file(client, db_conn):
+    resp = client.post("/settings/backup/restore", data={}, headers=_auth_header(), content_type="multipart/form-data")
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_restore_backup_requires_admin_auth(client, db_conn):
+    resp = client.post("/settings/backup/restore", data={}, content_type="multipart/form-data")
+    assert resp.status_code == 401
+
+
+def test_settings_page_has_backup_and_restore_controls(client, db_conn):
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Download backup" in resp.data
+    assert b"Restore from backup" in resp.data

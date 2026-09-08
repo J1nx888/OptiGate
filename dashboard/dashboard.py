@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import io
 import ipaddress
+import json
 import logging
 import math
 import os
@@ -25,6 +26,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import zipfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -39,6 +41,7 @@ import zoneinfo
 import adguard_client
 import adguard_config_sync
 import auth
+import backup
 import category_fetch
 import cr_api
 import db
@@ -807,6 +810,110 @@ def regenerate_ca_cert():
         _replace_ca_cert_pair(cert_path.read_bytes(), key_path.read_bytes())
 
     return flash_redirect("settings_page", f"New CA certificate generated. {CA_CERT_RESTART_NOTICE}")
+
+
+# Generous but bounded -- a real backup (config only, no access_log/
+# system_events/subscription-sourced category_domains -- see
+# common/backup.py's own docstring) stays small even for a household
+# with thousands of manually-added domains; this just guards against an
+# unrelated huge file being uploaded by mistake (or on purpose) without
+# needing a streaming parse.
+_BACKUP_UPLOAD_MAX_BYTES = 50_000_000
+
+
+@app.route("/settings/backup/download")
+@require_admin
+def download_backup():
+    """Configuration export -- tracked as a deferred item in RoadMap.md
+    since before 2026-09-07 ("no way currently to export the whole
+    household's configuration... useful before a risky change, or when
+    moving to new hardware"), built 2026-09-08 as the actual mechanism
+    for wiping and redeploying the production box clean without losing
+    anything. Bundles common/backup.py's own JSON export together with
+    the CA certificate/private key (if generated yet) in one zip, so a
+    restore elsewhere doesn't need every device to re-trust a new CA --
+    see backup.py's own docstring for exactly what is and isn't
+    included and why."""
+    conn = get_db()
+    data = backup.export_config(conn)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("config.json", json.dumps(data, indent=2))
+        if CA_CERT_PATH.exists():
+            zf.writestr("ca_cert.pem", CA_CERT_PATH.read_bytes())
+        if CA_KEY_PATH.exists():
+            zf.writestr("ca_key.pem", CA_KEY_PATH.read_bytes())
+    buf.seek(0)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return send_file(
+        buf, mimetype="application/zip", as_attachment=True,
+        download_name=f"optigate-backup-{stamp}.zip",
+    )
+
+
+@app.route("/settings/backup/restore", methods=["POST"])
+@require_admin
+def restore_backup():
+    """The other half of download_backup() above. A full replace, not a
+    merge -- see common/backup.py's restore_config() docstring -- so the
+    confirm() on the Settings page form is deliberately blunt about that
+    before this route ever runs. The CA cert/key inside the zip (if
+    present) are validated with the exact same _validate_ca_cert_pair()
+    the existing manual-upload feature uses, and swapped in via the same
+    _replace_ca_cert_pair() (so the previous pair is still backed up
+    on-disk first, same safety net as that feature) -- a bad/mismatched
+    pair inside the zip just skips the CA half rather than failing the
+    whole restore, since the DB configuration is still worth restoring
+    either way."""
+    upload = request.files.get("backup_file")
+    if not upload or not upload.filename:
+        return flash_redirect("settings_page", "Pick a backup file to restore.", error=True)
+
+    raw = upload.read()
+    if len(raw) > _BACKUP_UPLOAD_MAX_BYTES:
+        return flash_redirect("settings_page", "That backup file is too large.", error=True)
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            names = zf.namelist()
+            if "config.json" not in names:
+                return flash_redirect(
+                    "settings_page", "That doesn't look like an OptiGate backup (missing config.json).", error=True
+                )
+            try:
+                data = json.loads(zf.read("config.json"))
+            except json.JSONDecodeError:
+                return flash_redirect("settings_page", "That backup's config.json is corrupted.", error=True)
+            cert_pem = zf.read("ca_cert.pem") if "ca_cert.pem" in names else None
+            key_pem = zf.read("ca_key.pem") if "ca_key.pem" in names else None
+    except zipfile.BadZipFile:
+        return flash_redirect("settings_page", "That doesn't look like a valid backup file (not a zip archive).", error=True)
+
+    conn = get_db()
+    try:
+        backup.restore_config(conn, data)
+    except backup.RestoreError as exc:
+        return flash_redirect("settings_page", str(exc), error=True)
+
+    ca_note = ""
+    if cert_pem and key_pem:
+        error = _validate_ca_cert_pair(cert_pem, key_pem)
+        if error:
+            ca_note = f" CA certificate NOT restored ({error}) -- the rest of the configuration was."
+        elif CA_CERT_PATH.exists() and CA_CERT_PATH.read_bytes() == cert_pem and \
+                CA_KEY_PATH.exists() and CA_KEY_PATH.read_bytes() == key_pem:
+            # Live-verified 2026-09-08: restoring the SAME backup a box's
+            # own CA cert came from (the common case -- e.g. reverting
+            # unrelated config on the same install) must NOT claim every
+            # device needs to re-trust a certificate that never actually
+            # changed. Also skips a no-op _replace_ca_cert_pair() call, so
+            # a repeated restore doesn't pile up identical .bak files.
+            ca_note = " CA certificate unchanged (already matched what's currently installed)."
+        else:
+            _replace_ca_cert_pair(cert_pem, key_pem)
+            ca_note = f" {CA_CERT_RESTART_NOTICE}"
+
+    return flash_redirect("settings_page", f"Configuration restored.{ca_note}")
 
 
 BLOCKED_BODY = """
@@ -6510,6 +6617,31 @@ SETTINGS_BODY = """
 </form>
 </details>
 <p class="hint" style="margin-top:.6rem;"><strong>After either action:</strong> restart the proxy container (<code>docker compose restart proxy</code>) for Squid to actually use it -- cert=/key= is only read at Squid startup, not live like everything else in this dashboard.</p>
+</div>
+
+<div class="card">
+<h2>Backup &amp; restore</h2>
+<p class="hint">
+  Exports every admin-configured setting -- users, devices, domains,
+  categories, schedules, and the SSL-Bump CA certificate itself -- into
+  one file. Restoring it (even on completely fresh hardware) puts back
+  the exact same CA certificate too, so no device needs to re-trust
+  anything afterward. Does NOT include the Report page's history, the
+  Events log, or a subscription category's fetched domain list (that
+  re-syncs on its own from the URL already saved in the backup).
+</p>
+<p class="hint"><strong>Treat this file like a password vault, not a plain config export</strong> -- it contains the CA certificate's private key and AdGuard's own admin password in plain text (AdGuard's API needs the real password, not a hash), plus every login's password hash. Store it somewhere only you can reach.</p>
+<a class="btn add" href="{{ url_for('download_backup') }}">Download backup</a>
+
+<details style="margin-top:1rem;">
+<summary>Restore from a backup file</summary>
+<p class="hint"><strong>This replaces every user, device, domain, category, schedule, and setting on this install with whatever's in the file</strong> -- anything not in the backup is deleted, not merged with what's here now. Meant for a fresh install or reverting to an earlier snapshot, not routine use.</p>
+<form class="add-form" method="post" action="{{ url_for('restore_backup') }}" enctype="multipart/form-data"
+      onsubmit="return confirm('This REPLACES every user, device, domain, category, schedule, and setting with what&#39;s in this backup file -- anything not in the file is deleted. This cannot be undone. Continue?')">
+  <input type="file" name="backup_file" accept=".zip" required>
+  <button class="danger" type="submit">Restore from backup</button>
+</form>
+</details>
 </div>
 
 <div class="card">
