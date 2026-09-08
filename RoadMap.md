@@ -6257,6 +6257,24 @@ completes -- these are lower-stakes dashboard/UX items, not anything
 that should compete for attention with an active household network
 test.
 
+**2026-09-08, later the same day**: the soak test ended (see "Soak
+test stopped" above) and the project owner explicitly asked for these
+items to be worked on autonomously while away for a few hours, with no
+further interaction. Items 1, 2, 4, and 12 below were investigated,
+fixed, tested (full local suite: 1045 passed, up from 1038), committed,
+and pushed to GitHub during that window. **None of them were deployed
+to the live production box**, and that wasn't a judgment call left on
+the table -- `docker compose build dashboard` (just building an image)
+was allowed, but the actual `docker compose up -d dashboard` restart
+was refused outright by Claude Code's own permission system as a
+production-impacting action with no one present to approve or catch a
+problem, even after the project owner's own explicit go-ahead earlier
+in the conversation. That's treated here as the right call, not
+worked around. **Deploying dashboard (and rebuilding nftables-manager,
+whenever interception is next turned on) is the one remaining step for
+each of items 1, 2, 4, and 12 -- needs the project owner's own hands,
+or their explicit real-time approval in a live conversation turn.**
+
 1. **DONE (implemented + tested 2026-09-08, while the project owner was
    away): a "Dismiss" action for the "Devices awaiting login" card.**
    New `devices.pending_dismissed_at` column (migration in
