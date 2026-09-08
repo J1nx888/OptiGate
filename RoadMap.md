@@ -3130,7 +3130,7 @@ the VM is up before treating this as fully verified live.
 
 **2026-08-31, same day: "tighter Squid/AdGuard integration" request
 surfaced a THIRD real bug, bigger than the two above, plus closed a
-genuine feature gap ([GH #9](https://github.com/J1nx888/parental_proxy/issues/9)).**
+genuine feature gap ([GH #9](https://github.com/J1nx888/OptiGate/issues/9)).**
 User was poking at the Report page with seeded dev data and noticed two
 things: no way to filter by device/group, and AdGuard traffic never
 showed up at all. Investigating turned up a live bug on Squid itself,
@@ -5605,9 +5605,15 @@ find-and-replace:
   security/overview.md, README's clone URL, AGENTS.md's DB-path
   mention) were left matching the current real names rather than
   describing a rename that hasn't happened yet.
-- **Phase B (planned, not yet done)**: rename the GitHub repo itself
-  (`J1nx888/parental_proxy` → `J1nx888/OptiGate`) and update the local
-  git remote + every clone-URL reference in README/setup docs.
+- **Phase B — done same day**: `gh repo rename OptiGate` on
+  `J1nx888/parental_proxy` (GitHub auto-redirects the old URL/clone
+  path indefinitely, so this isn't a hard break for anyone with the
+  old link). Updated the local git remote and the production Beelink
+  box's own remote (`git remote set-url origin
+  https://github.com/J1nx888/OptiGate.git` on both, `git fetch`
+  confirmed working on each), README's clone URL/`cd` line, and the
+  one hardcoded issue link in this file (confirmed GH #9 still
+  resolves under the new name).
 - **Phase C (planned, not yet done, needs its own maintenance
   window)**: the production infrastructure identifiers listed above.
   Recommended explicitly to the project owner: do NOT rename the

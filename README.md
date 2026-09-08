@@ -190,8 +190,8 @@ compose` plugin, on a native Linux host (not Docker Desktop -- see
 `docs/deployment/setup.md` for why).
 
 ```
-git clone https://github.com/J1nx888/parental_proxy
-cd parental_proxy
+git clone https://github.com/J1nx888/OptiGate
+cd OptiGate
 ./setup.sh
 ```
 
