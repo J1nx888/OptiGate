@@ -100,7 +100,7 @@ against a real kernel — its pure-logic `internal/policy` package does not.
 docker compose up -d --build            # manual equivalent (3 default services)
 docker compose --profile interception up -d   # + the 3 Phase 3 services (needs .env vars, see below)
 docker compose logs -f dashboard        # follow logs / read the auto-generated admin password
-docker compose down                     # stop; the pp_config volume (DB + CA cert) is preserved
+docker compose down                     # stop; the optigate_config volume (DB + CA cert) is preserved
 ```
 
 The `interception` profile refuses to start without `ARP_WORKER_IFACE` /
@@ -155,8 +155,8 @@ phase3/arp-worker/          Go — privileged ARP poisoning + corrective restore
 phase3/nftables-manager/    Go — reconciles kernel nftables against a DB-computed policy
 ```
 
-**The one datastore is one SQLite file** (`/config/parental_proxy.db`, WAL
-mode) on the shared `pp_config` Docker volume. Both containers open it
+**The one datastore is one SQLite file** (`/config/optigate.db`, WAL
+mode) on the shared `optigate_config` Docker volume. Both containers open it
 directly; they coordinate purely through files on that volume, no other
 IPC. There is **no caching layer** — every `external_acl_type` line is
 declared `ttl=0 negative_ttl=0`, so Squid re-queries SQLite on every new

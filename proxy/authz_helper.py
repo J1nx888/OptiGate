@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, "/opt/parental-proxy")
+sys.path.insert(0, "/opt/optigate")
 
 import cr_urls
 import device_identity

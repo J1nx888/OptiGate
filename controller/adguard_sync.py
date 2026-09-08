@@ -93,8 +93,8 @@ log = logging.getLogger("controller.adguard_sync")
 # anything else on the box" discipline
 # phase3/nftables-manager/internal/nft/knftables_adapter.go applies to
 # its own nftables table, applied here to AdGuard's rules list instead.
-_MARKER_BEGIN = "! === parental_proxy managed rules -- do not edit below this line, see docs/security/overview.md ==="
-_MARKER_END = "! === end parental_proxy managed rules ==="
+_MARKER_BEGIN = "! === optigate managed rules -- do not edit below this line, see docs/security/overview.md ==="
+_MARKER_END = "! === end optigate managed rules ==="
 
 
 def _domain_rule(pattern: str, client_ips: list[str], block_page_ip: str | None = None) -> str:

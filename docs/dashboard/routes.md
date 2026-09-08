@@ -246,9 +246,9 @@ admin's next action is one edit + submit rather than starting from scratch:
   cached copy.
 - `GET /ca-cert` -> `ca_cert()` -- **unauthenticated on purpose** (see file
   docstring: it's a public certificate, every client device needs it).
-  Serves `CA_CERT_PATH` (env `PP_CA_CERT_PATH`, default
+  Serves `CA_CERT_PATH` (env `OG_CA_CERT_PATH`, default
   `/config/ssl_cert/ca_cert.pem`) as a download named
-  `parental-proxy-ca.crt`; 404s with an explanatory message if the proxy
+  `optigate-ca.crt`; 404s with an explanatory message if the proxy
   container hasn't generated it yet.
 - `GET /blocked` -> `blocked()` -- static unauthenticated 403 HTML page shown
   to end users (not the admin) when Squid redirects a blocked bump-mode
@@ -1415,6 +1415,6 @@ Follow the existing pattern end to end; using an existing resource area
    `dashboard.py`, matching the existing `import auth` / `import db` /
    `import matching` style.
 7. **Manual smoke test**: run `dashboard/dashboard.py` directly (needs
-   `common/*.py` importable alongside it, and env vars `PP_DB_PATH`/
-   `PP_CA_CERT_PATH` pointed somewhere writable), or rebuild the
+   `common/*.py` importable alongside it, and env vars `OG_DB_PATH`/
+   `OG_CA_CERT_PATH` pointed somewhere writable), or rebuild the
    `dashboard` Docker image and hit the new route through the container.

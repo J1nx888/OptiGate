@@ -61,7 +61,7 @@ go build -o /tmp/pp-nftables-manager ./cmd/pp-nftables-manager
 docker run --rm --cap-add=NET_ADMIN \
   -v /tmp/pp-nftables-manager:/pp-nftables-manager:ro ubuntu:24.04 \
   bash -c 'apt-get update -qq && apt-get install -y -qq nftables >/dev/null 2>&1 &&
-           /pp-nftables-manager -bootstrap-only=true && nft list table inet parental_proxy'
+           /pp-nftables-manager -bootstrap-only=true && nft list table inet optigate'
 ```
 
 What's actually been verified this way, on 2026-08-29 (Ubuntu 24.04

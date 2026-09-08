@@ -1,6 +1,6 @@
 # Security Overview
 
-This document describes the security model of parental_proxy as it actually
+This document describes the security model of OptiGate as it actually
 exists in code today: how each credential is checked, what trust boundary
 each component sits behind, and where there are no protections at all. It is
 written for an AI agent (or human) about to extend this codebase — read it
@@ -527,7 +527,7 @@ independently readable and settable at all times.
 
 **Where:** `common/squid_helper.py` (shared loop), `proxy/sni_helper.py`,
 `proxy/authz_helper.py`; wired up in `proxy/squid.conf.template` via
-`external_acl_type ... /usr/bin/python3 /opt/parental-proxy/<helper>.py`.
+`external_acl_type ... /usr/bin/python3 /opt/optigate/<helper>.py`.
 
 ### Protocol mechanics
 

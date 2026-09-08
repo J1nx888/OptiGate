@@ -80,19 +80,19 @@ acl SSL_ports port 443
 
 external_acl_type sni_bump_check children-max=10 ttl=0 negative_ttl=0 \
 %>a %ssl::>sni %DATA \
-/usr/bin/python3 /opt/parental-proxy/sni_helper.py bump
+/usr/bin/python3 /opt/optigate/sni_helper.py bump
 
 external_acl_type sni_trusted_check children-max=10 ttl=0 negative_ttl=0 \
 %>a %ssl::>sni %DATA \
-/usr/bin/python3 /opt/parental-proxy/sni_helper.py trusted
+/usr/bin/python3 /opt/optigate/sni_helper.py trusted
 
 external_acl_type sni_splice_check children-max=10 ttl=0 negative_ttl=0 \
 %>a %ssl::>sni %DATA \
-/usr/bin/python3 /opt/parental-proxy/sni_helper.py splice
+/usr/bin/python3 /opt/optigate/sni_helper.py splice
 
 external_acl_type sni_block_page_check children-max=10 ttl=0 negative_ttl=0 \
 %>a %ssl::>sni %DATA \
-/usr/bin/python3 /opt/parental-proxy/sni_helper.py block_page
+/usr/bin/python3 /opt/optigate/sni_helper.py block_page
 
 acl sni_bump external sni_bump_check
 acl sni_trusted external sni_trusted_check
@@ -107,7 +107,7 @@ acl sni_show_block_page external sni_block_page_check
 
 external_acl_type authz_check children-max=20 ttl=0 negative_ttl=0 \
 %>a %DST %PATH %DATA \
-/usr/bin/python3 /opt/parental-proxy/authz_helper.py
+/usr/bin/python3 /opt/optigate/authz_helper.py
 
 acl authz_allowed external authz_check
 

@@ -2,7 +2,7 @@
 
 Every component in this repo is deployed as a *flat* directory in its
 container (see the Dockerfiles): common/*.py, the proxy helpers, and
-defaults/seed_defaults.py are all copied into /opt/parental-proxy/, and
+defaults/seed_defaults.py are all copied into /opt/optigate/, and
 common/*.py + dashboard.py are copied into /app/ for the dashboard image.
 Every module therefore does bare imports like ``import db`` or
 ``import cr_api``, not ``from common import db``. To exercise the real code
@@ -32,15 +32,15 @@ for sub in ("common", "proxy", "dashboard", "defaults", "controller"):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-# db.py reads PP_DB_PATH once, at its own import time, and stores it in a
+# db.py reads OG_DB_PATH once, at its own import time, and stores it in a
 # module-level Path. Set it to something harmless *before* anything imports
 # db, so a stray import elsewhere in the session never touches a real
-# /config/parental_proxy.db path, or writes anywhere inside the repo.
+# /config/optigate.db path, or writes anywhere inside the repo.
 # Individual tests still isolate themselves by monkeypatching db.DB_PATH
 # directly (see the `conn` fixture) -- this is just a safe default for
 # whichever import happens first.
 os.environ.setdefault(
-    "PP_DB_PATH", str(Path(tempfile.gettempdir()) / "parental_proxy_pytest_default.db")
+    "OG_DB_PATH", str(Path(tempfile.gettempdir()) / "optigate_pytest_default.db")
 )
 
 import pytest  # noqa: E402

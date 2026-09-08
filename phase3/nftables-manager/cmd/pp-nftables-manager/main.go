@@ -1,6 +1,6 @@
 // Command pp-nftables-manager is the Milestone 5/6/7 nftables-manager
 // process: a small, CAP_NET_ADMIN-scoped daemon that maintains the
-// dedicated "parental_proxy" nftables table and reconciles its four
+// dedicated "optigate" nftables table and reconciles its four
 // named policy sets against the DesiredPolicy blob
 // controller/policy_state.py (Python) computes and writes into the
 // shared SQLite database's interception_runtime table.

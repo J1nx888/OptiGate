@@ -1,7 +1,7 @@
 """Drive the Squid helper scripts' actual decision logic and the shared
 stdin/stdout protocol loop (common/squid_helper.py) directly -- no Docker,
 no real Squid, no network. The helper modules' own `sys.path.insert(0,
-"/opt/parental-proxy")` is a no-op off-container (that path doesn't exist),
+"/opt/optigate")` is a no-op off-container (that path doesn't exist),
 which is fine: conftest.py already puts common/ and proxy/ on sys.path so
 their real `import auth` / `import db` etc. resolve correctly either way.
 """

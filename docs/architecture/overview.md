@@ -155,9 +155,9 @@ docker-compose.yml             six services total. proxy/adguard/dashboard run b
                                 need it to reach AdGuard's loopback-bound admin API. Each service's
                                 own app-level bind address (DASHBOARD_BIND/ADGUARD_WEB_BIND) is
                                 what gates LAN exposure now, not a Docker port-publish mapping.
-                                proxy/dashboard/nftables-manager/controller share the pp_config
-                                volume; adguard has its own pp_adguard_conf/pp_adguard_work;
-                                arp-worker and controller share pp_run (just their Unix socket).
+                                proxy/dashboard/nftables-manager/controller share the optigate_config
+                                volume; adguard has its own optigate_adguard_conf/optigate_adguard_work;
+                                arp-worker and controller share optigate_run (just their Unix socket).
 ```
 
 `phase3/arp-worker/Dockerfile` and `phase3/nftables-manager/Dockerfile`
@@ -176,7 +176,7 @@ proven end-to-end (Docker-bridge test network, never the real
 production box).
 
 Both container images `COPY common/*.py` into their own image root (proxy's
-`/opt/parental-proxy/`, dashboard's `/app/`) and add that directory to
+`/opt/optigate/`, dashboard's `/app/`) and add that directory to
 `sys.path`. There is no shared package install step -- it's a flat file copy,
 so a change to any `common/*.py` file requires rebuilding **both** images to
 take effect everywhere.
@@ -415,7 +415,7 @@ take effect everywhere.
                                       |
                                       v
                  +--------------------------------------+
-                 |   /config/parental_proxy.db (SQLite,  |
+                 |   /config/optigate.db (SQLite,  |
                  |   WAL mode) on the `pp_config` Docker  |
                  |   named volume -- single source of     |
                  |   truth, shared by both containers     |
@@ -453,9 +453,9 @@ the dashboard (running as the same `proxy` user) ever opens the database.
 
 ## 4. The shared SQLite database (`common/db.py`)
 
-- Path: `PP_DB_PATH` env var, default `/config/parental_proxy.db` (see
-  `db.py`'s `DB_PATH = Path(os.environ.get("PP_DB_PATH", "/config/parental_proxy.db"))`).
-  Both `docker-compose.yml` service blocks set `PP_DB_PATH=/config/parental_proxy.db`
+- Path: `OG_DB_PATH` env var, default `/config/optigate.db` (see
+  `db.py`'s `DB_PATH = Path(os.environ.get("OG_DB_PATH", "/config/optigate.db"))`).
+  Both `docker-compose.yml` service blocks set `OG_DB_PATH=/config/optigate.db`
   explicitly, backed by the same `pp_config:` named volume mounted at
   `/config` in both containers.
 - `get_conn()` opens with `timeout=5.0`, `isolation_level=None` (autocommit),
@@ -793,7 +793,7 @@ Route groups (see the numbered `# ====` section banners in the file):
   refresh, SafeSearch) write *intent* only; a `controller/` background
   loop is what actually reconciles it against AdGuard on its own next
   cycle -- see `adguard_sync.py` in §1's controller/ listing.
-- `/ca-cert`: unauthenticated `send_file()` of `PP_CA_CERT_PATH`
+- `/ca-cert`: unauthenticated `send_file()` of `OG_CA_CERT_PATH`
   (`/config/ssl_cert/ca_cert.pem`) for device onboarding.
 - `/blocked`: unauthenticated, the target of `deny_info` for `redirect`-mode
   block pages.

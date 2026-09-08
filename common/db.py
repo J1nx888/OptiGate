@@ -13,7 +13,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("PP_DB_PATH", "/config/parental_proxy.db"))
+DB_PATH = Path(os.environ.get("OG_DB_PATH", "/config/optigate.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (

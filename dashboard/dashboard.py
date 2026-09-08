@@ -50,14 +50,14 @@ import rate_limit
 import schedule_eval
 import system_events
 
-CA_CERT_PATH = Path(os.environ.get("PP_CA_CERT_PATH", "/config/ssl_cert/ca_cert.pem"))
+CA_CERT_PATH = Path(os.environ.get("OG_CA_CERT_PATH", "/config/ssl_cert/ca_cert.pem"))
 # Not independently configurable via its own env var in docker-compose.yml
-# today (only PP_CA_CERT_PATH is wired up there) -- derived from
-# PP_CA_CERT_PATH's own directory so the two stay colocated the same way
+# today (only OG_CA_CERT_PATH is wired up there) -- derived from
+# OG_CA_CERT_PATH's own directory so the two stay colocated the same way
 # proxy/entrypoint.sh's SSL_DIR already colocates them, but still
 # independently overridable (e.g. for a test that wants both paths under
 # one throwaway tmp_path without depending on this derivation).
-CA_KEY_PATH = Path(os.environ.get("PP_CA_KEY_PATH", str(CA_CERT_PATH.parent / "ca_key.pem")))
+CA_KEY_PATH = Path(os.environ.get("OG_CA_KEY_PATH", str(CA_CERT_PATH.parent / "ca_key.pem")))
 
 log = logging.getLogger("dashboard")
 
@@ -292,7 +292,7 @@ BASE = """
 <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 <script>
-try { if (localStorage.getItem("pp_sidebar_collapsed") === "1") document.documentElement.classList.add("sidebar-collapsed"); } catch (e) {}
+try { if (localStorage.getItem("og_sidebar_collapsed") === "1") document.documentElement.classList.add("sidebar-collapsed"); } catch (e) {}
 </script>
 </head>
 <body>
@@ -553,7 +553,7 @@ document.addEventListener("input", function (event) {
   if (!toggle) return;
   toggle.addEventListener("click", function () {
     var collapsed = document.documentElement.classList.toggle("sidebar-collapsed");
-    try { localStorage.setItem("pp_sidebar_collapsed", collapsed ? "1" : "0"); } catch (e) {}
+    try { localStorage.setItem("og_sidebar_collapsed", collapsed ? "1" : "0"); } catch (e) {}
   });
 })();
 </script>

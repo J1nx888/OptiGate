@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: proxy/Dockerfile
-    container_name: parental-proxy
+    container_name: optigate-proxy
     restart: unless-stopped
     # network_mode: host (added 2026-08-30, correcting the bridge-network
     # setup this service originally shipped with): phase3/nftables-manager
@@ -36,13 +36,13 @@ services:
       - LOCAL_NETWORK=${LOCAL_NETWORK:-192.168.1.0/24}
       - DASHBOARD_URL=${DASHBOARD_URL:-}
     volumes:
-      - pp_config:/config
+      - optigate_config:/config
 
   adguard:
     build:
       context: .
       dockerfile: adguard/Dockerfile
-    container_name: parental-proxy-adguard
+    container_name: optigate-adguard
     restart: unless-stopped
     # Same reasoning as proxy's network_mode: host above -- AdGuard Home
     # is the DNS-tier target of phase3/nftables-manager's
@@ -84,14 +84,14 @@ services:
       # own comment on why 127.0.0.1 is the default here.
       - ADGUARD_WEB_BIND=${ADGUARD_WEB_BIND:-127.0.0.1}
     volumes:
-      - pp_adguard_conf:/opt/adguardhome/conf
-      - pp_adguard_work:/opt/adguardhome/work
+      - optigate_adguard_conf:/opt/adguardhome/conf
+      - optigate_adguard_work:/opt/adguardhome/work
 
   dashboard:
     build:
       context: .
       dockerfile: dashboard/Dockerfile
-    container_name: parental-proxy-dashboard
+    container_name: optigate-dashboard
     restart: unless-stopped
     # network_mode: host (added 2026-08-30, same day as the AdGuard
     # "check now" button below): AdGuard's own admin UI defaults to
@@ -132,8 +132,8 @@ services:
       # access); 0.0.0.0 = reachable from any device on the LAN.
       - DASHBOARD_HOST=${DASHBOARD_BIND:-127.0.0.1}
       - LOCAL_NETWORK=${LOCAL_NETWORK:-192.168.1.0/24}
-      - PP_DB_PATH=/config/parental_proxy.db
-      - PP_CA_CERT_PATH=/config/ssl_cert/ca_cert.pem
+      - OG_DB_PATH=/config/optigate.db
+      - OG_CA_CERT_PATH=/config/ssl_cert/ca_cert.pem
       # If set, also starts block_page_server.py on port 80 (see above)
       # and tells controller/adguard_sync.py (via the controller
       # service's own --dashboard-url below) to point hard-denied
@@ -157,7 +157,7 @@ services:
       # once created, so changing this later never moves an existing one.
       - HOUSEHOLD_TIME_ZONE=${HOUSEHOLD_TIME_ZONE:-UTC}
     volumes:
-      - pp_config:/config
+      - optigate_config:/config
       # Same volume adguard's own service mounts above, read-write here
       # too (added 2026-09-07, RoadMap.md's dated entry) -- lets
       # dashboard/adguard_config_sync.py write AdGuard's real
@@ -168,7 +168,7 @@ services:
       # file at the same moment in practice (this only fires on an
       # infrequent, admin-triggered action, not a background loop), so
       # no file-locking beyond a plain read-modify-write.
-      - pp_adguard_conf:/opt/adguardhome/conf
+      - optigate_adguard_conf:/opt/adguardhome/conf
 
   # ==========================================================
   # Phase 3 interception layer (arp-worker, nftables-manager, controller)
@@ -193,7 +193,7 @@ services:
   arp-worker:
     build:
       context: phase3/arp-worker
-    container_name: parental-proxy-arp-worker
+    container_name: optigate-arp-worker
     restart: unless-stopped
     profiles: ["interception"]
     # network_mode: host -- needs to see the REAL LAN-facing interface
@@ -204,10 +204,10 @@ services:
     cap_add:
       - NET_RAW
     volumes:
-      - pp_run:/run/parental_proxy
+      - optigate_run:/run/optigate
     command:
       - -iface=${ARP_WORKER_IFACE:-}
-      - -socket=/run/parental_proxy/arp-worker.sock
+      - -socket=/run/optigate/arp-worker.sock
       - -controller-uid=${CONTROLLER_UID:-0}
     # No default for ARP_WORKER_IFACE on purpose -- pp-arp-worker's own
     # main.go refuses to start with -iface="" ("-iface and
@@ -218,27 +218,27 @@ services:
   nftables-manager:
     build:
       context: phase3/nftables-manager
-    container_name: parental-proxy-nftables-manager
+    container_name: optigate-nftables-manager
     restart: unless-stopped
     profiles: ["interception"]
     # Same reasoning as proxy/adguard's own network_mode: host --
-    # manages the SAME "parental_proxy" nftables table those services'
+    # manages the SAME "optigate" nftables table those services'
     # redirect rules depend on, which only makes sense in the host's own
     # network namespace.
     network_mode: host
     cap_add:
       - NET_ADMIN
     volumes:
-      - pp_config:/config
+      - optigate_config:/config
     command:
-      - -db-path=/config/parental_proxy.db
+      - -db-path=/config/optigate.db
       - -poll-interval=${NFTABLES_POLL_INTERVAL:-5s}
 
   controller:
     build:
       context: .
       dockerfile: controller/Dockerfile
-    container_name: parental-proxy-controller
+    container_name: optigate-controller
     restart: unless-stopped
     profiles: ["interception"]
     # network_mode: host -- same reason dashboard needed it (added the
@@ -247,7 +247,7 @@ services:
     # loopback-bound under host networking (see adguard's own
     # ADGUARD_WEB_BIND comment) and unreachable from a bridge-networked
     # container. It also needs phase3/nftables-manager's own
-    # `parental_proxy` table to exist already, though it never touches
+    # `optigate` table to exist already, though it never touches
     # nftables directly itself -- only through the shared DB.
     network_mode: host
     # depends_on only waits for these containers to *start*, not to be
@@ -262,11 +262,11 @@ services:
       - adguard
       - arp-worker
     volumes:
-      - pp_config:/config
-      - pp_run:/run/parental_proxy
+      - optigate_config:/config
+      - optigate_run:/run/optigate
     command:
-      - --socket=/run/parental_proxy/arp-worker.sock
-      - --db-path=/config/parental_proxy.db
+      - --socket=/run/optigate/arp-worker.sock
+      - --db-path=/config/optigate.db
       - --gateway-ip=${GATEWAY_IP:-}
       - --gateway-mac=${GATEWAY_MAC:-}
       - --adguard-url=${ADGUARD_URL:-http://127.0.0.1:3000}
@@ -279,11 +279,11 @@ services:
     # ARP_WORKER_IFACE above.
 
 volumes:
-  pp_config:
-  pp_adguard_conf:
-  pp_adguard_work:
+  optigate_config:
+  optigate_adguard_conf:
+  optigate_adguard_work:
   # Shared between arp-worker and controller ONLY -- just the Unix
   # socket file the two speak IPC over (network_mode: host shares the
   # network namespace, not the filesystem, so this still needs an
   # explicit shared volume even though both containers are host-networked).
-  pp_run:
+  optigate_run:

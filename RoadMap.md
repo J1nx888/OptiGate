@@ -5714,6 +5714,96 @@ unit tests; 12 in `tests/test_dashboard.py`'s route-level tests,
 including the CA-unchanged regression). 1005 → 1028 passed, 34
 skipped, zero regressions.
 
+### Rebrand to OptiGate, Phase C: production infrastructure identifiers (2026-09-08)
+
+Project owner's own follow-up question after backup/restore shipped:
+since the project is designed to be redeployed, why not just wipe the
+Beelink and redeploy instead of an in-place Phase C migration? Answer
+given at the time: a true wipe destroys real household state (every
+device, every kid's account, hand-curated Domains/Categories/
+Schedules, and critically the CA certificate every device already
+trusts) unless backup/restore actually covers it -- which, as of the
+entry above, it now does. That changed the risk calculus completely:
+every reason Phase B/earlier Phase-A notes gave for leaving these
+identifiers alone (in-place migration risk on live, un-backed-up data)
+stops applying once there's a real backup and a full wipe+redeploy is
+the plan anyway -- a fresh install just gets created under the new
+names from scratch, nothing to migrate. Project owner confirmed: fold
+in Phase C now, do a full `docker compose down -v` wipe (not just a
+container recreate) specifically to also prove the deploy-from-scratch
+path works for someone with nothing pre-existing, and accept the real
+downtime window.
+
+Every technical identifier still named `parental_proxy`/`PP_`/`pp_`
+renamed to `optigate`/`OG_`/`optigate_`:
+
+- **Docker**: `docker-compose.yml` container names
+  (`parental-proxy*` → `optigate-proxy`/`optigate-adguard`/
+  `optigate-dashboard`/`optigate-arp-worker`/
+  `optigate-nftables-manager`/`optigate-controller`), volume names
+  (`pp_config`/`pp_adguard_conf`/`pp_adguard_work`/`pp_run` →
+  `optigate_config`/`optigate_adguard_conf`/`optigate_adguard_work`/
+  `optigate_run`), and the `/run/parental_proxy` socket-mount path →
+  `/run/optigate` (both the compose mount and every default in
+  `controller/main.py`/`phase3/arp-worker`'s own `main.go` -- these
+  matter beyond cosmetics since the two processes have to agree on the
+  same path to actually speak IPC).
+- **Env vars / DB file**: `PP_DB_PATH`/`PP_CA_CERT_PATH`/
+  `PP_CA_KEY_PATH` → `OG_DB_PATH`/`OG_CA_CERT_PATH`/`OG_CA_KEY_PATH`
+  throughout `common/db.py`, `dashboard/dashboard.py`,
+  `dashboard/dev_server.py`, `proxy/entrypoint.sh`, and
+  `docker-compose.yml`. The database filename itself,
+  `/config/parental_proxy.db` → `/config/optigate.db` -- the one
+  rename explicitly called out as too risky for an in-place Phase C,
+  now safe precisely because this is a fresh volume, not a migration.
+- **In-container install path**: `/opt/parental-proxy/` →
+  `/opt/optigate/` (`proxy/Dockerfile`'s `COPY` destinations,
+  `proxy/authz_helper.py`/`proxy/sni_helper.py`/
+  `proxy/entrypoint.sh`'s `sys.path.insert()` calls,
+  `proxy/squid.conf.template`'s `external_acl_type` helper-script
+  paths).
+- **AdGuard managed-rules marker**: `! === parental_proxy managed
+  rules ===` → `! === optigate managed rules ===`
+  (`controller/adguard_sync.py`). The migration concern from Phase A's
+  own note (an old-marker block orphaned by a text change) doesn't
+  apply here either -- AdGuard's volume is being wiped in the same
+  operation, so there's no existing marker to fail to recognize.
+- **nftables table name**: the literal string `"parental_proxy"` →
+  `"optigate"` in `phase3/nftables-manager`'s Go source
+  (`knftables_adapter.go`, `fault_test.go`, `main.go`,
+  `internal/policy/types.go`) and its `README.md`'s example command.
+  Deliberately did NOT rename the Go **module path**
+  (`github.com/J1nx888/parental_proxy/phase3/...` in both modules'
+  `go.mod` and every cross-package import) -- that path is purely an
+  internal package-qualification string for a local `go build` inside
+  each module's own Dockerfile (no network module resolution involved,
+  nothing external ever imports these as a dependency), so it carries
+  zero functional risk either way and touching it would mean editing
+  15+ import lines across two modules with no Go toolchain available
+  locally to verify the result compiles. Out of scope for this pass,
+  revisit only if it ever actually matters.
+- **Misc zero-risk cosmetic renames folded in while touching these
+  files anyway**: the `pp_sidebar_collapsed` localStorage key →
+  `og_sidebar_collapsed` (client-side only, self-healing), the pytest
+  suite's own scratch temp-DB filename
+  (`parental_proxy_pytest_default.db` → `optigate_pytest_default.db`).
+
+Every doc describing these identifiers as current state updated to
+match (`docs/architecture/overview.md`'s container/volume diagram,
+`docs/dashboard/routes.md`, `docs/database/schema.md`,
+`docs/deployment/setup.md`'s full env-var table, `docs/security/overview.md`,
+`docs/testing/overview.md`, `AGENTS.md`, `README.md`). Historical dated
+entries elsewhere in this file and in `docs/testing/overview.md` (past
+live-testing sessions that literally typed a `docker inspect
+parental-proxy-controller`-style command, or described what a volume
+was called at the time) were deliberately left as accurate history,
+not rewritten -- same discipline this file already applies to every
+other dated entry.
+
+Full local pytest suite re-run clean after every code-level rename
+above: 1028 passed, 34 skipped, zero regressions (no test asserted a
+literal old container/volume/path name).
+
 ---
 
 ## Cross-cutting: security-by-design

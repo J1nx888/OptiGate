@@ -118,14 +118,14 @@ below.
 
 **Default (`docker compose up`):**
 
-- **`proxy`** (container name `parental-proxy`, built from
+- **`proxy`** (container name `optigate-proxy`, built from
   `proxy/Dockerfile`) — the SSL-bumping Squid proxy, running in native
   intercept mode since 2026-08-30 (`http_port 3129 intercept` /
   `https_port 3130 intercept ssl-bump`; see RoadMap.md's Squid
   intercept-mode section). Runs `proxy/entrypoint.sh` as its `ENTRYPOINT`,
   and (since 2026-08-30) `network_mode: host` -- see
   [Networking notes](#networking-notes).
-- **`adguard`** (container name `parental-proxy-adguard`, built from
+- **`adguard`** (container name `optigate-adguard`, built from
   `adguard/Dockerfile`, added 2026-08-30) — a thin wrapper around the
   official `adguard/adguardhome:v0.107.79` image, adding only an
   automated first-run bootstrap (`adguard/entrypoint.sh`, via AdGuard's
@@ -133,10 +133,10 @@ below.
   what enforces the hard-deny invariant for `mode='bump'` domains on
   non-`bump_enabled` devices (see `docs/security/overview.md` §3 and
   `controller/adguard_sync.py`). Also `network_mode: host`. Has its own
-  two volumes (`pp_adguard_conf`, `pp_adguard_work`) — separate from
+  two volumes (`optigate_adguard_conf`, `optigate_adguard_work`) — separate from
   proxy/dashboard's shared one, since it isn't part of this project's own
   application data.
-- **`dashboard`** (container name `parental-proxy-dashboard`, built from
+- **`dashboard`** (container name `optigate-dashboard`, built from
   `dashboard/Dockerfile`) — the Flask web UI (`dashboard/dashboard.py`).
   Listens on port `8787`, run as the `proxy` user (Debian uid 13). Also
   `network_mode: host` since 2026-08-30 — not for traffic interception
@@ -147,9 +147,9 @@ below.
   directly into `DASHBOARD_HOST`, the app's own listen address, instead
   of a Docker port-publish mapping.
 
-`proxy` and `dashboard` mount the same named volume, **`pp_config`**, at
+`proxy` and `dashboard` mount the same named volume, **`optigate_config`**, at
 **`/config`** in each container. That's where the shared SQLite database
-(`/config/parental_proxy.db`) and the generated CA cert/key
+(`/config/optigate.db`) and the generated CA cert/key
 (`/config/ssl_cert/`) live — there's no other IPC between them; they
 coordinate purely through files on this shared volume. `adguard` is
 otherwise fully independent — it currently has no coded integration with
@@ -166,13 +166,13 @@ interception up -d`):**
   (`ARP_WORKER_IFACE`/`CONTROLLER_UID` in `.env`) — no default.
 - **`nftables-manager`** (built from
   `phase3/nftables-manager/Dockerfile`) — reconciles the real kernel's
-  `parental_proxy` nftables table against the DB-computed
+  `optigate` nftables table against the DB-computed
   `DesiredPolicy` blob. Needs `cap_add: [NET_ADMIN]` and
   `network_mode: host`; the image also installs the real `nft` CLI,
   since `knftables` shells out to it.
 - **`controller`** (built from `controller/Dockerfile`) — Milestone 3's
   control loop: talks to `arp-worker` over a Unix socket on the shared
-  `pp_run` volume, reads/writes the shared `pp_config` database, and
+  `optigate_run` volume, reads/writes the shared `optigate_config` database, and
   calls AdGuard's admin API (`network_mode: host`, same reachability
   reason as `dashboard`). Refuses to start without `--gateway-ip`/
   `--gateway-mac` (`GATEWAY_IP`/`GATEWAY_MAC` in `.env`) — no default.
@@ -230,7 +230,7 @@ All variables are optional; defaults apply if a line is missing. Source:
 `.env.example` (LOCAL_NETWORK, DASHBOARD_USER, DASHBOARD_PASSWORD,
 DASHBOARD_BIND, DASHBOARD_URL, ADGUARD_USERNAME, ADGUARD_PASSWORD,
 ADGUARD_WEB_BIND) and `docker-compose.yml`'s `environment:`
-blocks (which also inject DASHBOARD_HOST, PP_DB_PATH, PP_CA_CERT_PATH into
+blocks (which also inject DASHBOARD_HOST, OG_DB_PATH, OG_CA_CERT_PATH into
 the dashboard container).
 
 | Variable | Consumed by | Purpose | Default |
@@ -241,8 +241,8 @@ the dashboard container).
 | `DASHBOARD_BIND` | `docker-compose.yml`, feeds directly into `DASHBOARD_HOST` below | Which address the dashboard's own Flask app listens on. `127.0.0.1` = this machine only (use SSH port-forwarding for remote access); `0.0.0.0` = reachable from any device on the LAN. Since 2026-08-30 (`dashboard` runs `network_mode: host`, see [Two/Three-container architecture](#three-container-architecture)) this is the app's own bind address, not a Docker port-publish mapping. | `127.0.0.1` |
 | `DASHBOARD_URL` | proxy (`entrypoint.sh` appends a `deny_info` line to `squid.conf` when set), dashboard (starts `block_page_server.py` on port 80 when set, added 2026-08-30), controller (`--dashboard-url`, `interception` profile only) | If set (e.g. `http://192.168.1.50:8787`), blocked bump-mode Squid requests redirect to a friendly page (`${DASHBOARD_URL}/blocked`); separately, `adguard_sync.py` points hard-denied domains' plain-HTTP DNS answers at this same IP's port 80 for a friendly AdGuard-side page too (HTTPS deliberately excluded -- see `dashboard/block_page_server.py`'s own docstring). Also required for the memorable troubleshooting address (`optigate.home` by default, Settings page, added 2026-09-07) -- same port-80 server, same IP, a different Host header. Leave blank to skip all three. | (blank) |
 | `DASHBOARD_HOST` | dashboard | Bind address the dashboard container's Flask app actually listens on. Set in `docker-compose.yml` to `${DASHBOARD_BIND:-127.0.0.1}` (see that row above) -- prior to 2026-08-30 this was hardcoded to `0.0.0.0` and a separate port-publish mapping controlled reachability instead. | `${DASHBOARD_BIND:-127.0.0.1}` |
-| `PP_DB_PATH` | dashboard (and set internally by `proxy/entrypoint.sh` for its own process) | Path to the shared SQLite database file inside the container. Hardcoded in `docker-compose.yml`'s dashboard environment block to the shared-volume path. | `/config/parental_proxy.db` |
-| `PP_CA_CERT_PATH` | dashboard | Path to the generated CA certificate, used by the dashboard's CA-download endpoint (Users page download link). Hardcoded in `docker-compose.yml`. | `/config/ssl_cert/ca_cert.pem` |
+| `OG_DB_PATH` | dashboard (and set internally by `proxy/entrypoint.sh` for its own process) | Path to the shared SQLite database file inside the container. Hardcoded in `docker-compose.yml`'s dashboard environment block to the shared-volume path. | `/config/optigate.db` |
+| `OG_CA_CERT_PATH` | dashboard | Path to the generated CA certificate, used by the dashboard's CA-download endpoint (Users page download link). Hardcoded in `docker-compose.yml`. | `/config/ssl_cert/ca_cert.pem` |
 | `CA_ORG` | proxy (`entrypoint.sh`) | Organization name (`/O=`) baked into the generated CA certificate's subject. Not present in `.env.example`; set it directly in `docker-compose.yml`'s proxy environment block or as a shell-exported var if you want to override it. | `OptiGate` |
 | `CA_COMMON_NAME` | proxy (`entrypoint.sh`) | Common name (`/CN=`) baked into the generated CA certificate's subject. Same override mechanism as `CA_ORG`. | `OptiGate CA` |
 | `ADGUARD_USERNAME` | adguard (first-run bootstrap) + dashboard (seeds a matching DB setting, only consumed once) | AdGuard Home's own admin login username -- a separate account from this project's dashboard. | `admin` |
@@ -258,7 +258,7 @@ the dashboard container).
 | `HOUSEHOLD_TIME_ZONE` | dashboard, only consumed once to seed the same-named DB setting | Default IANA time zone new Schedules (Phase 8, `/schedules`) are created with. Editable afterward from the dashboard's own Settings page; each schedule stores its own time zone once created, so changing this later never moves an already-created schedule's meaning. | `UTC` |
 
 Notes:
-- `DASHBOARD_HOST`, `PP_DB_PATH`, and `PP_CA_CERT_PATH` are not meant to be
+- `DASHBOARD_HOST`, `OG_DB_PATH`, and `OG_CA_CERT_PATH` are not meant to be
   set by the user in `.env` — they're fixed values wired directly into
   `docker-compose.yml`'s `dashboard.environment` block, listed here because
   they're part of the deployment's environment surface and a future change
@@ -273,7 +273,7 @@ Notes:
 Generated by `proxy/entrypoint.sh` on the proxy container's first start (only
 if `/config/ssl_cert/ca_cert.pem` or `/config/ssl_cert/ca_key.pem` is
 missing — otherwise it's left alone on every subsequent start, so it's stable
-across restarts and rebuilds as long as the `pp_config` volume persists):
+across restarts and rebuilds as long as the `optigate_config` volume persists):
 
 ```
 openssl req -new -newkey rsa:2048 -sha256 -days 3650 -nodes -x509 \
@@ -288,7 +288,7 @@ A 2048-bit RSA key, self-signed, valid 10 years (3650 days), with
 `basicConstraints=CA:TRUE` and `keyCertSign`/`cRLSign` usage explicitly set
 so Squid's `security_file_certgen` can mint per-site leaf certificates from
 it at request time (SSL-bump). Both files land in `/config/ssl_cert/` on the
-shared `pp_config` volume — same path as `PP_CA_CERT_PATH` used by the
+shared `optigate_config` volume — same path as `OG_CA_CERT_PATH` used by the
 dashboard container.
 
 **What a client device needs to do:** install `ca_cert.pem` (not the key —
@@ -428,7 +428,7 @@ exercises the pure-Python test suite under `tests/`.
 # Start (build if needed) both containers in the background
 docker compose up -d --build
 
-# Stop and remove both containers (the pp_config volume, and its
+# Stop and remove both containers (the optigate_config volume, and its
 # database/CA cert, is preserved)
 docker compose down
 
@@ -466,12 +466,12 @@ scenario entirely by generating a real value up front.
 
 ### Full backup / moving to another machine
 
-The `pp_config` volume holds everything stateful: the CA private key (so
+The `optigate_config` volume holds everything stateful: the CA private key (so
 restored devices don't need to re-trust a new cert) and the full SQLite
 database (users, permissions, log entries). Per the README:
 
 ```
-docker run --rm -v <project-dir-name>_pp_config:/config -v "$PWD":/backup \
+docker run --rm -v <project-dir-name>_optigate_config:/config -v "$PWD":/backup \
   alpine tar czf /backup/pp-config-backup.tar.gz -C /config .
 ```
 

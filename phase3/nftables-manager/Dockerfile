@@ -28,7 +28,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
 COPY --from=build /pp-nftables-manager /usr/local/bin/pp-nftables-manager
 
 # Runs as root deliberately -- CAP_NET_ADMIN alone isn't enough to
-# create/manage the "parental_proxy" nftables table's rules the way
+# create/manage the "optigate" nftables table's rules the way
 # this process needs (confirmed live this session for the analogous
 # Squid case: a non-root effective user loses a capability granted at
 # the container level unless the binary itself carries a matching file

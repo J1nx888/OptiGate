@@ -24,10 +24,10 @@ import (
 )
 
 // Manager wraps a knftables.Interface scoped to the dedicated
-// "parental_proxy" table for everything except one deliberate,
+// "optigate" table for everything except one deliberate,
 // narrow exception: dockerUserNft, used only to fix the FORWARD-chain
 // black hole documented on ensureDockerUserException below. Every
-// other method on this type only ever touches "parental_proxy".
+// other method on this type only ever touches "optigate".
 type Manager struct {
 	nft knftables.Interface
 
@@ -48,11 +48,11 @@ type Manager struct {
 var allManagedSets = append(append([]policy.SetName{}, policy.AllSetNames...), policy.SetBump)
 
 // New opens a knftables interface for the `inet` family's
-// "parental_proxy" table, plus a second interface scoped to Docker's
+// "optigate" table, plus a second interface scoped to Docker's
 // own "ip filter" table (see ensureDockerUserException). Requires
 // CAP_NET_ADMIN.
 func New() (*Manager, error) {
-	nft, err := knftables.New(knftables.InetFamily, "parental_proxy")
+	nft, err := knftables.New(knftables.InetFamily, "optigate")
 	if err != nil {
 		return nil, fmt.Errorf("open knftables interface: %w", err)
 	}
@@ -84,7 +84,7 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 	tx := m.nft.NewTransaction()
 
 	tx.Add(&knftables.Table{
-		Comment: knftables.PtrTo("parental_proxy interception policy -- see RoadMap.md"),
+		Comment: knftables.PtrTo("optigate interception policy -- see RoadMap.md"),
 	})
 
 	for _, name := range allManagedSets {
@@ -123,10 +123,10 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 // exactly that rule (and nothing else a human or another tool put in
 // DOCKER-USER) on every restart, instead of accumulating a duplicate
 // copy each time -- the same idempotency goal EnsureBaseline's own
-// Flush-then-readd achieves within "parental_proxy" itself, just done
+// Flush-then-readd achieves within "optigate" itself, just done
 // by comment-matching here since flushing the whole chain would be
 // unsafe (DOCKER-USER isn't ours to clear).
-const dockerUserComment = "parental_proxy: allow marked connections (see knftables_adapter.go)"
+const dockerUserComment = "optigate: allow marked connections (see knftables_adapter.go)"
 
 // ensureDockerUserException fixes a real gap discovered live 2026-09-07:
 // every container in this project runs with network_mode: host, so
@@ -149,9 +149,9 @@ const dockerUserComment = "parental_proxy: allow marked connections (see knftabl
 // FORWARD chain, before its policy=drop fallback ever applies.
 //
 // Sets are table-scoped in nftables, so a rule living in "ip filter"
-// can't reference "parental_proxy"'s own @bypass_v4/@authenticated_v4
+// can't reference "optigate"'s own @bypass_v4/@authenticated_v4
 // sets directly -- conntrack marks bridge the two tables instead:
-// baselineRules (in "parental_proxy", evaluated first, at the
+// baselineRules (in "optigate", evaluated first, at the
 // prerouting/dstnat hook) tags every bypass_v4/authenticated_v4
 // connection with `ct mark set 0x1`, a kernel-wide, table-independent
 // property; this function's one rule in DOCKER-USER then just checks
@@ -173,7 +173,7 @@ const dockerUserComment = "parental_proxy: allow marked connections (see knftabl
 func (m *Manager) ensureDockerUserException(ctx context.Context) error {
 	if m.dockerUserNft == nil {
 		// A Manager built directly (every existing test, and any future
-		// caller that only needs the "parental_proxy" side) rather than
+		// caller that only needs the "optigate" side) rather than
 		// via New() -- same "nothing to do" outcome as the chain not
 		// existing below, just without a real interface to even try.
 		return nil

@@ -8,7 +8,7 @@
 package policy
 
 // SetName is one of the four named nftables sets from the design doc's
-// skeleton (table inet parental_proxy). Fixed and closed -- unlike the
+// skeleton (table inet optigate). Fixed and closed -- unlike the
 // worker's arbitrary target list, there are exactly these four classes.
 type SetName string
 

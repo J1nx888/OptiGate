@@ -12,7 +12,7 @@ mkdir -p "$CONFIG_DIR" "$SSL_DIR"
 # database". This also repairs a volume left root-owned by an older build.
 chown -R proxy:proxy "$CONFIG_DIR" 2>/dev/null || true
 
-export PP_DB_PATH="$CONFIG_DIR/parental_proxy.db"
+export OG_DB_PATH="$CONFIG_DIR/optigate.db"
 
 # Seed defaults (idempotent -- safe every start, changes nothing on an
 # already-configured database) and bootstrap the env-seeded settings. Run as
@@ -26,10 +26,10 @@ else
   AS_PROXY=""
 fi
 
-$AS_PROXY python3 /opt/parental-proxy/defaults/seed_defaults.py
+$AS_PROXY python3 /opt/optigate/defaults/seed_defaults.py
 $AS_PROXY python3 - << PYEOF
 import sys
-sys.path.insert(0, "/opt/parental-proxy")
+sys.path.insert(0, "/opt/optigate")
 import db
 conn = db.get_conn()
 db.init_db(conn)

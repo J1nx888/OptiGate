@@ -27,7 +27,7 @@ pytest
 - `pytest.ini` (repo root) sets `testpaths = tests` and `python_files = test_*.py`,
   so plain `pytest` from the repo root is sufficient — no path argument needed.
 - No environment variables need to be set by hand. `tests/conftest.py` sets a
-  safe default for `PP_DB_PATH` itself (see below) before anything else can
+  safe default for `OG_DB_PATH` itself (see below) before anything else can
   import `db`.
 - Parallel runs work: every test that touches the DB gets its own throwaway
   SQLite file via pytest's `tmp_path`, so `pytest -n auto` works if
@@ -44,7 +44,7 @@ are **not** installable packages — there is no `setup.py`/`pyproject.toml`
 package layer, and modules do bare imports like `import db` or `import cr_api`,
 never `from common import db`. This mirrors how the Dockerfiles actually
 deploy the code: `common/*.py`, the proxy helpers, and
-`defaults/seed_defaults.py` are all copied flat into `/opt/parental-proxy/` in
+`defaults/seed_defaults.py` are all copied flat into `/opt/optigate/` in
 the proxy image, and `common/*.py` + `dashboard.py` are copied flat into
 `/app/` in the dashboard image. To exercise the real, unmodified code, the
 test suite has to reproduce that same flat layout on `sys.path`.
@@ -73,9 +73,9 @@ entirely rather than documenting a workaround for it. If you ever do need to
 run one of the flat modules standalone (outside pytest) and must fall back to
 `PYTHONPATH`, remember: `;` on Windows cmd/PowerShell, `:` on Git Bash/WSL/Linux/macOS.
 
-`conftest.py` also sets a default `PP_DB_PATH` env var (via `os.environ.setdefault`,
+`conftest.py` also sets a default `OG_DB_PATH` env var (via `os.environ.setdefault`,
 pointed at a throwaway file under the OS temp dir) before `pytest` is imported,
-because `db.py` reads `PP_DB_PATH` once at its own import time into a
+because `db.py` reads `OG_DB_PATH` once at its own import time into a
 module-level `Path`. This is just a safe fallback for whichever import happens
 first in the session — individual tests still isolate themselves via the
 `conn` fixture (below), which monkeypatches `db.DB_PATH` directly.
@@ -1115,7 +1115,7 @@ environment, with no Docker and no real network access (enforced by
 `block_network`). It does **not** verify anything Phase 2/3 (real Squid
 process, real container networking, a real device pulling real Crunchyroll
 content) — that still requires manual testing against a real deployment (see
-the parental_proxy smoke-test VM). For how this workflow interacts with
+the OptiGate smoke-test VM). For how this workflow interacts with
 deploy triggers, see [`docs/deployment/setup.md`](../deployment/setup.md);
 this document only covers what CI verifies, not when/how it gates deploys.
 

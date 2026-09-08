@@ -53,7 +53,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 
-sys.path.insert(0, "/opt/parental-proxy")
+sys.path.insert(0, "/opt/optigate")
 
 import db
 import device_identity

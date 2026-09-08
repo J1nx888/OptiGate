@@ -13,11 +13,11 @@ from pathlib import Path
 # so it needs to go on sys.path before `import dashboard` pulls them in.
 sys.path.insert(0, str(Path(__file__).parent.parent / "common"))
 
-tmp_dir = Path(tempfile.gettempdir()) / "pp_dashboard_dev"
+tmp_dir = Path(tempfile.gettempdir()) / "optigate_dashboard_dev"
 tmp_dir.mkdir(exist_ok=True)
 
-os.environ.setdefault("PP_DB_PATH", str(tmp_dir / "dev.db"))
-os.environ.setdefault("PP_CA_CERT_PATH", str(tmp_dir / "ca_cert.pem"))
+os.environ.setdefault("OG_DB_PATH", str(tmp_dir / "dev.db"))
+os.environ.setdefault("OG_CA_CERT_PATH", str(tmp_dir / "ca_cert.pem"))
 os.environ.setdefault("DASHBOARD_USER", "admin")
 os.environ.setdefault("DASHBOARD_PASSWORD", "devpassword123")
 os.environ.setdefault("DASHBOARD_HOST", "127.0.0.1")

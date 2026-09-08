@@ -364,7 +364,7 @@ phase3/
                       DB-computed policy the controller writes
 ```
 
-**The one datastore is one SQLite file** (`/config/parental_proxy.db`, WAL
+**The one datastore is one SQLite file** (`/config/optigate.db`, WAL
 mode) on a shared Docker volume -- every container that touches it opens
 it directly, no other IPC between the Python side and the Go side. There's
 no caching layer to go stale: `ttl=0` on every `external_acl_type` line
@@ -447,7 +447,7 @@ needs a real household LAN or real hardware.
 Same idea as v1, different filename:
 
 ```
-docker run --rm -v <project-dir-name>_pp_config:/config -v "$PWD":/backup \
+docker run --rm -v <project-dir-name>_optigate_config:/config -v "$PWD":/backup \
   alpine tar czf /backup/pp-config-backup.tar.gz -C /config .
 ```
 

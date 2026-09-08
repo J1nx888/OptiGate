@@ -629,7 +629,7 @@ def _parse_block_page_ip(dashboard_url: str | None) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--socket", default="/run/parental_proxy/arp-worker.sock")
+    parser.add_argument("--socket", default="/run/optigate/arp-worker.sock")
     parser.add_argument("--heartbeat-interval", type=float, default=2.0)
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument(

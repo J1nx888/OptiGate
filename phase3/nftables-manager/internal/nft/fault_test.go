@@ -104,7 +104,7 @@ func (f *failingRun) Run(ctx context.Context, tx *knftables.Transaction) error {
 
 func TestApplyDiffs_PropagatesTransactionError(t *testing.T) {
 	m := &Manager{nft: &failingRun{
-		Fake: knftables.NewFake(knftables.InetFamily, "parental_proxy"),
+		Fake: knftables.NewFake(knftables.InetFamily, "optigate"),
 		err:  errors.New("boom"),
 	}}
 	diffs := map[policy.SetName]policy.SetDiff{
@@ -120,7 +120,7 @@ func TestApplyDiffs_EmptyDiffsNeverCallsRun(t *testing.T) {
 	// the deliberately-wrong error below -- passing proves it
 	// short-circuited instead.
 	m := &Manager{nft: &failingRun{
-		Fake: knftables.NewFake(knftables.InetFamily, "parental_proxy"),
+		Fake: knftables.NewFake(knftables.InetFamily, "optigate"),
 		err:  errors.New("Run must not be called for an empty diff"),
 	}}
 	if err := m.ApplyDiffs(context.Background(), map[policy.SetName]policy.SetDiff{}); err != nil {
@@ -136,7 +136,7 @@ func TestApplyDiffs_EmptyDiffsNeverCallsRun(t *testing.T) {
 // that proved the real kernel behaves this way; this proves the Go
 // logic driving it does too, fast enough to run on every change.
 func TestEnsureBaselineThenApplyDiffs_AgainstFake(t *testing.T) {
-	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
 	m := &Manager{nft: fake}
 	ctx := context.Background()
 
@@ -194,7 +194,7 @@ func TestEnsureBaselineThenApplyDiffs_AgainstFake(t *testing.T) {
 // of every rule (knftables' Add() always appends a Rule rather than
 // deduplicating it by content, unlike tables/sets/chains).
 func TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls(t *testing.T) {
-	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
 	m := &Manager{nft: fake}
 	ctx := context.Background()
 
@@ -285,10 +285,10 @@ func TestBaselineRules_MarkForwardableTraffic(t *testing.T) {
 
 // TestEnsureDockerUserException_NilManagerIsANoOp covers a Manager built
 // directly (every test above does this, and any future caller that only
-// needs the "parental_proxy" side) rather than via New() -- dockerUserNft
+// needs the "optigate" side) rather than via New() -- dockerUserNft
 // is nil in that case, and EnsureBaseline must not panic calling into it.
 func TestEnsureDockerUserException_NilManagerIsANoOp(t *testing.T) {
-	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
 	m := &Manager{nft: fake}
 	if err := m.EnsureBaseline(context.Background()); err != nil {
 		t.Fatalf("EnsureBaseline with a nil dockerUserNft: %v", err)
@@ -301,7 +301,7 @@ func TestEnsureDockerUserException_NilManagerIsANoOp(t *testing.T) {
 // disabled) must be logged, not treated as a fatal error -- there's no
 // drop policy to work around in that case.
 func TestEnsureDockerUserException_MissingChainIsANoOp(t *testing.T) {
-	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
 	dockerFake := knftables.NewFake(knftables.IPv4Family, "filter")
 	// Deliberately never add a DOCKER-USER chain to dockerFake.
 	m := &Manager{nft: fake, dockerUserNft: dockerFake}
@@ -317,7 +317,7 @@ func TestEnsureDockerUserException_MissingChainIsANoOp(t *testing.T) {
 // rule accepting ct-marked traffic, tagged with dockerUserComment so a
 // later call can find and replace it.
 func TestEnsureDockerUserException_InsertsExactlyOneAcceptRule_AgainstFake(t *testing.T) {
-	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
 	dockerFake := knftables.NewFake(knftables.IPv4Family, "filter")
 	ctx := context.Background()
 
@@ -367,7 +367,7 @@ func TestEnsureDockerUserException_InsertsExactlyOneAcceptRule_AgainstFake(t *te
 // copy of it every time, while still never touching anyone else's rules
 // in that shared chain.
 func TestEnsureDockerUserException_IsIdempotentAcrossRepeatedCalls(t *testing.T) {
-	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
 	dockerFake := knftables.NewFake(knftables.IPv4Family, "filter")
 	ctx := context.Background()
 
@@ -396,7 +396,7 @@ func TestEnsureDockerUserException_IsIdempotentAcrossRepeatedCalls(t *testing.T)
 }
 
 func TestEnsureBaseline_InstallsDNSOverTLSRedirect_AgainstFake(t *testing.T) {
-	fake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
 	m := &Manager{nft: fake}
 	ctx := context.Background()
 

@@ -52,16 +52,16 @@ RUN setcap 'cap_net_admin=+ep' /usr/sbin/squid
 # this ownership so the squid helper processes (which run as `proxy`) can
 # write the SQLite database. entrypoint.sh also re-chowns it on every start
 # to cover volumes created by the dashboard container.
-RUN mkdir -p /opt/parental-proxy/defaults /config \
+RUN mkdir -p /opt/optigate/defaults /config \
     && chown -R proxy:proxy /config
 
-COPY common/*.py /opt/parental-proxy/
-COPY proxy/sni_helper.py proxy/authz_helper.py /opt/parental-proxy/
-COPY defaults/seed_defaults.py defaults/ai_sites_seed.py /opt/parental-proxy/defaults/
+COPY common/*.py /opt/optigate/
+COPY proxy/sni_helper.py proxy/authz_helper.py /opt/optigate/
+COPY defaults/seed_defaults.py defaults/ai_sites_seed.py /opt/optigate/defaults/
 COPY proxy/squid.conf.template /etc/squid/squid.conf.template
 COPY proxy/entrypoint.sh /entrypoint.sh
 
-RUN chmod +x /entrypoint.sh /opt/parental-proxy/*.py /opt/parental-proxy/defaults/*.py
+RUN chmod +x /entrypoint.sh /opt/optigate/*.py /opt/optigate/defaults/*.py
 
 # Intercept-mode ports (RoadMap.md's Squid intercept-mode section, locked
 # 2026-08-30) -- nftables NAT-redirects a bump_v4 device's own port 80/443

@@ -925,7 +925,7 @@ left it.
 Run directly: `python3 defaults/seed_defaults.py` (imports `db` from the
 same directory via a `sys.path.insert` at the top of the file -- run it
 from a context where `common/` is importable as `db`, e.g. from inside the
-proxy container's `/opt/parental-proxy/`, or with that directory added to
+proxy container's `/opt/optigate/`, or with that directory added to
 `PYTHONPATH`/`sys.path` manually). Also imports its sibling
 `defaults/ai_sites_seed.py` by bare module name (`from ai_sites_seed import
 AI_SITE_DOMAINS`) -- both files must be copied into the same directory in
@@ -934,20 +934,20 @@ defaults/seed_defaults.py defaults/ai_sites_seed.py ...` line.
 
 ## Running / resetting the database locally
 
-- **Path:** controlled entirely by the `PP_DB_PATH` environment variable,
+- **Path:** controlled entirely by the `OG_DB_PATH` environment variable,
   read once at import time into the module-level `db.DB_PATH` (default
-  `/config/parental_proxy.db`, i.e. the shared Docker volume `pp_config`
+  `/config/optigate.db`, i.e. the shared Docker volume `optigate_config`
   mounted into both the `proxy` and `dashboard` containers per
   `docker-compose.yml`). There is no CLI flag -- only the env var.
 - **Sidecar files:** because `journal_mode=WAL` is on, expect
-  `parental_proxy.db-wal` and `parental_proxy.db-shm` alongside the main
+  `optigate.db-wal` and `optigate.db-shm` alongside the main
   file; a full reset means removing all three (or the whole volume).
 - **No dedicated reset script.** To start clean:
-  - **Docker:** `docker compose down -v` removes the `pp_config` volume
+  - **Docker:** `docker compose down -v` removes the `optigate_config` volume
     entirely (deletes the DB, the WAL/SHM sidecars, and the generated CA
     certificate together), then `docker compose up` recreates everything
     and re-runs `proxy/entrypoint.sh`'s seeding on next start.
-  - **Locally / outside Docker:** delete the file at whatever `PP_DB_PATH`
+  - **Locally / outside Docker:** delete the file at whatever `OG_DB_PATH`
     points to (plus its `-wal`/`-shm` siblings if present), then run
     `python3 defaults/seed_defaults.py` (which itself calls
     `db.init_db()` before seeding) to get a freshly-schema'd, freshly-seeded
@@ -956,12 +956,12 @@ defaults/seed_defaults.py defaults/ai_sites_seed.py ...` line.
     throwaway SQLite file under `tmp_path` with the schema applied and
     *no* seed data (`db.init_db()` only, `seed()` is not called) --
     monkeypatches `db.DB_PATH` directly rather than touching the env var,
-    since `db.py` reads `PP_DB_PATH` once at import time. A safe fallback
-    path (`%TEMP%/parental_proxy_pytest_default.db` equivalent) is set via
-    `os.environ.setdefault("PP_DB_PATH", ...)` at collection time so a
+    since `db.py` reads `OG_DB_PATH` once at import time. A safe fallback
+    path (`%TEMP%/optigate_pytest_default.db` equivalent) is set via
+    `os.environ.setdefault("OG_DB_PATH", ...)` at collection time so a
     stray early import of `db` never touches a real `/config` path.
 - **Inspecting the live file directly:** it's a normal SQLite database --
-  `sqlite3 /path/to/parental_proxy.db` (or any SQLite browser) works, but
+  `sqlite3 /path/to/optigate.db` (or any SQLite browser) works, but
   do so read-only or briefly while both containers are stopped/idle if
   writing, since the WAL mode assumes cooperating connections rather than
   an external tool holding a long write transaction.

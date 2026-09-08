@@ -30,7 +30,7 @@ import (
 
 func main() {
 	ifaceName := flag.String("iface", "", "LAN interface to bind to (required)")
-	socketPath := flag.String("socket", "/run/parental_proxy/arp-worker.sock", "controller IPC socket path")
+	socketPath := flag.String("socket", "/run/optigate/arp-worker.sock", "controller IPC socket path")
 	// -1 default (not 0) deliberately: 0 is root's real, legitimate UID, so
 	// using it as the "not provided" sentinel would make this flag
 	// silently un-settable to 0 -- found via a real integration test where
