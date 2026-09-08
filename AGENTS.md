@@ -8,7 +8,7 @@ deliberately short — the authoritative technical reference is under
 
 ## What this is
 
-**Parental Proxy v2** — a self-hosted, SSL-Bumping Squid proxy plus a Flask
+**OptiGate** (formerly "Parental Proxy v2") — a self-hosted, SSL-Bumping Squid proxy plus a Flask
 admin dashboard that enforces per-person website/show permissions on a home
 network, with a full audit log and a one-click "approve" workflow. It began
 as a Crunchyroll-only whitelist proxy and is mid-way through a larger

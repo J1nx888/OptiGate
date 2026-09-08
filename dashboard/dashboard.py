@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Web dashboard for the parental proxy v2.
+"""Web dashboard for OptiGate (formerly "parental proxy v2").
 
 Everything configurable lives here: users (proxy logins), domains (with
 mode splice/bump/trusted, global-vs-per-user access, and per-domain path
@@ -246,7 +246,7 @@ def require_admin(view):
                 _log_failed_admin_login(client_ip, basic_auth.username)
             return Response(
                 "Authentication required", 401,
-                {"WWW-Authenticate": 'Basic realm="Parental Proxy Admin"'},
+                {"WWW-Authenticate": 'Basic realm="OptiGate Admin"'},
             )
         if basic_auth is not None:
             _ADMIN_LOGIN_LIMITER.clear(client_ip)
@@ -268,7 +268,7 @@ def logout():
     impossible case that the real admin credentials happen to literally be
     "logout"/"logout"."""
     return Response(
-        "Logged out.", 401, {"WWW-Authenticate": 'Basic realm="Parental Proxy Admin"'}
+        "Logged out.", 401, {"WWW-Authenticate": 'Basic realm="OptiGate Admin"'}
     )
 
 
@@ -282,7 +282,7 @@ BASE = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Parental Proxy</title>
+<title>OptiGate</title>
 <meta name="theme-color" content="#2f6fed">
 <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
 <link rel="icon" href="{{ url_for('static', filename='icons/favicon.ico') }}">
@@ -298,7 +298,7 @@ try { if (localStorage.getItem("pp_sidebar_collapsed") === "1") document.documen
   <nav class="sidebar">
     <a class="sidebar-brand" href="{{ url_for('report') }}">
       <img src="{{ url_for('static', filename='icons/icon-192.png') }}" alt="">
-      <span class="sidebar-label">Parental Proxy</span>
+      <span class="sidebar-label">OptiGate</span>
     </a>
     <div class="sidebar-nav">
       <a class="sidebar-item {{ 'active' if active=='report' else '' }}" href="{{ url_for('report') }}" title="Report">
@@ -613,7 +613,7 @@ def ca_cert():
         )
     return send_file(
         CA_CERT_PATH, mimetype="application/x-x509-ca-cert",
-        as_attachment=True, download_name="parental-proxy-ca.crt",
+        as_attachment=True, download_name="optigate-ca.crt",
     )
 
 
@@ -776,8 +776,8 @@ def regenerate_ca_cert():
     exact same openssl invocation proxy/entrypoint.sh uses on first run
     (RSA 2048, SHA-256, 10-year validity, the same two required
     extensions), just admin-triggered instead of only-if-missing."""
-    org = (request.form.get("ca_org") or "Parental Proxy").strip()[:200]
-    common_name = (request.form.get("ca_common_name") or "Parental Proxy CA").strip()[:200]
+    org = (request.form.get("ca_org") or "OptiGate").strip()[:200]
+    common_name = (request.form.get("ca_common_name") or "OptiGate CA").strip()[:200]
     if not org or not common_name:
         return flash_redirect("settings_page", "Org and Common Name can't be empty.", error=True)
     # "/" is openssl -subj's own field separator -- letting it through
@@ -6493,8 +6493,8 @@ SETTINGS_BODY = """
 <summary>Regenerate (create a fresh self-signed CA)</summary>
 <form class="add-form" method="post" action="{{ url_for('regenerate_ca_cert') }}"
       onsubmit="return confirm('This replaces the CA certificate every device currently trusts. Every device will need to re-trust the new one, and bump-mode sites will show certificate errors until they do -- the proxy container also needs a restart afterward. Continue?')">
-  <input type="text" name="ca_org" placeholder="Org" value="Parental Proxy">
-  <input type="text" name="ca_common_name" placeholder="Common name" value="Parental Proxy CA">
+  <input type="text" name="ca_org" placeholder="Org" value="OptiGate">
+  <input type="text" name="ca_common_name" placeholder="Common name" value="OptiGate CA">
   <button class="danger" type="submit">Regenerate CA certificate</button>
 </form>
 </details>

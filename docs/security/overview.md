@@ -66,7 +66,7 @@ All in `dashboard/dashboard.py`:
   constant-time compare on the password digest via `verify_password`.
 - `require_admin(view)` — a decorator (`functools.wraps`) that calls
   `_check_admin_auth(request.authorization)` and returns a 401 with a
-  `WWW-Authenticate: Basic realm="Parental Proxy Admin"` header on failure.
+  `WWW-Authenticate: Basic realm="OptiGate Admin"` header on failure.
   Applied to essentially every route in the dashboard except `/ca-cert`
   (deliberately public — the CA certificate is not a secret, every client
   device needs to fetch it) and the `/blocked` friendly block page.
@@ -620,7 +620,7 @@ certificate is not a secret).
 ```sh
 openssl req -new -newkey rsa:2048 -sha256 -days 3650 -nodes -x509 \
   -keyout "$SSL_DIR/ca_key.pem" -out "$SSL_DIR/ca_cert.pem" \
-  -subj "/O=${CA_ORG:-Parental Proxy}/CN=${CA_COMMON_NAME:-Parental Proxy CA}" \
+  -subj "/O=${CA_ORG:-OptiGate}/CN=${CA_COMMON_NAME:-OptiGate CA}" \
   -addext "basicConstraints=critical,CA:TRUE" \
   -addext "keyUsage=critical,keyCertSign,cRLSign"
 ```

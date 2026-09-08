@@ -1,4 +1,4 @@
-/* Parental Proxy dashboard -- design system.
+/* OptiGate dashboard -- design system.
    Vendored, no build step: plain CSS custom properties, light by default,
    automatic dark mode via prefers-color-scheme (no manual toggle exists in
    this app, so there's no [data-theme] override to worry about). */

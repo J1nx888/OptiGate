@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "=== Parental Proxy v2 -- setup ==="
+echo "=== OptiGate setup ==="
 echo
 
 if ! command -v docker >/dev/null 2>&1; then

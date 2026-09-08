@@ -66,7 +66,7 @@ class CategoryFetchError(RuntimeError):
 
 
 def _fetch(url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
-    request = Request(url, headers={"User-Agent": "parental_proxy-category-fetch/1.0"})
+    request = Request(url, headers={"User-Agent": "optigate-category-fetch/1.0"})
     try:
         with _OPENER.open(request, timeout=timeout) as response:
             data = response.read(MAX_RESPONSE_BYTES + 1)

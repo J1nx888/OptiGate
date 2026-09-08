@@ -243,8 +243,8 @@ the dashboard container).
 | `DASHBOARD_HOST` | dashboard | Bind address the dashboard container's Flask app actually listens on. Set in `docker-compose.yml` to `${DASHBOARD_BIND:-127.0.0.1}` (see that row above) -- prior to 2026-08-30 this was hardcoded to `0.0.0.0` and a separate port-publish mapping controlled reachability instead. | `${DASHBOARD_BIND:-127.0.0.1}` |
 | `PP_DB_PATH` | dashboard (and set internally by `proxy/entrypoint.sh` for its own process) | Path to the shared SQLite database file inside the container. Hardcoded in `docker-compose.yml`'s dashboard environment block to the shared-volume path. | `/config/parental_proxy.db` |
 | `PP_CA_CERT_PATH` | dashboard | Path to the generated CA certificate, used by the dashboard's CA-download endpoint (Users page download link). Hardcoded in `docker-compose.yml`. | `/config/ssl_cert/ca_cert.pem` |
-| `CA_ORG` | proxy (`entrypoint.sh`) | Organization name (`/O=`) baked into the generated CA certificate's subject. Not present in `.env.example`; set it directly in `docker-compose.yml`'s proxy environment block or as a shell-exported var if you want to override it. | `Parental Proxy` |
-| `CA_COMMON_NAME` | proxy (`entrypoint.sh`) | Common name (`/CN=`) baked into the generated CA certificate's subject. Same override mechanism as `CA_ORG`. | `Parental Proxy CA` |
+| `CA_ORG` | proxy (`entrypoint.sh`) | Organization name (`/O=`) baked into the generated CA certificate's subject. Not present in `.env.example`; set it directly in `docker-compose.yml`'s proxy environment block or as a shell-exported var if you want to override it. | `OptiGate` |
+| `CA_COMMON_NAME` | proxy (`entrypoint.sh`) | Common name (`/CN=`) baked into the generated CA certificate's subject. Same override mechanism as `CA_ORG`. | `OptiGate CA` |
 | `ADGUARD_USERNAME` | adguard (first-run bootstrap) + dashboard (seeds a matching DB setting, only consumed once) | AdGuard Home's own admin login username -- a separate account from this project's dashboard. | `admin` |
 | `ADGUARD_PASSWORD` | adguard (first-run bootstrap), dashboard (seeds a matching DB setting, only consumed once), and controller (`interception` profile -- calls AdGuard's own API) | AdGuard Home's own admin login password. `./setup.sh` generates a real value here before anything ever starts (also self-heals an existing `.env` with this left blank -- see RoadMap.md's 2026-09-07 entry for the real bug this fixes). If you're filling in `.env` by hand instead of using `./setup.sh`, set a real value yourself -- leaving it blank still lets `adguard` boot (it self-generates one), but `controller` will then refuse to start once the interception profile is enabled, since it has no way to learn that generated value. | (blank → `./setup.sh` fills it in; genuinely blank otherwise) |
 | `ADGUARD_WEB_BIND` | adguard (`adguard/entrypoint.sh`, first run only) | Which address AdGuard Home's own admin UI binds to. `127.0.0.1` = this machine only; `0.0.0.0` = reachable from any device on the LAN. Independent of `DASHBOARD_BIND` -- this gates a second, separate admin login surface. | `127.0.0.1` |
@@ -264,7 +264,7 @@ Notes:
   they're part of the deployment's environment surface and a future change
   to the compose file might need to know what they're for.
 - `CA_ORG` / `CA_COMMON_NAME` are read by `entrypoint.sh` via shell parameter
-  expansion (`${CA_ORG:-Parental Proxy}`) but are not passed through by
+  expansion (`${CA_ORG:-OptiGate}`) but are not passed through by
   `docker-compose.yml`'s current `proxy.environment` block — to override
   them you'd need to add entries there.
 
@@ -279,7 +279,7 @@ across restarts and rebuilds as long as the `pp_config` volume persists):
 openssl req -new -newkey rsa:2048 -sha256 -days 3650 -nodes -x509 \
   -keyout "$SSL_DIR/ca_key.pem" \
   -out "$SSL_DIR/ca_cert.pem" \
-  -subj "/O=${CA_ORG:-Parental Proxy}/CN=${CA_COMMON_NAME:-Parental Proxy CA}" \
+  -subj "/O=${CA_ORG:-OptiGate}/CN=${CA_COMMON_NAME:-OptiGate CA}" \
   -addext "basicConstraints=critical,CA:TRUE" \
   -addext "keyUsage=critical,keyCertSign,cRLSign"
 ```

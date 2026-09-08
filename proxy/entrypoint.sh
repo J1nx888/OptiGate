@@ -50,7 +50,7 @@ if [ ! -f "$SSL_DIR/ca_cert.pem" ] || [ ! -f "$SSL_DIR/ca_key.pem" ]; then
   openssl req -new -newkey rsa:2048 -sha256 -days 3650 -nodes -x509 \
     -keyout "$SSL_DIR/ca_key.pem" \
     -out "$SSL_DIR/ca_cert.pem" \
-    -subj "/O=${CA_ORG:-Parental Proxy}/CN=${CA_COMMON_NAME:-Parental Proxy CA}" \
+    -subj "/O=${CA_ORG:-OptiGate}/CN=${CA_COMMON_NAME:-OptiGate CA}" \
     -addext "basicConstraints=critical,CA:TRUE" \
     -addext "keyUsage=critical,keyCertSign,cRLSign"
 fi

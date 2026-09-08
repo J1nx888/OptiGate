@@ -1,6 +1,6 @@
-# Parental Proxy v2
+# OptiGate
 
-A from-scratch rewrite of the v1 Crunchyroll whitelist proxy, now aimed at
+A from-scratch rewrite of the original Crunchyroll whitelist proxy, now aimed at
 replacing a commercial whole-home filter (Bark Home) rather than just
 Crunchyroll. Same core idea (an SSL-bumping Squid proxy enforcing what
 gets through), rebuilt around four features:

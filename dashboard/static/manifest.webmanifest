@@ -1,7 +1,7 @@
 {
-  "name": "Parental Proxy",
-  "short_name": "ParentalProxy",
-  "description": "Admin dashboard for the parental proxy: users, sites, shows, and the access report.",
+  "name": "OptiGate",
+  "short_name": "OptiGate",
+  "description": "Admin dashboard for OptiGate: users, sites, shows, and the access report.",
   "start_url": "/report",
   "scope": "/",
   "display": "standalone",

@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the parental_proxy Tier-1 (no-Docker) suite.
+"""Shared pytest fixtures for OptiGate's Tier-1 (no-Docker) suite.
 
 Every component in this repo is deployed as a *flat* directory in its
 container (see the Dockerfiles): common/*.py, the proxy helpers, and

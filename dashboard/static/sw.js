@@ -1,4 +1,4 @@
-// Parental Proxy dashboard service worker.
+// OptiGate dashboard service worker.
 //
 // Served at /sw.js (not /static/sw.js -- see the dedicated Flask route in
 // dashboard.py) so its default scope is the whole app, not just /static/.

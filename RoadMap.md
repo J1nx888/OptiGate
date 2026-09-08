@@ -8,8 +8,9 @@
 
 ## Where this is headed
 
-`parental_proxy` started as a Crunchyroll-only whitelist proxy and is
-becoming a full self-hosted replacement for **Bark Home** — whole-home
+**OptiGate** (formerly `parental_proxy`) started as a Crunchyroll-only
+whitelist proxy and is becoming a full self-hosted replacement for
+**Bark Home** — whole-home
 content filtering, schedules, and reporting for every device on the LAN,
 not just ones that can be configured to use an explicit proxy.
 
@@ -5562,6 +5563,63 @@ unaffected by the active search, and the Next link correctly carrying
 
 3 new tests in `tests/test_dashboard.py`. 1002 → 1005 passed, 34
 skipped, zero regressions.
+
+### Rebrand to OptiGate, Phase A: display & docs (2026-09-08)
+
+Project owner asked to rename the project to **OptiGate** and update
+references throughout. The name itself wasn't new — `optigate.home`
+has been the memorable local hostname since Phase 21 — this made the
+outer wrapper match the brand already baked into the product.
+
+Given the scope (26+ files, and "parental_proxy"/`PP_` baked into the
+GitHub repo name, production container names, the SQLite DB file path,
+a Docker volume, and a kernel-level nftables table name on the live
+Beelink box), split into three phases by risk rather than one blind
+find-and-replace:
+
+- **Phase A (this entry)**: every purely display-facing or narrative
+  reference — the dashboard's `<title>`, sidebar brand label, HTTP
+  Basic Auth realm string (`"OptiGate Admin"`), the PWA manifest's
+  `name`/`short_name`/`description`, the CA certificate's default
+  Org/Common Name (`OptiGate`/`OptiGate CA`, in both
+  `proxy/entrypoint.sh`'s first-boot generation and
+  `dashboard.py`'s "Regenerate CA" form — kept in sync since the
+  latter's own docstring claims they match), the downloaded CA
+  filename (`optigate-ca.crt`), an outbound User-Agent string
+  (`common/category_fetch.py`, zero functional risk, never matched by
+  anything), and prose in README.md/RoadMap.md/AGENTS.md/`docs/*.md`
+  and module docstrings. Live-verified in the dev server: tab title,
+  sidebar label, CA form's pre-filled values, and the real
+  `WWW-Authenticate` header all confirmed. 1005 passed, zero
+  regressions (no test asserted the old literal strings).
+- **Deliberately NOT touched in Phase A**: anything that's also a real
+  technical identifier still matching the live production system --
+  `PP_DB_PATH`/`parental_proxy.db`, `/opt/parental-proxy/` (the
+  in-container install path), the `parental-proxy*` Docker container
+  names, the `pp_run` volume, the nftables table literally named
+  `parental_proxy`, and the AdGuard managed-rules marker comment
+  (`! === parental_proxy managed rules ===`, actually persisted in
+  AdGuard's own rules file on production — changing this text without
+  a migration step would make the next sync fail to recognize the old
+  managed block). Doc references to these (setup.md's env-var table,
+  security/overview.md, README's clone URL, AGENTS.md's DB-path
+  mention) were left matching the current real names rather than
+  describing a rename that hasn't happened yet.
+- **Phase B (planned, not yet done)**: rename the GitHub repo itself
+  (`J1nx888/parental_proxy` → `J1nx888/OptiGate`) and update the local
+  git remote + every clone-URL reference in README/setup docs.
+- **Phase C (planned, not yet done, needs its own maintenance
+  window)**: the production infrastructure identifiers listed above.
+  Recommended explicitly to the project owner: do NOT rename the
+  actual database file path even in Phase C — it's an internal detail
+  nobody but an admin ever sees, and the real risk (the running
+  container silently starting a "fresh empty" database if the actual
+  file isn't moved in lockstep with an env var change) isn't worth it
+  for zero user-facing benefit. Container names, the `pp_run` volume,
+  and the nftables table name are lower-risk (no persistent data) but
+  still need coordinated code changes + rebuild + redeploy, plus a
+  one-time cleanup of the AdGuard managed-rules marker so the next
+  sync cycle doesn't orphan the old block.
 
 ---
 

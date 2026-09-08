@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared SQLite access for the parental proxy: schema, connections, seeding.
+"""Shared SQLite access for OptiGate: schema, connections, seeding.
 
 Every component (sni_helper, authz_helper, dashboard) opens the same
 database file on the shared volume. WAL mode + a busy timeout let multiple
