@@ -5966,6 +5966,83 @@ previously-undocumented deployment bug (the avahi/5353 conflict) was
 found and permanently fixed as a direct result of actually doing this,
 not something a smaller-scope test would have surfaced.
 
+### optigate.home rewrite: found silently broken by default, fixed at the root (2026-09-08)
+
+Direct follow-up to the flagged gap above. Project owner asked two
+things: push the missing rewrite now, and make sure a fresh install
+always pushes it, "otherwise other people will not know what is
+wrong." That second framing is what turned this into a real fix
+instead of a one-off manual push.
+
+**Root cause, once actually traced**: `sync_optigate_rewrite()` lived
+in `controller/adguard_sync.py`, called only from that module's
+periodic `sync_once()` cycle -- which only ever runs under the
+`interception` compose profile. That profile is OFF by default for
+most installs (it's the ARP-spoofing/interception feature, an
+advanced opt-in, not something most users would enable just to get a
+memorable troubleshooting hostname). Meanwhile `update_optigate_hostname()`
+(the Settings page route) unconditionally flashed "Saved. The address
+is now X.home." on every save, regardless of whether anything using
+that setting would ever actually run. The result: for the overwhelming
+majority of installs, `optigate.home` was designed to never work at
+all, silently, with a UI that looked identical to a working
+configuration. The production Beelink box happened to have `controller`
+running historically (for interception testing), which is the only
+reason this had ever worked there before the wipe -- masking the
+underlying default-install gap for as long as this project has existed.
+
+**The fix, at the right depth, not a bandaid**: moved
+`sync_optigate_rewrite()` (and `_parse_block_page_ip()`, renamed
+`parse_block_page_ip()`) out of `controller/adguard_sync.py` into a new
+`common/optigate_rewrite.py` -- the same "both dashboard's on-demand
+path and controller's periodic path need this" reasoning
+`category_fetch.py` already established for an analogous case.
+`dashboard.py` now:
+- Calls it directly and synchronously from `update_optigate_hostname()`,
+  reporting real success ("Saved and pushed to AdGuard") or a specific
+  reason it didn't happen (DASHBOARD_URL not a plain IP, AdGuard
+  credentials unset, or a real `AdGuardError`) as an error flash --
+  never a blind "Saved" that might be a lie.
+- Fires one best-effort attempt at every dashboard container start
+  (never fatal -- logged and swallowed on any failure), so a genuinely
+  fresh install self-heals the moment AdGuard is reachable, without an
+  admin needing to know this route exists or visit Settings at all.
+- Shows a live, read-only status right on the Settings page
+  (`_optigate_rewrite_status()`, a plain `get_rewrites()` check, never
+  a write) -- "live -- resolves to X" or a specific reason it isn't --
+  so a gap that opens up LATER (AdGuard reset independently of this
+  dashboard, exactly what the wipe-and-redeploy just did) is visible on
+  the page itself, not just discoverable by asking why a hostname
+  doesn't resolve.
+- Piggybacks a retry onto the existing "Check for filter updates now"
+  button, giving a one-click manual fallback beyond restarting the
+  whole container.
+
+`controller/adguard_sync.py`'s own periodic call is now a second,
+redundant path for when the `interception` profile happens to be
+running -- no longer the ONLY path, which is what made this silently
+break for everyone not running it.
+
+6 pre-existing tests in `tests/test_controller_adguard_sync.py` needed
+their monkeypatch target updated (`adguard_sync.adguard_client` ->
+`optigate_rewrite.adguard_client`, since the real call now happens in
+the new module) -- caught immediately by actually running them, not
+assumed safe. `tests/test_controller_block_page_ip.py` updated to
+import from the new location. 7 new tests in `tests/test_dashboard.py`
+covering the dashboard's own push/status/fallback paths, including two
+real test bugs caught and fixed along the way: a URL-encoding
+assertion (`" "` vs `"+"` in a query string, the same class of mistake
+this file's own established convention already warns about) and a
+missing `/settings/admin` call in several new tests (`/settings/adguard`
+only ever saves the URL; the password comes from the admin-login form,
+per `update_admin()`'s own 2026-09-07 credential-unification design) --
+both would have made the new tests pass for the wrong reason (silently
+short-circuiting on "AdGuard not configured" before ever reaching the
+mocked call) had they not been individually run and checked, not just
+trusted because the suite total looked right.
+
+1028 → 1035 passed, 34 skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

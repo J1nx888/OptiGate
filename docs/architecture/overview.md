@@ -87,6 +87,12 @@ common/                      shared Python modules, imported by both containers
   rate_limit.py                  RateLimiter -- shared per-IP sliding-window brute-force
                                 limiter (2026-09-02), used by dashboard.py's admin login AND
                                 captive_portal_server.py's two forms, each its own instance
+  optigate_rewrite.py            parse_block_page_ip()/sync_optigate_rewrite() -- the
+                                optigate.home DNS rewrite, moved here from
+                                controller/adguard_sync.py 2026-09-08 so dashboard.py can push
+                                it directly instead of only via controller's periodic cycle
+                                (the interception profile, off by default for most installs --
+                                see this module's own docstring for the real gap this closed)
 
 controller/                   Python control-plane container (added 2026-08-30, see
                                 docker-compose.yml's "interception" profile below)

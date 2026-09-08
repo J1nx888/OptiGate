@@ -89,8 +89,11 @@ NOTHING`) in `common/db.py`. Known keys actually written/read elsewhere:
   memorable troubleshooting address (default `"optigate"`; the `.home`
   suffix is hardcoded, never stored -- see `common/db.py`'s
   `optigate_hostname()`). Editable from the Settings page
-  (`update_optigate_hostname`); read by `controller/adguard_sync.py`'s
-  `sync_optigate_rewrite()` (pushes the matching AdGuard DNS rewrite) and
+  (`update_optigate_hostname`); read by `common/optigate_rewrite.py`'s
+  `sync_optigate_rewrite()` (pushes the matching AdGuard DNS rewrite --
+  moved here from `controller/adguard_sync.py` 2026-09-08 specifically
+  so `dashboard.py` can call it directly, not only `controller`'s own
+  periodic cycle, see that module's own docstring) and
   `dashboard/block_page_server.py` (serves the device-info page for
   whichever hostname this currently resolves to).
 

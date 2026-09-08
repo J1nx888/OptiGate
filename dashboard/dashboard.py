@@ -46,6 +46,7 @@ import category_fetch
 import cr_api
 import db
 import matching
+import optigate_rewrite
 import rate_limit
 import schedule_eval
 import system_events
@@ -6868,12 +6869,18 @@ SETTINGS_BODY = """
   <button class="add" type="submit">Save</button>
 </form>
 <p class="hint">
-  Currently <code>{{ optigate_hostname_prefix }}.home</code>.
+  Currently <code>{{ optigate_hostname_prefix }}.home</code> --
+  {% if optigate_rewrite_status.startswith('live') %}<span class="badge allowed">{{ optigate_rewrite_status }}</span>
+  {% else %}<span class="badge blocked">{{ optigate_rewrite_status }}</span>{% endif %}
+</p>
+<p class="hint">
   <strong>Requires <code>DASHBOARD_URL</code> set in <code>.env</code></strong> (this
   machine's own address, e.g. <code>http://192.168.1.50:8787</code>) so
   AdGuard knows which IP to resolve this hostname to -- same requirement
   the "Blocked-site experience" card's friendly page above already has.
-  Takes effect on the controller's next AdGuard sync cycle, not instantly.
+  Pushed to AdGuard immediately when you click Save (and again
+  automatically whenever this dashboard container starts) -- no need to
+  wait on anything else.
 </p>
 </div>
 """
@@ -6916,6 +6923,35 @@ def _adguard_ui_url(adguard_url: str) -> str | None:
         return None
     browser_host = request.host.split(":")[0]
     return f"http://{browser_host}:{adguard_port}"
+
+
+def _optigate_rewrite_status(conn, adguard_url: str, adguard_username: str, adguard_password: str) -> str:
+    """Read-only status check for the Settings page's "Memorable
+    troubleshooting address" card -- never writes anything (see
+    _sync_optigate_rewrite_now() for the actual push). Exists so a gap
+    (AdGuard reset externally, DASHBOARD_URL changed without re-saving
+    this form, etc.) is visible on the page itself rather than silently
+    invisible until someone notices the address just doesn't work and
+    has no way to tell why -- the exact failure mode that prompted this
+    whole feature (RoadMap.md's dated entry, 2026-09-08: a real
+    production wipe left this silently broken, with the page still
+    showing "optigate.home" as if nothing were wrong)."""
+    block_page_ip = optigate_rewrite.parse_block_page_ip(os.environ.get("DASHBOARD_URL"))
+    if not block_page_ip:
+        return "not active -- DASHBOARD_URL isn't set to a plain IP address"
+    if not adguard_url or not adguard_password:
+        return "not active -- AdGuard's connection details aren't set"
+    desired_domain = db.optigate_hostname(conn)
+    try:
+        current = adguard_client.get_rewrites(adguard_url, adguard_username, adguard_password)
+    except adguard_client.AdGuardError:
+        return "couldn't check -- AdGuard isn't reachable right now"
+    if any(
+        isinstance(r, dict) and r.get("domain") == desired_domain and r.get("answer") == block_page_ip
+        for r in current
+    ):
+        return f"live -- resolves to {block_page_ip}"
+    return "not active yet -- click Save below to push it"
 
 
 def _stale_devices(conn, days: int) -> list:
@@ -6983,6 +7019,7 @@ def settings_page():
         optigate_hostname_prefix=db.get_setting(
             conn, "optigate_hostname_prefix", db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
         ),
+        optigate_rewrite_status=_optigate_rewrite_status(conn, adguard_url, admin_username, adguard_password),
     )
     return render("settings", body)
 
@@ -6994,6 +7031,35 @@ def settings_page():
 # project owner's own words were "force the use of .home so the
 # administrator can only change the first part of the URL."
 _OPTIGATE_PREFIX_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _sync_optigate_rewrite_now(conn) -> str | None:
+    """Pushes the optigate.home DNS rewrite to AdGuard directly from the
+    dashboard, instead of only ever happening via controller's periodic
+    cycle (the `interception` profile, off by default for most installs
+    -- see common/optigate_rewrite.py's own docstring for the real gap
+    this closes: without this, the feature silently never worked at all
+    for anyone not running that profile, with a "Saved" message implying
+    otherwise). Returns None on success (including the deliberate no-op
+    when DASHBOARD_URL isn't a plain IP -- see
+    optigate_rewrite.parse_block_page_ip's own docstring), or a
+    human-readable reason it didn't happen, for callers that want to
+    surface that to the admin. Never raises -- every caller (a request
+    handler, or main()'s own best-effort startup call) treats this as
+    optional, not load-bearing."""
+    block_page_ip = optigate_rewrite.parse_block_page_ip(os.environ.get("DASHBOARD_URL"))
+    if not block_page_ip:
+        return "DASHBOARD_URL isn't set to a plain IP address (see the hint below)"
+    url = db.get_setting(conn, "adguard_url", "")
+    username = db.get_setting(conn, "adguard_username", "admin")
+    password = db.get_setting(conn, "adguard_password", "")
+    if not url or not password:
+        return "AdGuard's connection details aren't set (see the Ad-block card below)"
+    try:
+        optigate_rewrite.sync_optigate_rewrite(conn, url, username, password, block_page_ip)
+    except adguard_client.AdGuardError as exc:
+        return f"couldn't reach AdGuard: {exc}"
+    return None
 
 
 @app.route("/settings/optigate-hostname", methods=["POST"])
@@ -7012,7 +7078,14 @@ def update_optigate_hostname():
     conn = get_db()
     db.set_setting(conn, "optigate_hostname_prefix", value)
     conn.commit()
-    return flash_redirect("settings_page", f"Saved. The address is now {value}.home.")
+    problem = _sync_optigate_rewrite_now(conn)
+    if problem is None:
+        return flash_redirect("settings_page", f"Saved and pushed to AdGuard -- {value}.home is live now.")
+    return flash_redirect(
+        "settings_page",
+        f"Saved -- {value}.home will take effect once you fix this: {problem}.",
+        error=True,
+    )
 
 
 @app.route("/settings/safesearch", methods=["POST"])
@@ -7070,9 +7143,17 @@ def refresh_adguard_filters():
         updated = adguard_client.refresh_filters(url, username, password)
     except adguard_client.AdGuardError as exc:
         return flash_redirect("settings_page", f"Couldn't reach AdGuard: {exc}", error=True)
+    # Piggybacks the optigate.home rewrite push onto this same button --
+    # a manual "fix it now" path (beyond re-saving the hostname form, or
+    # restarting the whole dashboard container) for exactly the gap
+    # RoadMap.md's 2026-09-08 entry describes: AdGuard reset or
+    # reconfigured independently of this dashboard, with nothing else
+    # prompting a re-push.
+    rewrite_problem = _sync_optigate_rewrite_now(conn)
+    rewrite_note = "" if rewrite_problem is None else f" (optigate.home not active: {rewrite_problem})"
     if updated:
-        return flash_redirect("settings_page", f"Checked now -- {updated} list(s) had new content.")
-    return flash_redirect("settings_page", "Checked now -- everything was already up to date.")
+        return flash_redirect("settings_page", f"Checked now -- {updated} list(s) had new content.{rewrite_note}")
+    return flash_redirect("settings_page", f"Checked now -- everything was already up to date.{rewrite_note}")
 
 
 @app.route("/settings/device-stale-days", methods=["POST"])
@@ -7236,6 +7317,31 @@ def main() -> None:
 
         block_page_server.start(host="0.0.0.0", port=80)
         print("block page server listening on http://0.0.0.0:80", file=sys.stderr, flush=True)
+
+        # Real gap found live 2026-09-08: this used to be pushed ONLY by
+        # controller's periodic cycle (the interception profile, off by
+        # default for most installs), so a fresh AdGuard instance --
+        # including one that just came from a wipe/redeploy, not just a
+        # brand-new install -- silently never got this rewrite at all,
+        # with the Settings page still showing "optigate.home" as if
+        # nothing were wrong. One best-effort attempt at every dashboard
+        # start (not a retry loop -- AdGuard might not be up yet on a
+        # cold multi-container boot; the Settings page's own live status
+        # check, and simply re-saving the hostname form, both retry this
+        # on demand) means a fresh install self-heals without anyone
+        # needing to know this route even exists.
+        _boot_settings_conn = get_db()
+        try:
+            _problem = _sync_optigate_rewrite_now(_boot_settings_conn)
+            if _problem:
+                log.info("optigate.home rewrite not pushed at startup: %s", _problem)
+        except Exception:
+            # Best-effort, genuinely optional -- never let a bug or an
+            # unanticipated failure mode here take down dashboard
+            # startup entirely over a cosmetic DNS convenience feature.
+            log.exception("optigate.home rewrite push at startup failed unexpectedly")
+        finally:
+            _boot_settings_conn.close()
 
     # Phase 4 milestone 3: the captive-portal login server nftables'
     # own baseline rules have redirected unauthenticated_v4's plain-HTTP

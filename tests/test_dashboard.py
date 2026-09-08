@@ -1546,6 +1546,167 @@ def test_update_optigate_hostname_rejects_leading_or_trailing_hyphen(client, db_
     assert "error=1" in resp.headers["Location"]
 
 
+# ============================================================
+# optigate.home rewrite pushed directly by the dashboard (2026-09-08) --
+# real gap found live: this used to be pushed ONLY by controller's
+# periodic cycle (the interception profile, off by default for most
+# installs), so the feature silently never worked at all without it,
+# with "Saved. The address is now X.home." implying otherwise.
+# ============================================================
+
+def test_update_optigate_hostname_without_dashboard_url_explains_why(client, db_conn):
+    """DASHBOARD_URL is unset in the test environment (as it would be on
+    a fresh install that hasn't configured it yet) -- the save must
+    still succeed (the setting itself is real), but say plainly why the
+    address isn't live yet, not claim success it can't back up."""
+    resp = client.post(
+        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "myhouse"}, headers=_auth_header()
+    )
+    assert resp.status_code == 302
+    assert "error=1" in resp.headers["Location"]
+    assert "DASHBOARD_URL" in resp.headers["Location"]
+    import db
+    assert db.get_setting(db_conn, "optigate_hostname_prefix") == "myhouse"
+
+
+def test_update_optigate_hostname_pushes_to_adguard_when_configured(client, db_conn, monkeypatch):
+    import dashboard
+
+    monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
+    client.post(
+        "/settings/adguard",
+        data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "hunter2"},
+        headers=_auth_header(),
+    )
+    client.post(
+        "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
+    )
+
+    captured = {}
+
+    def fake_sync(conn, url, username, password, block_page_ip):
+        captured["args"] = (url, username, password, block_page_ip)
+
+    monkeypatch.setattr(dashboard.optigate_rewrite, "sync_optigate_rewrite", fake_sync)
+
+    resp = client.post(
+        "/settings/optigate-hostname",
+        data={"optigate_hostname_prefix": "myhouse"},
+        headers=_auth_header(username="admin", password="hunter2"),
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert "pushed+to+AdGuard" in resp.headers["Location"]
+    assert captured["args"] == ("http://127.0.0.1:3000", "admin", "hunter2", "192.168.1.50")
+
+
+def test_update_optigate_hostname_reports_an_adguard_error_without_crashing(client, db_conn, monkeypatch):
+    import dashboard
+
+    monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
+    client.post(
+        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+    )
+    client.post(
+        "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
+    )
+
+    def fake_sync(*a, **kw):
+        raise dashboard.adguard_client.AdGuardError("connection refused")
+
+    monkeypatch.setattr(dashboard.optigate_rewrite, "sync_optigate_rewrite", fake_sync)
+
+    resp = client.post(
+        "/settings/optigate-hostname",
+        data={"optigate_hostname_prefix": "myhouse"},
+        headers=_auth_header(username="admin", password="hunter2"),
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" in resp.headers["Location"]
+    assert "connection+refused" in resp.headers["Location"]
+
+
+def test_settings_page_shows_not_active_status_by_default(client, db_conn):
+    """No DASHBOARD_URL, no AdGuard configured -- the default state on a
+    fresh install. Must say so plainly, not silently look identical to
+    a working setup (the exact gap that prompted this fix)."""
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"not active" in resp.data
+
+
+def test_settings_page_shows_live_status_when_rewrite_confirmed(client, db_conn, monkeypatch):
+    import dashboard
+
+    monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
+    client.post(
+        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+    )
+    client.post(
+        "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
+    )
+
+    def fake_get_rewrites(*a, **kw):
+        return [{"domain": "optigate.home", "answer": "192.168.1.50", "enabled": True}]
+
+    monkeypatch.setattr(dashboard.optigate_rewrite.adguard_client, "get_rewrites", fake_get_rewrites)
+
+    resp = client.get("/settings", headers=_auth_header(username="admin", password="hunter2"))
+
+    assert b"live -- resolves to 192.168.1.50" in resp.data
+
+
+def test_settings_page_status_check_survives_adguard_being_unreachable(client, db_conn, monkeypatch):
+    import dashboard
+
+    monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
+    client.post(
+        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+    )
+    client.post(
+        "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
+    )
+
+    def fake_get_rewrites(*a, **kw):
+        raise dashboard.adguard_client.AdGuardError("connection refused")
+
+    monkeypatch.setattr(dashboard.optigate_rewrite.adguard_client, "get_rewrites", fake_get_rewrites)
+
+    resp = client.get("/settings", headers=_auth_header(username="admin", password="hunter2"))
+
+    assert resp.status_code == 200
+    assert b"couldn" in resp.data  # "couldn't check -- AdGuard isn't reachable right now"
+
+
+def test_refresh_adguard_filters_also_retries_the_optigate_rewrite(client, db_conn, monkeypatch):
+    """The "Check for filter updates now" button doubles as a manual
+    fallback for the rewrite too -- for the case where AdGuard was reset
+    or reconfigured independently of this dashboard, with nothing else
+    prompting a re-push."""
+    import dashboard
+
+    monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
+    client.post(
+        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+    )
+    client.post(
+        "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
+    )
+    monkeypatch.setattr(dashboard.adguard_client, "refresh_filters", lambda *a, **kw: 0)
+
+    calls = []
+    monkeypatch.setattr(
+        dashboard.optigate_rewrite, "sync_optigate_rewrite",
+        lambda conn, url, username, password, ip: calls.append(ip),
+    )
+
+    resp = client.post("/settings/adguard/refresh", headers=_auth_header(username="admin", password="hunter2"))
+
+    assert resp.status_code == 302
+    assert calls == ["192.168.1.50"]
+
+
 def test_update_block_page_mode_valid_value_saved(client, db_conn):
     resp = client.post(
         "/settings/block-page-mode", data={"block_page_mode": "redirect"}, headers=_auth_header()

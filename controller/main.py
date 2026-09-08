@@ -60,6 +60,7 @@ import rtnetlink_listener
 import health
 import sdnotify
 import system_events
+from optigate_rewrite import parse_block_page_ip
 from ipc_client import Target, WorkerClient, WorkerConnectionError, WorkerError
 from lease import HeartbeatPacer
 from reconcile import AppliedState, DesiredState, reconcile
@@ -204,7 +205,7 @@ def run(
     $dnsrewrite pointing at that IP's port 80 (see
     dashboard/block_page_server.py) instead of a bare deny -- optional
     even when adguard_interval is set, and silently ignored (see
-    main()'s own _parse_block_page_ip) if not a plain IPv4 address.
+    optigate_rewrite.parse_block_page_ip) if not a plain IPv4 address.
 
     A single failed reconcile cycle (a worker fault, a transient DB
     error) is logged and reported via health_conn rather than crashing
@@ -600,33 +601,6 @@ def _build_db_backed_provider(
     return provider, conn
 
 
-def _parse_block_page_ip(dashboard_url: str | None) -> str | None:
-    """Extracts a plain IPv4 host from a DASHBOARD_URL-shaped value
-    (e.g. "http://192.168.1.50:8787" -> "192.168.1.50") for
-    adguard_sync.py's $dnsrewrite target -- which needs a literal IP,
-    not a hostname (a hostname would itself need DNS resolution,
-    circular for a rule that exists to REPLACE DNS resolution). Returns
-    None for anything that isn't a plain IPv4 address (including a
-    genuine hostname, or an unset/malformed URL) -- this is a cosmetic
-    enhancement (see dashboard/block_page_server.py's own docstring),
-    not something worth failing loudly over if misconfigured; a device
-    just keeps getting the plain default deny instead of a friendly page.
-    """
-    if not dashboard_url:
-        return None
-    import ipaddress
-    from urllib.parse import urlparse
-
-    host = urlparse(dashboard_url).hostname
-    if not host:
-        return None
-    try:
-        ipaddress.IPv4Address(host)
-    except ValueError:
-        return None
-    return host
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default="/run/optigate/arp-worker.sock")
@@ -832,7 +806,7 @@ def main(argv: list[str] | None = None) -> int:
         adguard_url=args.adguard_url,
         adguard_username=args.adguard_username,
         adguard_password=args.adguard_password,
-        block_page_ip=_parse_block_page_ip(args.dashboard_url),
+        block_page_ip=parse_block_page_ip(args.dashboard_url),
         worker_ready_timeout=args.worker_ready_timeout,
         adguard_ready_timeout=args.adguard_ready_timeout,
         active_scan_interval=active_scan_interval,

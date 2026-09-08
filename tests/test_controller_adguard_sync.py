@@ -13,6 +13,7 @@ import pytest
 
 import adguard_sync
 import db
+import optigate_rewrite
 
 
 def _insert_domain(conn, pattern: str, mode: str = "bump", is_global: bool = True) -> int:
@@ -948,7 +949,7 @@ def test_sync_safesearch_never_touches_per_service_booleans(conn, monkeypatch):
 
 def test_sync_optigate_rewrite_skipped_entirely_without_a_block_page_ip(conn, monkeypatch):
     fake = _FakeAdGuardClient()
-    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+    monkeypatch.setattr(optigate_rewrite, "adguard_client", fake)
 
     adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", None)
 
@@ -957,7 +958,7 @@ def test_sync_optigate_rewrite_skipped_entirely_without_a_block_page_ip(conn, mo
 
 def test_sync_optigate_rewrite_adds_the_default_hostname_on_a_fresh_instance(conn, monkeypatch):
     fake = _FakeAdGuardClient()
-    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+    monkeypatch.setattr(optigate_rewrite, "adguard_client", fake)
 
     adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
 
@@ -966,7 +967,7 @@ def test_sync_optigate_rewrite_adds_the_default_hostname_on_a_fresh_instance(con
 
 def test_sync_optigate_rewrite_is_a_noop_when_already_correct(conn, monkeypatch):
     fake = _FakeAdGuardClient(rewrites=[{"domain": "optigate.home", "answer": "192.168.1.250", "enabled": True}])
-    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+    monkeypatch.setattr(optigate_rewrite, "adguard_client", fake)
 
     adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
 
@@ -975,7 +976,7 @@ def test_sync_optigate_rewrite_is_a_noop_when_already_correct(conn, monkeypatch)
 
 def test_sync_optigate_rewrite_replaces_a_stale_ip_when_dashboard_url_changed(conn, monkeypatch):
     fake = _FakeAdGuardClient(rewrites=[{"domain": "optigate.home", "answer": "192.168.1.99", "enabled": True}])
-    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+    monkeypatch.setattr(optigate_rewrite, "adguard_client", fake)
 
     adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
 
@@ -990,7 +991,7 @@ def test_sync_optigate_rewrite_replaces_a_stale_domain_when_prefix_renamed(conn,
     db.set_setting(conn, "optigate_hostname_prefix", "mynetwork")
     conn.commit()
     fake = _FakeAdGuardClient(rewrites=[{"domain": "optigate.home", "answer": "192.168.1.250", "enabled": True}])
-    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+    monkeypatch.setattr(optigate_rewrite, "adguard_client", fake)
 
     adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
 
@@ -1006,7 +1007,7 @@ def test_sync_optigate_rewrite_never_touches_an_unrelated_rewrite(conn, monkeypa
     feature this project doesn't otherwise manage) must survive
     untouched."""
     fake = _FakeAdGuardClient(rewrites=[{"domain": "printer.lan", "answer": "192.168.1.5", "enabled": True}])
-    monkeypatch.setattr(adguard_sync, "adguard_client", fake)
+    monkeypatch.setattr(optigate_rewrite, "adguard_client", fake)
 
     adguard_sync.sync_optigate_rewrite(conn, "http://x", "admin", "pw", "192.168.1.250")
 

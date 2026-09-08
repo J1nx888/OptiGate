@@ -1200,7 +1200,12 @@ the project owner asked for, not only an operational-health trail.
   calls `adguard_client.refresh_filters()` with the stored connection
   settings. Flashes an error (not a 500) if the settings are incomplete
   or AdGuard is unreachable; otherwise flashes how many filter lists had
-  new content (0 is a normal, healthy result). Added 2026-08-30.
+  new content (0 is a normal, healthy result). Added 2026-08-30. **Since
+  2026-09-08**: also retries `_sync_optigate_rewrite_now()` (see that
+  route below) as a manual fallback -- appends a note to the flash
+  message if the rewrite isn't active, without failing the whole
+  request over it (filter refresh and the rewrite are independent
+  concerns that happen to share a button for convenience).
 - `_adguard_ui_url(adguard_url)` (added 2026-09-07, not a route -- a
   helper `settings_page()` calls) -- builds an "Open AdGuard's own
   dashboard" link for a quick click-through to AdGuard's own admin UI
@@ -1246,9 +1251,26 @@ the project owner asked for, not only an operational-health trail.
   an empty prefix. The `.home` suffix itself is hardcoded in
   `common/db.py`'s `optigate_hostname()`, never stored or editable here
   -- the project owner's own words: "force the use of .home so the
-  administrator can only change the first part of the URL." Takes
-  effect on `controller/adguard_sync.py`'s next sync cycle (
-  `sync_optigate_rewrite()`), not instantly.
+  administrator can only change the first part of the URL."
+  **Rewritten 2026-09-08, real gap found live**: used to only ever save
+  the setting and claim "Saved. The address is now X.home." -- true
+  only once `controller/adguard_sync.py`'s periodic cycle happened to
+  run, i.e. only when the `interception` profile (off by default for
+  most installs) was enabled. Silently non-functional otherwise, with
+  no error. Now calls `_sync_optigate_rewrite_now()` synchronously
+  (wraps `common/optigate_rewrite.py`'s `sync_optigate_rewrite()`,
+  moved there from `controller/adguard_sync.py` for exactly this reason
+  -- see that module's own docstring) and reports real success/failure:
+  "Saved and pushed to AdGuard" vs. a specific reason (DASHBOARD_URL not
+  a plain IP, AdGuard credentials unset, or an `AdGuardError`) as an
+  error flash. `settings_page()` also now shows a live, read-only status
+  next to the current address (`_optigate_rewrite_status()`, a plain
+  `adguard_client.get_rewrites()` check -- never writes) so a gap that
+  opens up LATER (AdGuard reset independently of this dashboard, say)
+  is visible on the page itself, not just at the moment of saving.
+  `main()` also fires one best-effort push at every dashboard startup
+  (never raises -- logged, not fatal), so a genuinely fresh install
+  self-heals without an admin needing to know this route exists at all.
 - `POST /settings/safesearch` -> `update_safesearch()` (G3, 2026-09-01) --
   one checkbox field `safesearch_enabled`. Only writes
   `settings.safesearch_enabled` (`"1"`/`"0"`) -- doesn't call AdGuard
