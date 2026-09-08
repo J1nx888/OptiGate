@@ -1855,12 +1855,25 @@ back on (none of these need real ARP interception to build or verify):
 6. Labels were missing on every device added during today's live sweep
    -- added after the fact, once noticed.
 
-**Still open, deliberately deferred**: the "mystery domains showing as
-Everyone" visibility gap and a bulk domain-categorization tool -- real,
-substantive features that need their own design pass, not squeezed in
-alongside the above. The `optigate.home` memorable-URL + device-status
-page feature (needed before go-live, so users losing connectivity have
-somewhere to be pointed) is also still to build.
+**Originally left open here as "deliberately deferred": the "mystery
+domains showing as Everyone" visibility gap and a bulk
+domain-categorization tool.** The `optigate.home` memorable-URL +
+device-status page feature also mentioned in this note has since
+shipped -- see Phase 21.
+
+**Cleared 2026-09-08, project owner's explicit call**: revisited both
+of the other two when asked "what's pending work" and found this note
+was never actually unpacked into a real spec -- no repro, no example,
+no description of what the categorization tool would do differently
+from the already-shipped "Add many domains at once" paste box
+(`bulk_add_category_domains()`, which adds new rows to ONE category's
+own `category_domains` at a time -- structurally unrelated to the main
+`domains` allow-list table, so it's genuinely not the same feature).
+Rather than guess at a spec neither of us could actually state,
+dropped from the active list. Not forgotten -- if either resurfaces as
+a concrete, reproducible issue (a specific domain that shouldn't be
+Everyone, or a real workflow the paste box doesn't cover), file it
+fresh with that detail rather than reopening this vague version of it.
 
 ### Bulk-add-to-group follow-up: per-row quick action on the Devices page (2026-09-07)
 
