@@ -76,6 +76,46 @@ def test_ignored_device_goes_in_bypass_set_even_if_unauthenticated(conn):
     assert policy["unauthenticated"] == []
 
 
+def test_device_in_an_ignored_group_goes_in_bypass_set(conn):
+    """Group-level ignore (added 2026-09-07, db.py's schema comment on
+    groups.ignored) -- full pipeline proof that the query's new LEFT
+    JOIN + group_ignored plumbing actually reaches classify_device(),
+    not just the pure unit test in test_policy_class.py."""
+    conn.execute("INSERT INTO groups (name, ignored, created_at) VALUES ('IoT', 1, ?)", (db.now_iso(),))
+    conn.commit()
+    group_id = conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO devices (mac_address, group_id, ignored, is_authenticated, created_at) "
+        "VALUES (?, ?, 0, 0, ?)",
+        ("aa:bb:cc:dd:ee:01", group_id, db.now_iso()),
+    )
+    conn.commit()
+    _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")
+
+    policy = compute_desired_policy(conn)
+
+    assert policy["bypass"] == ["192.168.1.21"]
+    assert policy["unauthenticated"] == []
+
+
+def test_bump_enabled_device_in_an_ignored_group_is_excluded_from_bump(conn):
+    conn.execute("INSERT INTO groups (name, ignored, created_at) VALUES ('IoT', 1, ?)", (db.now_iso(),))
+    conn.commit()
+    group_id = conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO devices (mac_address, group_id, ignored, is_authenticated, bump_enabled, created_at) "
+        "VALUES (?, ?, 0, 1, 1, ?)",
+        ("aa:bb:cc:dd:ee:01", group_id, db.now_iso()),
+    )
+    conn.commit()
+    _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")
+
+    policy = compute_desired_policy(conn)
+
+    assert policy["bump"] == []
+    assert policy["bypass"] == ["192.168.1.21"]
+
+
 def test_quarantined_device_goes_in_quarantine_set(conn):
     _add_device(conn, "aa:bb:cc:dd:ee:01", quarantined_at="2026-08-29T00:00:00Z")
     _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")

@@ -52,6 +52,24 @@ def test_ignored_device_is_excluded_even_with_an_active_binding(conn):
     assert desired.targets == ()
 
 
+def test_device_in_an_ignored_group_is_excluded_even_with_an_active_binding(conn):
+    """Group-level ignore (added 2026-09-07, db.py's schema comment on
+    groups.ignored) excludes a device the same way its own `ignored` bit
+    does, even though the device's own column reads 0."""
+    conn.execute("INSERT INTO groups (name, ignored, created_at) VALUES ('IoT', 1, ?)", (db.now_iso(),))
+    conn.commit()
+    group_id = conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO devices (mac_address, group_id, ignored, created_at) VALUES (?, ?, 0, ?)",
+        ("aa:bb:cc:dd:ee:01", group_id, db.now_iso()),
+    )
+    conn.commit()
+    identity.record_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21", source="rtnetlink")
+
+    desired = db_backed_desired_state(conn, GATEWAY)
+    assert desired.targets == ()
+
+
 def test_deactivated_binding_is_excluded(conn):
     """A device whose binding got superseded (see
     identity.record_binding's conflict handling) must not still show up

@@ -60,6 +60,33 @@ def test_bypass_beats_quarantine():
 def test_quarantine_beats_authentication_state():
     row = _row(quarantined_at="2026-08-29T00:00:00Z", is_authenticated=1)
     assert classify_device(row) == PolicyClass.QUARANTINE
+
+
+# ============================================================
+# group_ignored (added 2026-09-07, project owner's explicit request for
+# a group-level "ignore mode" -- db.py's schema comment on
+# groups.ignored)
+# ============================================================
+
+def test_group_ignored_is_bypass_even_when_devices_ignored_is_0():
+    row = _row(ignored=0, quarantined_at="2026-08-29T00:00:00Z", is_authenticated=0)
+    assert classify_device(row, group_ignored=True) == PolicyClass.BYPASS
+
+
+def test_group_ignored_false_is_the_default_and_changes_nothing():
+    row = _row(quarantined_at="2026-08-29T00:00:00Z")
+    assert classify_device(row) == classify_device(row, group_ignored=False) == PolicyClass.QUARANTINE
+
+
+def test_group_ignored_beats_quarantine_same_as_devices_own_ignored():
+    row = _row(quarantined_at="2026-08-29T00:00:00Z")
+    assert classify_device(row, group_ignored=True) == PolicyClass.BYPASS
+
+
+def test_bump_eligible_false_when_group_ignored_even_with_flag_set():
+    row = _row(is_authenticated=1, bump_enabled=1)
+    assert bump_eligible(row) is True  # sanity check: true without group_ignored
+    assert bump_eligible(row, group_ignored=True) is False
     row2 = _row(quarantined_at="2026-08-29T00:00:00Z", is_authenticated=0)
     assert classify_device(row2) == PolicyClass.QUARANTINE
 

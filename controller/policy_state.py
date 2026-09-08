@@ -71,14 +71,17 @@ def compute_desired_policy(
     rows = conn.execute(
         """
         SELECT d.id, d.user_id, d.group_id, d.ignored, d.quarantined_at, d.is_authenticated,
-               d.bump_enabled, d.bypass_login, b.ipv4_address
+               d.bump_enabled, d.bypass_login, COALESCE(g.ignored, 0) AS group_ignored,
+               b.ipv4_address
         FROM devices d
         JOIN device_bindings b ON b.device_id = d.id AND b.active = 1
+        LEFT JOIN groups g ON g.id = d.group_id
         """
     ).fetchall()
 
     for row in rows:
-        policy_class = classify_device(row)
+        group_ignored = bool(row["group_ignored"])
+        policy_class = classify_device(row, group_ignored)
         if policy_class != PolicyClass.BYPASS and is_full_lockout_active(conn, row, now):
             policy_class = PolicyClass.QUARANTINE
         policy[to_set_name(policy_class)].append(row["ipv4_address"])
@@ -101,7 +104,7 @@ def compute_desired_policy(
         # bump_eligible() already requires classify_device(row) ==
         # AUTHENTICATED internally, which is exactly what policy_class
         # already equals whenever no overlay fired.
-        if policy_class == PolicyClass.AUTHENTICATED and bump_eligible(row):
+        if policy_class == PolicyClass.AUTHENTICATED and bump_eligible(row, group_ignored):
             policy[_BUMP_SET_NAME].append(row["ipv4_address"])
 
     for ips in policy.values():

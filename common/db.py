@@ -84,9 +84,26 @@ CREATE TABLE IF NOT EXISTS series_cache (
 -- belong to any one person. Parallel concept to `users`, not a kind of
 -- user -- a device is assigned to at most one user OR one group (see
 -- `devices` below), never both.
+--   ignored: added 2026-09-07, project owner's explicit request --
+--       group-level equivalent of `devices.ignored`. A device's
+--       EFFECTIVE ignored/BYPASS state is `devices.ignored OR (its
+--       group's ignored, if it belongs to one)` -- this is additive,
+--       not a replacement: a device keeps its own `ignored` bit (still
+--       settable per-device regardless of group membership), and
+--       flipping a group's `ignored` off doesn't touch any member
+--       device's own bit, it only stops contributing to the OR. Every
+--       policy-classification query that reads `devices.ignored`
+--       (common/policy_class.py's classify_device(), and every
+--       raw-SQL BYPASS filter that doesn't go through it --
+--       controller/desired_state.py, controller/policy_state.py,
+--       controller/adguard_sync.py's _fetch_eligible_devices()) must
+--       LEFT JOIN groups and account for this column too, not just
+--       devices.ignored alone, or a device sitting in an ignored group
+--       would still get poisoned/filtered/blocked as if it weren't.
 CREATE TABLE IF NOT EXISTS groups (
     id         INTEGER PRIMARY KEY,
     name       TEXT UNIQUE NOT NULL,
+    ignored    INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -600,6 +617,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     schedule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedules)")}
     if schedule_columns and "is_mode" not in schedule_columns:
         conn.execute("ALTER TABLE schedules ADD COLUMN is_mode INTEGER NOT NULL DEFAULT 0")
+
+    group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
+    if group_columns and "ignored" not in group_columns:
+        conn.execute("ALTER TABLE groups ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0")
 
 
 # ==========================================================

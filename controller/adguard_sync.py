@@ -237,13 +237,15 @@ def _fetch_eligible_devices(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     devices = conn.execute(
         """
         SELECT DISTINCT d.id, d.user_id, d.group_id, d.ignored, d.quarantined_at,
-               d.is_authenticated, d.bump_enabled, d.bypass_login, b.ipv4_address
+               d.is_authenticated, d.bump_enabled, d.bypass_login,
+               COALESCE(g.ignored, 0) AS group_ignored, b.ipv4_address
         FROM devices d
         JOIN device_bindings b ON b.device_id = d.id AND b.active = 1
+        LEFT JOIN groups g ON g.id = d.group_id
         ORDER BY b.ipv4_address
         """
     ).fetchall()
-    return [row for row in devices if classify_device(row) != PolicyClass.BYPASS]
+    return [row for row in devices if classify_device(row, bool(row["group_ignored"])) != PolicyClass.BYPASS]
 
 
 def _build_domain_deny_rules(

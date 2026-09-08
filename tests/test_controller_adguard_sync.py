@@ -46,8 +46,10 @@ def _insert_device_with_binding(
     return device_id
 
 
-def _insert_group(conn, name: str) -> int:
-    conn.execute("INSERT INTO groups (name, created_at) VALUES (?, datetime('now'))", (name,))
+def _insert_group(conn, name: str, *, ignored: bool = False) -> int:
+    conn.execute(
+        "INSERT INTO groups (name, ignored, created_at) VALUES (?, ?, datetime('now'))", (name, int(ignored)),
+    )
     conn.commit()
     return conn.execute("SELECT id FROM groups WHERE name = ?", (name,)).fetchone()["id"]
 
@@ -244,6 +246,18 @@ def test_build_rules_excludes_an_ignored_device(conn):
     rule, even one that would otherwise clearly be denied."""
     _insert_domain(conn, "example\\.com", is_global=False)
     _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False, ignored=True)
+
+    assert adguard_sync.build_rules(conn) == []
+
+
+def test_build_rules_excludes_a_device_in_an_ignored_group(conn):
+    """Group-level ignore (added 2026-09-07, db.py's schema comment on
+    groups.ignored) must exclude a device from AdGuard's own deny rules
+    exactly like the device's own `ignored` bit does above, even though
+    the device's own column reads 0."""
+    group_id = _insert_group(conn, "IoT", ignored=True)
+    _insert_domain(conn, "example\\.com", is_global=False)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False, group_id=group_id)
 
     assert adguard_sync.build_rules(conn) == []
 

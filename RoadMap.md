@@ -5241,6 +5241,67 @@ summary.
 5 new tests in `tests/test_dashboard.py` (`_extract_domain()` plus the
 new bulk-add route). 934 → 939 passed, 34 skipped, zero regressions.
 
+### Group-level "Ignore mode"; devices bulk-ignore action (2026-09-07)
+
+Two real requests, same session: (1) "For Device groups, I need to be
+able to enable 'ignore mode' for specific device groups", and (2) "I
+need a bulk action that allows me to assign ignore to a selection of
+devices or put them in a group. The bulk add to group exists, but the
+bulk add to ignore does not."
+
+New `groups.ignored` column (schema + idempotent migration in
+`common/db.py`), toggled from a new "Ignore mode" card on the group
+detail page (`update_group_ignored()`). Deliberately **additive** with
+a device's own `ignored` bit, not a replacement for it -- a device's
+effective ignored/BYPASS state is `devices.ignored OR (its group's
+ignored, if it belongs to one)`. This is a real, live-enforced policy
+change, not just a dashboard label, so every place that reads
+`devices.ignored` for actual classification got audited and fixed:
+
+- `common/policy_class.py`'s `classify_device()`/`bump_eligible()` now
+  take an explicit `group_ignored` parameter (default `False`, so every
+  existing caller stays correct unchanged) instead of silently trusting
+  a device row that can't see its own group's flag.
+- `controller/policy_state.py`'s `compute_desired_policy()` (the query
+  that feeds nftables' real `bypass_v4`/etc. sets, live-verified with
+  real packet loss/recovery back on 2026-09-01) now `LEFT JOIN`s
+  `groups` and threads `group_ignored` through to both calls above.
+- `controller/adguard_sync.py`'s `_fetch_eligible_devices()` -- this one
+  is LIVE today (AdGuard is this household's real DNS resolver) -- got
+  the identical join/threading fix, so a group-ignored device is
+  correctly excluded from AdGuard's hard-deny rules too, not just from
+  the not-yet-deployed ARP/nftables path.
+- `controller/desired_state.py`'s ARP-poisoning target query (currently
+  dormant -- interception stays OFF per standing direction) got the
+  same join for whenever it's turned back on.
+- The dashboard's own pause routes that can span more than one group
+  (`pause_all_devices()`, `bulk_pause_devices()`) now also exclude a
+  group-ignored device, via a new shared `_NOT_GROUP_IGNORED_SQL`
+  fragment -- same "BYPASS outranks QUARANTINE, don't bother" reasoning
+  the existing `ignored = 0` exclusion already established.
+  `pause_group()` instead short-circuits with an error flash when the
+  *target* group itself is ignored, rather than silently no-op'ing.
+  (`pause_user()`/`pause_group()`'s own per-user queries needed no
+  change -- a user-assigned device is never group-assigned at all, per
+  the `user_id`/`group_id` CHECK constraint.)
+- `dashboard/block_page_server.py`'s optigate.home info page and the
+  Devices list's own badges (`DEVICES_BODY`) now show "Ignored" for a
+  group-ignored device too, not just an individually-ignored one.
+
+Second half: a new "Set to Ignore" / "Remove Ignore" pair in the
+Devices toolbar's "Manage" panel, alongside the pre-existing group-
+assign form (`bulk_set_ignored_devices()`). Mirrors
+`_batch_assign_devices_to_group()`'s own semantics exactly: setting
+Ignore clears any `user_id`/`group_id` assignment (mutually exclusive
+at the UI level, same as the single-device combo), clearing it back
+just leaves the device Unassigned rather than guessing at a prior
+assignment to restore.
+
+19 new tests across `tests/test_dashboard.py`, `tests/test_policy_class.py`,
+`tests/test_controller_desired_state.py`, `tests/test_controller_policy_state.py`,
+and `tests/test_controller_adguard_sync.py`. 939 → 958 passed, 34
+skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

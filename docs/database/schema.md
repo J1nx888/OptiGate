@@ -323,7 +323,31 @@ domain allow-list, for devices that don't belong to any one person.
 |---|---|---|
 | `id`         | INTEGER | PRIMARY KEY |
 | `name`       | TEXT | UNIQUE NOT NULL |
+| `ignored`    | INTEGER | NOT NULL DEFAULT 0 |
 | `created_at` | TEXT | NOT NULL |
+
+`ignored` -- added 2026-09-07, project owner's explicit request ("For
+Device groups, I need to be able to enable 'ignore mode' for specific
+device groups"), toggled from the group's own detail page
+(`dashboard.py`'s `update_group_ignored()`). A device's EFFECTIVE
+ignored/BYPASS state is `devices.ignored OR (its group's ignored, if
+it belongs to one)` -- additive with each device's own bit, not a
+replacement for it: turning a group's flag off doesn't clear any
+member device's own `ignored` column, it only stops contributing to
+the OR. Every policy-classification consumer that reads
+`devices.ignored` directly (rather than through
+`common/policy_class.py`'s `classify_device()`, which takes this as an
+explicit `group_ignored` parameter) must `LEFT JOIN groups` and account
+for this column too: `controller/desired_state.py`'s ARP-poisoning
+target query, `controller/policy_state.py`'s `compute_desired_policy()`,
+and `controller/adguard_sync.py`'s `_fetch_eligible_devices()` all do.
+The dashboard's own pause routes that span more than one specific,
+already-known group (`pause_all_devices()`, `bulk_pause_devices()`) also
+exclude a group-ignored device via the shared `_NOT_GROUP_IGNORED_SQL`
+fragment, same reasoning as their existing `ignored = 0` exclusion
+(BYPASS outranks QUARANTINE, so pausing one would be a silent no-op);
+`pause_group()` instead short-circuits entirely with an error flash when
+the target group itself is ignored.
 
 ### `group_domains`
 The group-level equivalent of `user_domains` -- a row grants every device

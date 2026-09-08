@@ -2599,7 +2599,7 @@ DEVICES_BODY = """
   <tr><th>Name</th><th></th></tr>
   {% for g in groups %}
   <tr>
-    <td>{{ g.name }}</td>
+    <td>{{ g.name }}{% if g.ignored %} <span class="badge pending" title="Every device in this group is treated as Ignore (never filtered)">Ignore mode</span>{% endif %}</td>
     <td>
       <a class="btn small" href="{{ url_for('group_detail', group_id=g.id) }}">Manage</a>
       <a class="btn small" href="{{ url_for('domains', group_id=g.id) }}">Manage domains</a>
@@ -2675,6 +2675,16 @@ DEVICES_BODY = """
     <button class="add small" type="submit" {{ 'disabled' if not groups }}>Apply</button>
   </form>
   {% if not groups %}<p class="hint">No groups yet -- add one above first.</p>{% endif %}
+  <p class="hint" style="margin:.6rem 0 .3rem;">Or set Ignore status directly (clears any user/group assignment, same as picking Ignore on a single device's own Manage page):</p>
+  <form id="bulkDeviceIgnoreForm" class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}"
+        onsubmit="return confirm('Set every checked device to Ignore (never filtered)? This clears any user/group assignment on them.');">
+    <input type="hidden" name="ignored" value="1">
+    <button class="danger small" type="submit">Set to Ignore</button>
+  </form>
+  <form id="bulkDeviceUnignoreForm" class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}">
+    <input type="hidden" name="ignored" value="">
+    <button class="btn small" type="submit">Remove Ignore</button>
+  </form>
 </div>
 {% endif %}
 {% if devices %}<input type="search" data-filter-table="devicesTable" placeholder="Search devices&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
@@ -2682,20 +2692,21 @@ DEVICES_BODY = """
 <table id="devicesTable">
   <tr><th>{% if devices %}<input type="checkbox" id="deviceSelectAll" title="Select all">{% endif %}</th><th>MAC address</th><th>Label</th><th>Assigned to</th><th>Status</th><th>SSL-Bump</th><th>Bypass login</th><th>Last seen</th><th></th></tr>
   {% for d in devices %}
+  {% set effective_ignored = d.ignored or d.group_ignored %}
   <tr>
     <td><input type="checkbox" class="bulk-device-check" value="{{ d.id }}"></td>
     <td><code>{{ d.mac_address }}</code></td>
     <td>{{ d.label or '' }}</td>
     <td>
-      {% if d.ignored %}<span class="badge pending">Ignored</span>
+      {% if effective_ignored %}<span class="badge pending" title="{{ 'This device is in an Ignore-mode group' if d.group_ignored and not d.ignored else '' }}">Ignored</span>
       {% elif d.display_name %}{{ d.display_name }}
       {% elif d.group_name %}<span class="badge mode-trusted">{{ d.group_name }}</span>
       {% else %}<em>Unassigned</em>{% endif %}
     </td>
     <td>
-      {% if d.quarantined_at and not d.ignored %}<span class="badge blocked" title="Paused since {{ d.quarantined_at }} -- no internet access at all">Paused</span>
+      {% if d.quarantined_at and not effective_ignored %}<span class="badge blocked" title="Paused since {{ d.quarantined_at }} -- no internet access at all">Paused</span>
       {% elif d.pending %}<span class="badge pending" title="Seen on the network but nobody has logged in on it yet">Awaiting login</span>
-      {% elif d.ignored or d.bypass_login %}&mdash;
+      {% elif effective_ignored or d.bypass_login %}&mdash;
       {% else %}<span class="badge allowed">Authenticated</span>{% endif %}
     </td>
     <td>{% if d.bump_enabled %}<span class="badge mode-bump">yes</span>{% else %}<span class="badge mode-splice">no</span>{% endif %}</td>
@@ -2710,7 +2721,7 @@ DEVICES_BODY = """
         <button class="btn small" type="submit" title="Let this device online without ever needing to log in">Bypass</button>
       </form>
       {% endif %}
-      {% if not d.ignored %}
+      {% if not effective_ignored %}
         {% if d.quarantined_at %}
         <form class="inline" method="post" action="{{ url_for('resume_device') }}">
           <input type="hidden" name="device_id" value="{{ d.id }}">
@@ -2811,6 +2822,8 @@ DEVICES_BODY = """
   wireBulkForm("bulkDevicePauseForm");
   wireBulkForm("bulkDeviceDeleteForm");
   wireBulkForm("bulkDeviceGroupForm");
+  wireBulkForm("bulkDeviceIgnoreForm");
+  wireBulkForm("bulkDeviceUnignoreForm");
 })();
 </script>
 </div>
@@ -4234,7 +4247,7 @@ def _failed_login_attempts(conn, mac_address: str) -> dict | None:
 def devices():
     conn = get_db()
     rows = conn.execute(
-        "SELECT d.*, u.display_name, g.name AS group_name, "
+        "SELECT d.*, u.display_name, g.name AS group_name, COALESCE(g.ignored, 0) AS group_ignored, "
         "(d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending, "
         # devices.last_seen_at is never actually populated by anything
         # (see common/db.py's own schema comment) -- device_bindings is
@@ -4463,6 +4476,20 @@ def bypass_login_device():
 # one would silently do nothing. The three routes below all exclude
 # `ignored` devices from a bulk pause for this reason; the single-device
 # route doesn't need to (the UI simply doesn't offer the button for one).
+#
+# Added 2026-09-07 alongside `groups.ignored` (db.py's own schema
+# comment): a device sitting in an ignored GROUP is exactly as much of a
+# pause no-op as one directly marked `ignored` itself, even though its
+# own `devices.ignored` column may read 0 -- same BYPASS-outranks-
+# QUARANTINE reasoning, just via the group axis instead of the device
+# one. Every route below that spans more than one specific
+# already-known group (pause_all_devices, bulk_pause_devices; NOT
+# pause_user/pause_group -- a user-assigned device is never
+# group-assigned at all per the user_id/group_id CHECK constraint, and
+# pause_group already knows which single group it's acting on) ANDs
+# this fragment in alongside the plain `ignored = 0` check.
+_NOT_GROUP_IGNORED_SQL = "(group_id IS NULL OR group_id NOT IN (SELECT id FROM groups WHERE ignored = 1))"
+
 
 def _set_quarantine(conn, where_sql: str, params: tuple, *, paused: bool) -> int:
     value = db.now_iso() if paused else None
@@ -4499,7 +4526,7 @@ def resume_device():
 @require_admin
 def pause_all_devices():
     conn = get_db()
-    n = _set_quarantine(conn, "ignored = 0", (), paused=True)
+    n = _set_quarantine(conn, f"ignored = 0 AND {_NOT_GROUP_IGNORED_SQL}", (), paused=True)
     return flash_redirect("devices", f"Paused the internet for {n} device{'s' if n != 1 else ''}.")
 
 
@@ -4537,9 +4564,21 @@ def pause_group():
     """Same shape as pause_user() above -- added 2026-09-06, closing a
     real gap: per-device and per-user pause both already existed, but a
     group had no pause control at all (no group_detail page even
-    existed to put one on)."""
+    existed to put one on).
+
+    Added 2026-09-07: if THIS group itself is in Ignore mode
+    (`groups.ignored`), pausing it is a guaranteed no-op for every
+    member device (BYPASS outranks QUARANTINE) -- skip the write
+    entirely and say so, rather than reporting devices "paused" that
+    are actually still unfiltered."""
     group_id = request.form.get("group_id", "")
     conn = get_db()
+    group = conn.execute("SELECT ignored FROM groups WHERE id = ?", (group_id,)).fetchone()
+    if group is not None and group["ignored"]:
+        return flash_redirect(
+            "group_detail", "This group is in Ignore mode -- pausing it would have no effect.",
+            error=True, group_id=group_id,
+        )
     n = _set_quarantine(conn, "group_id = ? AND ignored = 0", (group_id,), paused=True)
     return flash_redirect(
         "group_detail", f"Paused the internet for {n} device{'s' if n != 1 else ''}.", group_id=group_id
@@ -4737,9 +4776,54 @@ def delete_group():
     return flash_redirect("devices", "Group removed.")
 
 
+@app.route("/groups/ignored", methods=["POST"])
+@require_admin
+def update_group_ignored():
+    """Group detail page's "Ignore mode" toggle -- added 2026-09-07,
+    project owner's explicit request: "For Device groups, I need to be
+    able to enable 'ignore mode' for specific device groups." Additive
+    with each member device's own `ignored` bit, not a replacement for
+    it (see db.py's schema comment on `groups.ignored`) -- a device
+    keeps whatever its own flag says; this only adds a second way for
+    the whole group to count as BYPASS at once, everywhere
+    classify_device() (or one of the raw-SQL BYPASS filters that
+    doesn't go through it) is consulted."""
+    group_id = request.form.get("group_id", "")
+    ignored = 1 if request.form.get("ignored") else 0
+    conn = get_db()
+    conn.execute("UPDATE groups SET ignored = ? WHERE id = ?", (ignored, group_id))
+    conn.commit()
+    return flash_redirect(
+        "group_detail", "Ignore mode enabled for this group." if ignored else "Ignore mode disabled for this group.",
+        group_id=group_id,
+    )
+
+
 GROUP_DETAIL_BODY = """
 <p><a href="{{ url_for('devices') }}">&larr; All devices</a></p>
-<h1>{{ g.name }}</h1>
+<h1>{{ g.name }}{% if g.ignored %} <span class="badge pending">Ignore mode</span>{% endif %}</h1>
+
+<div class="card">
+<h2>Ignore mode</h2>
+<p class="hint">
+  When on, every device in {{ g.name }} is treated as
+  <strong>Ignore (never filtered)</strong> -- the same "outside the whole
+  system, for good" state as a single device's own Ignore setting, just
+  applied to the whole group at once. This is additive with each
+  device's own setting, not a replacement for it: turning this back off
+  doesn't un-ignore a device that was ALSO individually set to Ignore on
+  its own Manage page.
+</p>
+<form class="inline" method="post" action="{{ url_for('update_group_ignored') }}">
+  <input type="hidden" name="group_id" value="{{ g.id }}">
+  <input type="hidden" name="ignored" value="{{ '' if g.ignored else '1' }}">
+  {% if g.ignored %}
+  <button class="btn" type="submit">Turn off Ignore mode</button>
+  {% else %}
+  <button class="danger" type="submit" onclick="return confirm('Ignore mode makes every device in {{ g.name }} invisible to all filtering. Continue?');">Turn on Ignore mode</button>
+  {% endif %}
+</form>
+</div>
 
 <div class="card">
 <h2>Active right now</h2>
@@ -4761,7 +4845,9 @@ GROUP_DETAIL_BODY = """
 
 <div class="card">
 <h2>Pause the internet</h2>
-{% if group_devices %}
+{% if g.ignored %}
+<p class="hint">{{ g.name }} is in Ignore mode -- its devices are never filtered in the first place, so pausing them would have no effect (BYPASS outranks a pause). Turn off Ignore mode above first if you want to pause this group.</p>
+{% elif group_devices %}
 <p class="hint">
   Pauses every device in {{ g.name }} at once ({{ group_devices|length }}
   device{{ 's' if group_devices|length != 1 else '' }}, {{ paused_device_count }} currently paused) --
@@ -4953,6 +5039,40 @@ def bulk_assign_devices_to_group():
     )
 
 
+@app.route("/devices/bulk-ignore", methods=["POST"])
+@require_admin
+def bulk_set_ignored_devices():
+    """Devices list's "Set to Ignore" / "Remove Ignore" bulk actions --
+    added 2026-09-07, project owner's explicit request: "I need a bulk
+    action that allows me to assign ignore to a selection of devices...
+    The bulk add to group exists, but the bulk add to ignore does not."
+    Same semantics as the single-device assignment combo
+    (_parse_device_assignment("ignored")) and _batch_assign_devices_to_group()
+    above (its mirror image): setting ignored=1 clears user_id/group_id
+    too, since a real assignment and Ignore are mutually exclusive at
+    the UI level even though the column itself is independent (see
+    db.py's schema comment). Clearing it back to 0 leaves the device
+    Unassigned rather than guessing at a previous assignment to
+    restore -- same as picking any other option in that combo would."""
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+    ignored = 1 if request.form.get("ignored") else 0
+    if not device_ids:
+        return flash_redirect("devices", "No devices selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(device_ids))
+    if ignored:
+        conn.execute(
+            f"UPDATE devices SET ignored = 1, user_id = NULL, group_id = NULL WHERE id IN ({placeholders})",
+            tuple(device_ids),
+        )
+        message = f"Set {len(device_ids)} device{'s' if len(device_ids) != 1 else ''} to Ignore."
+    else:
+        conn.execute(f"UPDATE devices SET ignored = 0 WHERE id IN ({placeholders})", tuple(device_ids))
+        message = f"Removed Ignore from {len(device_ids)} device{'s' if len(device_ids) != 1 else ''}."
+    conn.commit()
+    return flash_redirect("devices", message)
+
+
 @app.route("/devices/bulk-pause", methods=["POST"])
 @require_admin
 def bulk_pause_devices():
@@ -4969,7 +5089,9 @@ def bulk_pause_devices():
         return flash_redirect("devices", "No devices selected.", error=True)
     conn = get_db()
     placeholders = ",".join("?" * len(device_ids))
-    n = _set_quarantine(conn, f"id IN ({placeholders}) AND ignored = 0", tuple(device_ids), paused=True)
+    n = _set_quarantine(
+        conn, f"id IN ({placeholders}) AND ignored = 0 AND {_NOT_GROUP_IGNORED_SQL}", tuple(device_ids), paused=True,
+    )
     return flash_redirect("devices", f"Paused {n} device{'s' if n != 1 else ''}.")
 
 

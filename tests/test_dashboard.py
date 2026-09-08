@@ -3346,6 +3346,146 @@ def test_pause_group_requires_admin_auth(client, db_conn):
     assert resp.status_code == 401
 
 
+# ============================================================
+# Group "Ignore mode" (added 2026-09-07, project owner's explicit
+# request: "For Device groups, I need to be able to enable 'ignore
+# mode' for specific device groups")
+# ============================================================
+
+def test_update_group_ignored_turns_it_on_and_off(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+
+    resp = client.post("/groups/ignored", data={"group_id": group_id, "ignored": "1"}, headers=_auth_header())
+    assert resp.status_code == 302
+    assert db_conn.execute("SELECT ignored FROM groups WHERE id = ?", (group_id,)).fetchone()["ignored"] == 1
+
+    client.post("/groups/ignored", data={"group_id": group_id}, headers=_auth_header())
+    assert db_conn.execute("SELECT ignored FROM groups WHERE id = ?", (group_id,)).fetchone()["ignored"] == 0
+
+
+def test_update_group_ignored_requires_admin_auth(client):
+    resp = client.post("/groups/ignored", data={"group_id": "1", "ignored": "1"})
+    assert resp.status_code == 401
+
+
+def test_group_detail_shows_ignore_mode_badge_and_toggle(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post("/groups/ignored", data={"group_id": group_id, "ignored": "1"}, headers=_auth_header())
+
+    resp = client.get(f"/groups/{group_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Ignore mode" in resp.data
+    assert b'action="/groups/ignored"' in resp.data
+
+
+def test_pause_group_refuses_when_group_itself_is_ignored(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:60", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+    client.post("/groups/ignored", data={"group_id": group_id, "ignored": "1"}, headers=_auth_header())
+
+    resp = client.post("/groups/pause", data={"group_id": group_id}, headers=_auth_header())
+
+    assert "error=1" in resp.headers["Location"]
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:60'").fetchone()
+    assert row["quarantined_at"] is None
+
+
+def test_pause_all_devices_skips_devices_in_an_ignored_group(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:61", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+    client.post("/groups/ignored", data={"group_id": group_id, "ignored": "1"}, headers=_auth_header())
+
+    client.post("/devices/pause-all", data={}, headers=_auth_header())
+
+    row = db_conn.execute("SELECT quarantined_at FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:61'").fetchone()
+    assert row["quarantined_at"] is None
+
+
+def test_devices_page_shows_ignored_badge_for_a_device_in_an_ignored_group(client, db_conn):
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:62", "label": "Fridge", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+    client.post("/groups/ignored", data={"group_id": group_id, "ignored": "1"}, headers=_auth_header())
+
+    resp = client.get("/devices", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    fridge_row_start = body.index("Fridge")
+    assert "Ignored" in body[fridge_row_start:fridge_row_start + 400]
+
+
+# ============================================================
+# Devices bulk "Ignore" action (added 2026-09-07, project owner's
+# explicit request: "The bulk add to group exists, but the bulk add to
+# ignore does not.")
+# ============================================================
+
+def test_bulk_set_ignored_devices_sets_ignore_and_clears_assignment(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:63", "assignment": f"user:{user_id}"},
+        headers=_auth_header(),
+    )
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:64"}, headers=_auth_header())
+    ids = [r["id"] for r in db_conn.execute("SELECT id FROM devices")]
+
+    resp = client.post(
+        "/devices/bulk-ignore", data={"device_ids": [str(i) for i in ids], "ignored": "1"}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    rows = db_conn.execute("SELECT ignored, user_id, group_id FROM devices").fetchall()
+    assert all(r["ignored"] == 1 for r in rows)
+    assert all(r["user_id"] is None for r in rows)
+    assert all(r["group_id"] is None for r in rows)
+
+
+def test_bulk_set_ignored_devices_can_remove_ignore(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:65", "assignment": "ignored"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
+
+    resp = client.post("/devices/bulk-ignore", data={"device_ids": [str(device_id)]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT ignored FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["ignored"] == 0
+
+
+def test_bulk_set_ignored_devices_without_selection_shows_error(client, db_conn):
+    resp = client.post("/devices/bulk-ignore", data={"ignored": "1"}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_bulk_set_ignored_devices_requires_admin_auth(client):
+    resp = client.post("/devices/bulk-ignore", data={"device_ids": ["1"], "ignored": "1"})
+    assert resp.status_code == 401
+
+
+def test_devices_page_manage_panel_has_ignore_bulk_buttons(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:66"}, headers=_auth_header())
+    resp = client.get("/devices", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'action="/devices/bulk-ignore"' in resp.data
+    assert b'id="bulkDeviceIgnoreForm"' in resp.data
+    assert b'id="bulkDeviceUnignoreForm"' in resp.data
+
+
 def test_domains_filter_by_group_shows_group_assigned_and_global_domains(client, db_conn):
     client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()[0]

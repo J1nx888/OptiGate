@@ -186,15 +186,22 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
             device = device_identity.resolve_device(conn, client_ip)
             if device is not None:
                 user = device_identity.resolve_user_for_device(conn, device)
+                group = (
+                    conn.execute("SELECT name, ignored FROM groups WHERE id = ?", (device["group_id"],)).fetchone()
+                    if device["group_id"] is not None else None
+                )
                 if user is not None:
                     assigned_to = html.escape(user["display_name"])
-                elif device["ignored"]:
+                elif device["ignored"] or (group is not None and group["ignored"]):
+                    # A device can be effectively ignored either directly
+                    # (device.ignored) or via its group's own ignored flag
+                    # (added 2026-09-07, db.py's schema comment on
+                    # groups.ignored) -- both read the same here, since
+                    # this is just an informational display, not an
+                    # enforcement decision.
                     assigned_to = "Ignored (never filtered)"
-                elif device["group_id"] is not None:
-                    group = conn.execute(
-                        "SELECT name FROM groups WHERE id = ?", (device["group_id"],)
-                    ).fetchone()
-                    assigned_to = html.escape(group["name"]) if group else "<em>Unassigned</em>"
+                elif group is not None:
+                    assigned_to = html.escape(group["name"])
                 else:
                     assigned_to = "<em>Unassigned</em>"
                 rows = [

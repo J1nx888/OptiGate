@@ -47,7 +47,7 @@ def to_set_name(policy_class: PolicyClass) -> str:
     return _SET_NAMES[policy_class]
 
 
-def classify_device(device_row) -> PolicyClass:
+def classify_device(device_row, group_ignored: bool = False) -> PolicyClass:
     """Classify one `devices` row into its PolicyClass.
 
     Precedence (highest first), matching the nftables prerouting
@@ -59,7 +59,18 @@ def classify_device(device_row) -> PolicyClass:
                           the gateway/Beelink itself entered as
                           ignored -- see controller/desired_state.py's
                           own note on why `ignored` stands in for
-                          bypass_v4).
+                          bypass_v4), OR `group_ignored=True` -- added
+                          2026-09-07 (RoadMap.md's dated entry,
+                          db.py's own schema comment on `groups.ignored`):
+                          a device sitting in a group whose OWN `ignored`
+                          flag is set is just as much "outside the whole
+                          system" as one directly marked `ignored`
+                          itself, even though its own `devices.ignored`
+                          column may still read 0. This function has no
+                          way to look that up itself (it takes a plain
+                          row, not a live connection) -- every caller is
+                          responsible for LEFT JOINing `groups` and
+                          passing the result in.
       2. QUARANTINE   -- `quarantined_at` is set (operator-triggered
                           isolation; NULL means not quarantined -- no
                           dashboard control exists to set this yet,
@@ -90,7 +101,7 @@ def classify_device(device_row) -> PolicyClass:
     and `bypass_login` keys -- works with a sqlite3.Row or any
     Mapping-like object providing those.
     """
-    if device_row["ignored"]:
+    if device_row["ignored"] or group_ignored:
         return PolicyClass.BYPASS
     if device_row["quarantined_at"]:
         return PolicyClass.QUARANTINE
@@ -99,7 +110,7 @@ def classify_device(device_row) -> PolicyClass:
     return PolicyClass.PREAUTH
 
 
-def bump_eligible(device_row) -> bool:
+def bump_eligible(device_row, group_ignored: bool = False) -> bool:
     """Whether this device should be a member of nftables' bump_v4 set
     -- the independent, orthogonal opt-in for Squid/SSL-bump refinement
     (RoadMap.md's "two independent axes" section, locked 2026-08-30).
@@ -112,6 +123,9 @@ def bump_eligible(device_row) -> bool:
     forced through Squid just because an admin once also checked
     bump_enabled on it, and a not-yet-logged-in (PREAUTH) device can't
     be bump-eligible before it even has DNS-tier access. Same
-    `device_row` shape as classify_device() plus `bump_enabled`.
-    """
-    return bool(device_row["bump_enabled"]) and classify_device(device_row) == PolicyClass.AUTHENTICATED
+    `device_row` shape as classify_device() plus `bump_enabled`;
+    `group_ignored` is forwarded straight through to classify_device()
+    so a bump-enabled device in a newly-ignored group loses bump
+    eligibility the same cycle it loses everything else, not one cycle
+    later."""
+    return bool(device_row["bump_enabled"]) and classify_device(device_row, group_ignored) == PolicyClass.AUTHENTICATED

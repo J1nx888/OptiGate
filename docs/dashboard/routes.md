@@ -851,6 +851,16 @@ text here still said "not built" until now).
 - `POST /groups/delete` -> `delete_group()` -- form field `group_id`.
   Hard-deletes the row (`devices.group_id`/`group_domains` fall back to
   `NULL`/cascade). Redirects to `devices`.
+- `POST /groups/ignored` -> `update_group_ignored()` (added 2026-09-07,
+  project owner's explicit request: "For Device groups, I need to be
+  able to enable 'ignore mode' for specific device groups") -- form
+  fields `group_id`, `ignored` (checkbox-shaped: any truthy value sets
+  it to 1, absent/empty sets it to 0). Plain `UPDATE groups SET
+  ignored = ?`. This is the group detail page's "Turn on/off Ignore
+  mode" button. See `db.py`'s schema comment on `groups.ignored` for
+  the full "additive with each device's own `ignored` bit" semantics
+  and every consumer that has to account for it. Redirects to
+  `group_detail`.
 - `GET /groups/<int:group_id>` -> `group_detail()` (added 2026-09-06,
   closing a real gap -- a group previously had no dedicated page at all,
   only a "Manage domains" link straight into a filtered `/domains` view,
@@ -899,6 +909,21 @@ text here still said "not built" until now).
   clicking it reveals this exact form in a collapsed panel instead of
   showing the select by default; the route/handler are unchanged, only
   where the picker lives in the page.
+- `POST /devices/bulk-ignore` -> `bulk_set_ignored_devices()` (added
+  2026-09-07, project owner's explicit request: "I need a bulk action
+  that allows me to assign ignore to a selection of devices or put them
+  in a group. The bulk add to group exists, but the bulk add to ignore
+  does not.") -- form fields `device_ids` (multi-value, same checkbox
+  collection as every other bulk route) and `ignored` (checkbox-shaped).
+  Setting it to 1 clears `user_id`/`group_id` too -- same "Ignore and a
+  real assignment are mutually exclusive at the UI level" semantics as
+  `_parse_device_assignment("ignored")` and the mirror image of
+  `_batch_assign_devices_to_group()`'s own `ignored = 0` reset. Clearing
+  it back to 0 just leaves the device Unassigned, no attempt to restore
+  a prior assignment. These are the Devices toolbar's "Manage" panel's
+  "Set to Ignore"/"Remove Ignore" buttons, alongside the pre-existing
+  group-assign form. Redirects to `devices` with an error flash if no
+  devices were selected.
 - `POST /devices/bulk-delete` -> `bulk_delete_devices()` (added
   2026-09-07, same live-testing feedback as above -- "lacks the ability
   to take bulk actions such as deleting multiple devices") -- form field
@@ -930,7 +955,11 @@ text here still said "not built" until now).
   existed). Form field `group_id`, same `_set_quarantine()` helper and
   `WHERE group_id = ? AND ignored = 0` / `WHERE group_id = ? AND
   quarantined_at IS NOT NULL` shape as the per-user routes above.
-  Redirects to `group_detail`.
+  **Since 2026-09-07**: `pause_group()` first checks whether the target
+  group itself has `groups.ignored` set -- if so it skips the write
+  entirely and returns an error flash ("pausing it would have no
+  effect") rather than reporting devices "paused" that are actually
+  still BYPASS. Redirects to `group_detail`.
 - `POST /settings/device-stale-days` -> `update_device_stale_days()` --
   form field `device_stale_days` (a whole number of days, or blank to
   disable cleanup entirely). Feeds `cleanup_stale_devices()` above.

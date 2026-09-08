@@ -28,7 +28,11 @@ def db_backed_desired_state(
     "never touch this device" semantic (the admin's own laptop, a
     guest's phone, or the gateway/Beelink itself entered as an ignored
     device), so this doesn't introduce a second, differently-named
-    concept for the same thing. The worker's own ValidateTargets (see
+    concept for the same thing. A device sitting in a group whose OWN
+    `ignored` flag is set (added 2026-09-07, db.py's own schema comment
+    on `groups.ignored`) is excluded the same way, via the LEFT JOIN
+    below -- group-level ignore is additive with the device's own bit,
+    not a replacement for it. The worker's own ValidateTargets (see
     phase3/arp-worker/internal/worker/safety.go) independently rejects
     the gateway/self/broadcast/multicast regardless of what's sent
     here, as defense in depth -- this function does not duplicate that
@@ -43,7 +47,8 @@ def db_backed_desired_state(
         SELECT d.id AS device_id, d.mac_address, b.ipv4_address
         FROM devices d
         JOIN device_bindings b ON b.device_id = d.id AND b.active = 1
-        WHERE d.ignored = 0
+        LEFT JOIN groups g ON g.id = d.group_id
+        WHERE d.ignored = 0 AND COALESCE(g.ignored, 0) = 0
         ORDER BY b.last_seen_at DESC
         """
     ).fetchall()
