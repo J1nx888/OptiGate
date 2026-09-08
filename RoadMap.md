@@ -5194,6 +5194,53 @@ global override.
 18 new tests in `tests/test_dashboard.py`. 910 → 928 passed, 34
 skipped, zero regressions.
 
+### Domains toolbar closes the last gap; category bulk-domain import (2026-09-07)
+
+Real live-testing feedback: "the domains section does not have the same
+Entra-style bulk action toolbar." The Devices/Users/Categories/Schedules
+toolbar redesign above had missed Domains -- its own bulk-actions UI
+predated that pattern (an always-visible `<details>` disclosure for
+"Bulk-assign access" only, no Download/Delete). Brought in line with
+the other four pages: `#domainBulkToolbar` with Download domains (CSV,
+`export_domains_csv()`), Delete (`bulk_delete_domains()` -- same
+built-in-Crunchyroll-domain protection `delete_domain()` already has,
+silently skipping it rather than erroring the whole batch), and a
+"Manage access" toggle button that reveals the pre-existing bulk-access
+form (now a hidden panel instead of a `<details>`, same
+toggle-button-reveals-a-panel pattern the Devices page's own "Manage"
+button already uses for its group-assign panel). No Enable/Disable --
+domains have no clean binary toggle, same reasoning as Categories/
+Schedules.
+
+**Second real request, same session**: "can we take the information
+from [an aggregator page listing ~90 manga-reading sites] and upload it
+as a category called 'Manga'?" Categories in this app are BLOCK lists
+(the opposite of Domains), so this creates a category that blocks those
+sites, not one that allows them. There was no way to add more than one
+domain to a category at a time (`add_category_domain()` takes a single
+hand-typed regex pattern) -- rather than a one-off script to force this
+one import in, built a real "Add many domains at once" feature on the
+category detail page: a textarea, one bare domain / domain+path / full
+URL per line, extracted via a new `_extract_domain()` helper (same
+"paste whatever you've got, we'll figure it out" philosophy as
+`_extract_path()`, added earlier this session for bump-mode paths) --
+strips a leading `www.`, de-dupes, stores each as `re.escape()`d
+manual `category_domains` rows in one transaction
+(`bulk_add_category_domains()`).
+
+Before importing anything, verified the actual site list by hand: the
+first pass used `WebFetch`, whose small summarizer model fabricated
+domain names outright (e.g. claimed `comix.everythingmoe.com` for a
+site whose real domain, read directly from the page's own
+`data-link` attribute, is `comix.to`) -- caught by cross-checking a
+couple of entries in the live Browser pane before trusting any of it,
+then re-extracted the real target URL for all ~90 entries directly
+from the page's DOM (`a[data-link]`) rather than from the fabricated
+summary.
+
+5 new tests in `tests/test_dashboard.py` (`_extract_domain()` plus the
+new bulk-add route). 934 → 939 passed, 34 skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

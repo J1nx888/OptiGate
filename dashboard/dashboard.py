@@ -1616,14 +1616,23 @@ DOMAINS_BODY = """
   <span class="badge mode-trusted">trusted</span> always passed through, unchecked
 </p>
 {% if domains %}
-<details id="domainBulkAccess">
-<summary id="domainBulkAccessSummary">Bulk-assign access &mdash; check domains below to act on several at once.</summary>
-<p class="hint">Pick who gets the checked domains here, then apply -- replaces the ENTIRE access grant for every one checked (same as editing each one's own Manage page, just all at once).</p>
-<form id="bulkDomainAccessForm" class="add-form" method="post" action="{{ url_for('bulk_update_domain_access') }}">
+<div class="toolbar" id="domainBulkToolbar">
+  <a class="btn small" href="{{ url_for('export_domains_csv') }}">&darr; Download domains</a>
+  <span class="toolbar-sep"></span>
+  <form id="bulkDomainDeleteForm" class="inline" method="post" action="{{ url_for('bulk_delete_domains') }}"
+        onsubmit="return confirm('Delete every checked domain? This cannot be undone.');">
+    <button class="danger small" type="submit" disabled>Delete</button>
+  </form>
+  <button class="btn small" type="button" id="domainBulkManageToggle" disabled>Manage access</button>
+  <span class="hint" id="domainBulkCount" style="margin:0;">Check domains below to act on several at once.</span>
+</div>
+<div id="domainBulkManagePanel" hidden style="margin:-.3rem 0 .6rem;">
+  <p class="hint">Pick who gets the checked domains here, then apply -- replaces the ENTIRE access grant for every one checked (same as editing each one's own Manage page, just all at once).</p>
+  <form id="bulkDomainAccessForm" class="add-form" method="post" action="{{ url_for('bulk_update_domain_access') }}">
 """ + ACCESS_SELECTS + """
-  <button class="add" type="submit" disabled>Apply to checked domains</button>
-</form>
-</details>
+    <button class="add small" type="submit">Apply to checked domains</button>
+  </form>
+</div>
 {% endif %}
 {% if domains %}<input type="search" data-filter-table="domainsTable" placeholder="Search domains&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
@@ -1655,56 +1664,74 @@ DOMAINS_BODY = """
 <script>
 (function () {
   var selectAll = document.getElementById("domainSelectAll");
-  var summary = document.getElementById("domainBulkAccessSummary");
+  var countLabel = document.getElementById("domainBulkCount");
+  var toolbar = document.getElementById("domainBulkToolbar");
+  var manageToggle = document.getElementById("domainBulkManageToggle");
+  var managePanel = document.getElementById("domainBulkManagePanel");
 
-  // Same "start disabled, enable once something's checked" pattern as
-  // the Devices page's own toolbar -- see that page's comment (RoadMap.md's
-  // dated entry, referencing Microsoft Entra's admin console).
-  function updateBulkAccessState() {
+  // Same Entra-style toolbar pattern as Devices/Users/Categories/Schedules
+  // (RoadMap.md's dated entry) -- replaces this page's old <details>
+  // bulk-assign disclosure with the same "buttons above the table,
+  // disabled until something's checked" toolbar used everywhere else.
+  function updateToolbarState() {
+    if (!toolbar) return;
     var n = document.querySelectorAll(".bulk-domain-check:checked").length;
-    var applyBtn = document.querySelector("#bulkDomainAccessForm button[type=submit]");
-    if (applyBtn) applyBtn.disabled = n === 0;
-    if (summary) {
-      summary.textContent = n === 0
-        ? "Bulk-assign access — check domains below to act on several at once."
-        : "Bulk-assign access — " + n + " domain" + (n === 1 ? "" : "s") + " selected.";
+    toolbar.querySelectorAll("button").forEach(function (btn) { btn.disabled = n === 0; });
+    if (n === 0 && managePanel) managePanel.hidden = true;
+    if (countLabel) {
+      countLabel.textContent = n === 0
+        ? "Check domains below to act on several at once."
+        : n + " domain" + (n === 1 ? "" : "s") + " selected.";
     }
   }
 
   if (selectAll) {
     selectAll.addEventListener("change", function () {
       document.querySelectorAll(".bulk-domain-check").forEach(function (box) { box.checked = selectAll.checked; });
-      updateBulkAccessState();
+      updateToolbarState();
     });
   }
   document.querySelectorAll(".bulk-domain-check").forEach(function (box) {
-    box.addEventListener("change", updateBulkAccessState);
+    box.addEventListener("change", updateToolbarState);
   });
-  updateBulkAccessState();
+  updateToolbarState();
 
-  var bulkForm = document.getElementById("bulkDomainAccessForm");
-  if (bulkForm) {
-    bulkForm.addEventListener("submit", function (event) {
-      // The row checkboxes live in #domainsTable, not inside this form --
-      // nesting a <form> around the table would break the per-row Delete
-      // forms already in each row (HTML forms can't nest) -- so they're
-      // collected into hidden inputs here instead, right before submit.
+  // "Manage access" doesn't submit anything itself -- it reveals the
+  // access-assign panel below, same "click to open further options" role
+  // the Devices page's own "Manage" toggle plays for its group-assign panel.
+  if (manageToggle && managePanel) {
+    manageToggle.addEventListener("click", function () {
+      managePanel.hidden = !managePanel.hidden;
+    });
+  }
+
+  function wireBulkForm(formId) {
+    var form = document.getElementById(formId);
+    if (!form) return;
+    form.addEventListener("submit", function (event) {
+      // The row checkboxes live in #domainsTable, not inside either bulk
+      // form -- nesting a <form> around the table would break the per-row
+      // Delete forms already in each row (HTML forms can't nest) -- so
+      // they're collected into hidden inputs here instead, right before
+      // submit.
       var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-domain-check:checked"));
       if (!checked.length) {
         event.preventDefault();
         alert("Check at least one domain above first.");
         return;
       }
-      bulkForm.querySelectorAll("input[name=domain_ids]").forEach(function (el) { el.remove(); });
+      form.querySelectorAll("input[name=domain_ids]").forEach(function (el) { el.remove(); });
       checked.forEach(function (box) {
         var hidden = document.createElement("input");
         hidden.type = "hidden";
         hidden.name = "domain_ids";
         hidden.value = box.value;
-        bulkForm.appendChild(hidden);
+        form.appendChild(hidden);
       });
     });
   }
+  wireBulkForm("bulkDomainDeleteForm");
+  wireBulkForm("bulkDomainAccessForm");
 })();
 </script>
 </div>
@@ -2265,6 +2292,62 @@ def bulk_update_domain_access():
     )
 
 
+@app.route("/domains/export", methods=["GET"])
+@require_admin
+def export_domains_csv():
+    """Domains list's toolbar "Download domains" button (added 2026-09-07,
+    RoadMap.md's dated entry -- same Entra-style toolbar redesign already
+    applied to Devices/Users/Categories/Schedules, extended here to close
+    the last gap). A plain CSV of every domain, not gated by checkbox
+    selection, same "always available regardless of selection" role every
+    other page's own Download button plays."""
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM domains ORDER BY is_global DESC, pattern").fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Pattern", "Mode", "Access", "Note"])
+    for d in rows:
+        writer.writerow([
+            d["pattern"], d["mode"],
+            "Everyone" if d["is_global"] else "Per-user/group/device",
+            d["note"] or "",
+        ])
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=domains.csv"},
+    )
+
+
+@app.route("/domains/bulk-delete", methods=["POST"])
+@require_admin
+def bulk_delete_domains():
+    """Domains list's toolbar "Delete" button. Same built-in-Crunchyroll
+    protection as the single-domain delete_domain() route above: that
+    domain is load-bearing for the show-approval feature, so it's silently
+    skipped (not deleted) even if checked, rather than erroring out the
+    whole batch."""
+    domain_ids = {int(x) for x in request.form.getlist("domain_ids") if x.isdigit()}
+    if not domain_ids:
+        return flash_redirect("domains", "No domains selected.", error=True)
+    conn = get_db()
+    placeholders = ",".join("?" * len(domain_ids))
+    protected = {
+        row["id"] for row in conn.execute(
+            f"SELECT id FROM domains WHERE id IN ({placeholders}) AND kind = 'crunchyroll'",
+            tuple(domain_ids),
+        ).fetchall()
+    }
+    deletable = domain_ids - protected
+    if deletable:
+        del_placeholders = ",".join("?" * len(deletable))
+        conn.execute(f"DELETE FROM domains WHERE id IN ({del_placeholders})", tuple(deletable))
+        conn.commit()
+    message = f"Deleted {len(deletable)} domain{'s' if len(deletable) != 1 else ''}."
+    if protected:
+        message += " Skipped the built-in Crunchyroll domain (can't be deleted)."
+    return flash_redirect("domains", message, error=not deletable and bool(protected))
+
+
 def _extract_path(raw: str) -> str:
     """Accepts either a bare path (`/comics/foo`) or a full URL
     (`https://example.com/comics/foo`, scheme optional) and returns just
@@ -2281,6 +2364,28 @@ def _extract_path(raw: str) -> str:
         # correctly either way.
         raw = "https://" + raw
     return urlparse(raw).path or "/"
+
+
+def _extract_domain(raw: str) -> str | None:
+    """Given one pasted line -- a bare domain, a domain with a path, or a
+    full URL -- returns just the lowercased hostname with any leading
+    'www.' stripped, or None if the line has nothing usable on it. Same
+    "paste whatever you've got, we'll figure it out" approach as
+    _extract_path() above, applied to bulk_add_category_domains() below
+    so an admin can paste a whole list of sites (e.g. every link on an
+    aggregator page) instead of hand-typing/escaping a regex per domain."""
+    raw = raw.strip()
+    if not raw or raw.startswith("#"):
+        return None
+    if "://" not in raw:
+        raw = "https://" + raw
+    host = urlparse(raw).hostname
+    if not host:
+        return None
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
 
 
 @app.route("/domains/paths/add", methods=["POST"])
@@ -3121,6 +3226,15 @@ CATEGORY_DETAIL_BODY = """
   <button class="add" type="submit">Add domain</button>
 </form>
 <p class="hint">Manually-added domains are never touched by a subscription sync.</p>
+<details style="margin-top:.6rem;">
+<summary>Add many domains at once</summary>
+<p class="hint">Paste one per line -- a bare domain, a domain with a path, or a full URL all work (handy for importing every link off an aggregator/listing page). "www." is stripped automatically and duplicates are skipped.</p>
+<form class="add-form" method="post" action="{{ url_for('bulk_add_category_domains') }}">
+  <input type="hidden" name="category_id" value="{{ c.id }}">
+  <textarea name="patterns" rows="6" style="flex:1; min-width:280px; width:100%;" placeholder="example.com&#10;https://another-example.com/some/page&#10;a-third-example.net"></textarea>
+  <button class="add" type="submit">Add pasted domains</button>
+</form>
+</details>
 </div>
 
 <div class="card">
@@ -3263,6 +3377,47 @@ def add_category_domain():
     )
     conn.commit()
     return flash_redirect("category_detail", "Domain added.", category_id=category_id)
+
+
+@app.route("/categories/domains/bulk-add", methods=["POST"])
+@require_admin
+def bulk_add_category_domains():
+    """Category detail page's "Add many domains at once" panel -- added
+    2026-09-07 (RoadMap.md's dated entry, project owner's explicit
+    request: import every site from an aggregator page as one category
+    in a single paste, rather than one add_category_domain() call per
+    domain). Accepts one bare domain, domain+path, or full URL per
+    line -- same "paste whatever you've got" extraction _extract_path()
+    already uses for bump-mode paths -- de-dupes, strips a leading
+    'www.', and stores each as an escaped literal (re.escape()), the
+    same regex-pattern shape add_category_domain() stores, just derived
+    instead of hand-typed/hand-escaped. One transaction for the whole
+    paste, not one commit per line, same discipline as
+    bulk_update_domain_access()."""
+    category_id = request.form.get("category_id", "")
+    raw_lines = request.form.get("patterns", "").splitlines()
+    hosts = sorted({h for h in (_extract_domain(line) for line in raw_lines) if h})
+    if not hosts:
+        return flash_redirect(
+            "category_detail", "No usable domains found in the pasted text.", error=True, category_id=category_id,
+        )
+    conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for host in hosts:
+            conn.execute(
+                "INSERT OR IGNORE INTO category_domains (category_id, pattern, source, created_at) "
+                "VALUES (?, ?, 'manual', ?)",
+                (category_id, re.escape(host), db.now_iso()),
+            )
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.commit()
+    return flash_redirect(
+        "category_detail", f"Added {len(hosts)} domain{'s' if len(hosts) != 1 else ''}.", category_id=category_id,
+    )
 
 
 @app.route("/categories/domains/delete", methods=["POST"])

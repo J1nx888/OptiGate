@@ -414,6 +414,93 @@ def test_bulk_update_domain_access_is_one_transaction_not_one_commit_per_domain(
         ).fetchone() is None, "first domain's write must have rolled back too, not just the second one's failure"
 
 
+# ============================================================
+# Domains toolbar: Download/Delete/Manage access (Entra-style buttons,
+# added 2026-09-07 -- closing the last gap in the toolbar redesign already
+# applied to Devices/Users/Categories/Schedules; RoadMap.md's dated entry)
+# ============================================================
+
+def test_domains_page_has_toolbar_with_download_delete_and_manage_access(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    resp = client.get("/domains", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'id="domainBulkToolbar"' in resp.data
+    assert b'href="/domains/export"' in resp.data
+    assert b'action="/domains/bulk-delete"' in resp.data
+    assert b'id="domainBulkManageToggle"' in resp.data
+    # The old <details> disclosure this replaced should be gone.
+    assert b'<details id="domainBulkAccess">' not in resp.data
+
+
+def test_bulk_delete_domains_removes_every_selected_domain(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"a\.example\.com", "mode": "splice"}, headers=_auth_header())
+    client.post("/domains/add", data={"pattern": r"b\.example\.com", "mode": "splice"}, headers=_auth_header())
+    client.post("/domains/add", data={"pattern": r"c\.example\.com", "mode": "splice"}, headers=_auth_header())
+    to_delete = [
+        r["id"] for r in db_conn.execute(
+            "SELECT id FROM domains WHERE pattern IN (?, ?)", (r"a\.example\.com", r"b\.example\.com")
+        )
+    ]
+
+    resp = client.post(
+        "/domains/bulk-delete", data={"domain_ids": [str(i) for i in to_delete]}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith("/domains")
+    remaining = {r["pattern"] for r in db_conn.execute("SELECT pattern FROM domains")}
+    assert remaining == {r"c\.example\.com"}
+
+
+def test_bulk_delete_domains_without_selection_shows_error(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+
+    resp = client.post("/domains/bulk-delete", data={}, headers=_auth_header())
+
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) c FROM domains").fetchone()["c"] == 1
+
+
+def test_bulk_delete_domains_skips_builtin_crunchyroll_domain(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, note, created_at) "
+        "VALUES ('crunchyroll\\.com', 'bump', 'crunchyroll', 1, NULL, datetime('now'))"
+    )
+    db_conn.commit()
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+
+    resp = client.post("/domains/bulk-delete", data={"domain_ids": [str(i) for i in ids]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    remaining = db_conn.execute("SELECT kind FROM domains").fetchall()
+    assert [r["kind"] for r in remaining] == ["crunchyroll"]
+
+
+def test_export_domains_csv_includes_every_domain_and_key_fields(client, db_conn):
+    client.post(
+        "/domains/add",
+        data={"pattern": r"example\.com", "mode": "bump", "note": "family site", "is_global": "on"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/domains/export", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+    assert "attachment" in resp.headers["Content-Disposition"]
+    body = resp.data.decode()
+    assert r"example\.com" in body
+    assert "bump" in body
+    assert "Everyone" in body
+    assert "family site" in body
+
+
+def test_export_domains_csv_requires_admin_auth(client):
+    resp = client.get("/domains/export")
+    assert resp.status_code == 401
+
+
 def test_add_path_and_delete_path(client, db_conn):
     client.post("/domains/add", data={"pattern": r"example\.com", "mode": "bump"}, headers=_auth_header())
     domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
@@ -3990,6 +4077,84 @@ def test_category_detail_shows_added_domains(client, db_conn):
         "SELECT * FROM category_domains WHERE category_id = ?", (category_id,)
     ).fetchone()
     assert row["source"] == "manual"
+
+
+# ============================================================
+# Category "Add many domains at once" -- added 2026-09-07 (RoadMap.md's
+# dated entry, project owner's explicit request to import a whole list of
+# sites as one category in a single paste)
+# ============================================================
+
+def test_extract_domain_handles_bare_domain_path_and_full_url():
+    import dashboard as dashboard_module
+    assert dashboard_module._extract_domain("example.com") == "example.com"
+    assert dashboard_module._extract_domain("www.example.com") == "example.com"
+    assert dashboard_module._extract_domain("https://www.example.com/some/page") == "example.com"
+    assert dashboard_module._extract_domain("example.com/some/page") == "example.com"
+    assert dashboard_module._extract_domain("  ") is None
+    assert dashboard_module._extract_domain("# a comment") is None
+
+
+def test_bulk_add_category_domains_accepts_mixed_pasted_lines(client, db_conn):
+    client.post("/categories/add", data={"name": "Manga"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Manga'").fetchone()["id"]
+
+    resp = client.post(
+        "/categories/domains/bulk-add",
+        data={
+            "category_id": category_id,
+            "patterns": "mangadex.org\nhttps://www.mangakatana.com/\nmangapill.com/some/path\n\n# a comment\n",
+        },
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith(f"/categories/{category_id}")
+    patterns = {r["pattern"] for r in db_conn.execute(
+        "SELECT pattern FROM category_domains WHERE category_id = ?", (category_id,)
+    )}
+    assert patterns == {r"mangadex\.org", r"mangakatana\.com", r"mangapill\.com"}
+    assert all(r["source"] == "manual" for r in db_conn.execute(
+        "SELECT source FROM category_domains WHERE category_id = ?", (category_id,)
+    ))
+
+
+def test_bulk_add_category_domains_dedupes_and_ignores_existing(client, db_conn):
+    client.post("/categories/add", data={"name": "Manga"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Manga'").fetchone()["id"]
+    client.post(
+        "/categories/domains/add", data={"category_id": category_id, "pattern": r"mangadex\.org"},
+        headers=_auth_header(),
+    )
+
+    client.post(
+        "/categories/domains/bulk-add",
+        data={"category_id": category_id, "patterns": "mangadex.org\nwww.mangadex.org\nmangadex.org"},
+        headers=_auth_header(),
+    )
+
+    rows = db_conn.execute("SELECT COUNT(*) c FROM category_domains WHERE category_id = ?", (category_id,)).fetchone()
+    assert rows["c"] == 1
+
+
+def test_bulk_add_category_domains_without_usable_lines_shows_error(client, db_conn):
+    client.post("/categories/add", data={"name": "Manga"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Manga'").fetchone()["id"]
+
+    resp = client.post(
+        "/categories/domains/bulk-add", data={"category_id": category_id, "patterns": "\n# just a comment\n"},
+        headers=_auth_header(),
+    )
+
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute(
+        "SELECT COUNT(*) c FROM category_domains WHERE category_id = ?", (category_id,)
+    ).fetchone()["c"] == 0
+
+
+def test_bulk_add_category_domains_requires_admin_auth(client):
+    resp = client.post("/categories/domains/bulk-add", data={"category_id": 1, "patterns": "example.com"})
+    assert resp.status_code == 401
 
 
 def test_delete_category_domain_only_removes_manual_rows(client, db_conn):

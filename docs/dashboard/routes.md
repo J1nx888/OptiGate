@@ -418,6 +418,17 @@ admin's next action is one edit + submit rather than starting from scratch:
   same "one commit for the batch, not one per row" discipline as
   `/groups/add-devices` below and `common/category_fetch.py`'s own fix.
   Redirects to `domains` with an error flash if no domains were checked.
+- `GET /domains/export` -> `export_domains_csv()` (added 2026-09-07,
+  RoadMap.md's dated entry -- Domains toolbar redesign closing the last
+  gap in the Devices/Users/Categories/Schedules pattern) -- the
+  toolbar's "Download domains" button, a plain CSV (pattern, mode,
+  access, note), not gated by checkbox selection.
+- `POST /domains/bulk-delete` -> `bulk_delete_domains()` (same entry) --
+  form field `domain_ids` (multi-value, same client-side-collected-from-
+  checkboxes shape as `/domains/bulk-access` above). Same built-in-
+  Crunchyroll-domain protection as `/domains/delete`: that row is
+  silently skipped (not deleted) even if checked, rather than erroring
+  out the whole batch. Redirects to `domains`.
 - `POST /domains/paths/add` -> `add_path()` -- form fields `domain_id`,
   `pattern`. **Changed 2026-09-07 (RoadMap.md's dated entry -- "can we
   simplify it so the admin can just paste the URL")**: `pattern` is now
@@ -504,6 +515,16 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   fields `category_id`, `pattern` (validated non-empty, <=200 chars,
   compiles as regex, same as `add_domain()`). `INSERT OR IGNORE` with
   `source='manual'`.
+- `POST /categories/domains/bulk-add` -> `bulk_add_category_domains()`
+  (added 2026-09-07, RoadMap.md's dated entry -- "upload [an aggregator
+  page's site list] as a category") -- form fields `category_id`,
+  `patterns` (a textarea, one bare domain / domain+path / full URL per
+  line). Each line goes through `_extract_domain()` (same "paste
+  whatever you've got" extraction as `_extract_path()`), which strips a
+  leading `www.` and lowercases; de-duped, then stored as
+  `re.escape()`d `INSERT OR IGNORE` manual `category_domains` rows in
+  one `BEGIN IMMEDIATE` transaction. Error-flashes if nothing usable was
+  on any line.
 - `POST /categories/domains/delete` -> `delete_category_domain()` --
   form field `category_domain_id`. Deletes only if `source='manual'` (a
   `WHERE ... AND source = 'manual'` clause -- a subscription-sourced row
