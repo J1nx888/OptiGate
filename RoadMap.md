@@ -6248,7 +6248,7 @@ still watching for the "internet super slow" report specifically,
 which has no confirmed root cause yet and needs the project owner's
 own real-world usage to actually confirm one way or the other.
 
-### Five more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
+### Ten more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
 
 Project owner asked to log these now (so they survive regardless of
 how long this window runs or any context/session boundary in between)
@@ -6363,6 +6363,44 @@ test.
    out of the bump_v4 redirect, or a Squid-side always-allow rule for
    `optigate.home` specifically) once the test window is over, not a
    quick patch decided under time pressure.
+8. **The "this page is blocked" message doesn't display for any
+   blocked page.** User's own hypothesis, worth taking seriously: this
+   could be an SSL/TLS limitation, not a bug in the block-page code
+   itself. Squid can only inject a friendly HTML block page into a
+   connection it's actually decrypting (bumped HTTPS, or plain HTTP).
+   For a device that ISN'T successfully being SSL-bumped -- which is
+   exactly what item 6 above says is currently happening -- an HTTPS
+   block can only be enforced at the TCP/SNI level (connection reset or
+   TLS handshake failure), which the browser renders as a generic
+   connection-error page, never Squid's own custom page. So this may
+   turn out to be a direct symptom of item 6's root cause rather than
+   an independent bug -- needs re-testing AFTER 6 is fixed before
+   concluding there's a second, separate problem here.
+9. **netflix.com is blocked, but no category is configured to block
+   it.** A real discrepancy worth treating as higher-priority than the
+   others once investigation resumes -- possible causes to check: a
+   stale/leftover AdGuard custom rule from before the wipe-and-restore
+   (`backup.py` deliberately excludes `category_domains` since it's
+   subscription-sourced, so a rule that predates the current category
+   config could have survived); a subscription list
+   (`refresh_adguard_filters()`) that happens to include netflix.com
+   under a category the user doesn't realize is active; or a
+   miscategorization in `controller/adguard_sync.py`'s own rule
+   generation. Needs checking against the actual live AdGuard rules
+   (`$client=` rule set) and the `category_domains`/`domains` tables
+   directly, not assumed to be either side's fault in advance.
+10. **AdGuard username/password is not synced properly.** Likely
+    connected to the 2026-09-07 credential-unification design
+    (`update_admin()` in `dashboard/dashboard.py` is supposed to be the
+    one place that sets `adguard_password`, with `/settings/adguard`
+    only ever saving the URL field -- see the dashboard test fixes
+    earlier this same session for the exact mechanics). Needs
+    reproducing precisely: what was changed, where, and what
+    "not synced" looked like (AdGuard rejecting the dashboard's own API
+    calls? the dashboard's stored credential not matching what's
+    actually configured in AdGuard itself, e.g. after AdGuard's admin
+    password was changed directly rather than through the dashboard?).
+    Don't guess at a fix without first confirming which side is stale.
 
 ---
 
