@@ -3660,6 +3660,59 @@ def test_devices_page_rejects_an_arbitrary_per_page_value(client, db_conn):
     assert "Page 1 of 2" in body  # fell back to the default page size, not one giant page
 
 
+def test_devices_page_search_filters_by_label_or_mac(client, db_conn):
+    """Added 2026-09-08, project owner's explicit follow-up request:
+    once the main roster paginates, the old client-side search box would
+    have only searched whichever page was on screen -- this is now a
+    real server-side search across the whole table."""
+    _add_devices(client, 5)
+    client.post(
+        "/devices/add", data={"mac_address": "11:22:33:44:55:66", "label": "Kitchen TV"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/devices?q=Kitchen", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "11:22:33:44:55:66" in body
+    assert "aa:bb:cc:dd:00:00" not in body
+    assert "showing 1-1 of 1" in body
+
+
+def test_devices_page_search_does_not_limit_the_pending_card(client, db_conn):
+    """The "awaiting login" card is intentionally NOT filtered by the
+    main roster's search box -- it always lists every pending device."""
+    import identity
+
+    _add_devices(client, 5)
+    identity.record_binding(db_conn, "11:22:33:44:55:66", "192.168.1.99", source="rtnetlink")
+
+    resp = client.get("/devices?q=nonexistent-search-term", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Devices awaiting login (1)" in resp.data
+    assert b"11:22:33:44:55:66" in resp.data
+
+
+def test_devices_page_search_with_no_matches_still_shows_the_search_box(client, db_conn):
+    _add_devices(client, 3)
+    resp = client.get("/devices?q=nonexistent-search-term", headers=_auth_header())
+    body = resp.data.decode()
+    assert resp.status_code == 200
+    assert 'name="q"' in body
+    assert "No devices match" in body
+
+
+def test_devices_page_search_is_carried_across_pagination_links(client, db_conn):
+    _add_devices(client, 60, prefix="aa:aa:aa:aa")  # all share a common prefix to match on
+    resp = client.get("/devices?q=aa:aa:aa:aa&per_page=25", headers=_auth_header())
+    body = resp.data.decode()
+    assert resp.status_code == 200
+    assert "Page 1 of 3" in body
+    assert "q=aa" in body  # carried into the Next link's href
+
+
 # ============================================================
 # Domains page pagination -- same request/reasoning as Devices above
 # ============================================================
@@ -3714,6 +3767,45 @@ def test_domains_page_small_list_shows_no_pagination_controls(client, db_conn):
     resp = client.get("/domains", headers=_auth_header())
     assert resp.status_code == 200
     assert b"Page 1 of" not in resp.data
+
+
+def test_domains_page_search_filters_by_pattern_or_note(client, db_conn):
+    """Added 2026-09-08, project owner's explicit follow-up request --
+    same reasoning as Devices' search above."""
+    _add_domains(client, 5)
+    client.post(
+        "/domains/add", data={"pattern": "netflix\\.example", "mode": "splice", "note": "streaming"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/domains?q=netflix", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "netflix" in body
+    assert "site0000" not in body
+    assert "showing 1-1 of 1" in body
+
+    resp = client.get("/domains?q=streaming", headers=_auth_header())
+    assert "netflix" in resp.data.decode()
+
+
+def test_domains_page_search_with_no_matches_still_shows_the_search_box(client, db_conn):
+    _add_domains(client, 3)
+    resp = client.get("/domains?q=nonexistent-search-term", headers=_auth_header())
+    body = resp.data.decode()
+    assert resp.status_code == 200
+    assert 'name="q"' in body
+    assert "No domains match" in body
+
+
+def test_domains_page_search_is_carried_across_pagination_links(client, db_conn):
+    _add_domains(client, 60)
+    resp = client.get("/domains?q=site&per_page=25", headers=_auth_header())
+    body = resp.data.decode()
+    assert resp.status_code == 200
+    assert "Page 1 of 3" in body
+    assert "q=site" in body  # carried into the Next link's href
 
 
 def test_domains_filter_by_group_shows_group_assigned_and_global_domains(client, db_conn):
@@ -4276,15 +4368,18 @@ def test_export_schedules_csv_requires_admin_auth(client):
 
 
 def test_domains_and_devices_pages_have_search_boxes(client, db_conn):
+    # Domains/Devices search server-side (name="q") since both paginate;
+    # Groups doesn't paginate so it keeps the old client-side
+    # data-filter-table mechanism.
     client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:30"}, headers=_auth_header())
     client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
 
     resp = client.get("/domains", headers=_auth_header())
-    assert b'data-filter-table="domainsTable"' in resp.data
+    assert b'name="q"' in resp.data
 
     resp = client.get("/devices", headers=_auth_header())
-    assert b'data-filter-table="devicesTable"' in resp.data
+    assert b'name="q"' in resp.data
     assert b'data-filter-table="groupsTable"' in resp.data
 
 

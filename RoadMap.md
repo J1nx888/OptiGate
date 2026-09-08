@@ -5453,6 +5453,47 @@ Domains) to be its own follow-up rather than folded in silently here.
 12 new tests in `tests/test_dashboard.py`. 980 → 992 passed, 34 skipped,
 zero regressions.
 
+### Devices and Domains search moved server-side (2026-09-08)
+
+Follow-up to the pagination work above, project owner's explicit
+request: the deliberately-deferred item from that entry ("converting
+that search to a real server-side search... is a big enough design
+decision to be its own follow-up"). Both pages' old
+`data-filter-table` client-side search box only ever searched whatever
+page happened to be rendered -- once those two paginated, that silently
+became "only the current page" instead of "everything." Replaced with a
+real `?q=` search, applied server-side before pagination:
+
+- **Devices** (`devices()`): a SQL `WHERE` clause (parameterized
+  `LIKE` against `d.mac_address`, `d.label`, `u.display_name`, and
+  `g.name`) applied before the existing `LIMIT`/`OFFSET`, matching this
+  page's SQL-level pagination approach. Deliberately does NOT filter the
+  "awaiting login" card -- that card is intentionally every pending
+  device regardless of what's searched for below, same reasoning as its
+  pagination-independence in the prior entry.
+- **Domains** (`domains()`): one more Python filter pass (substring
+  match against `pattern` or `note`) over the same already-materialized
+  row list pagination already slices -- consistent with why this page's
+  pagination is Python-side to begin with.
+
+Both pages: the search box stays visible even when a search or filter
+combination matches nothing (so there's always a way to clear it,
+rather than the box disappearing along with the empty result table), a
+"Clear" link appears next to an active search, and `?q=` is carried
+through every Prev/Next link and the per-page form (Domains already had
+a `filter_query_args` mechanism for this from its `?target=` filter --
+`q` rides along in it automatically; Devices got an equivalent
+`search_query_args`). Live-verified in the dev server against the real
+60-device/87-domain scratch data: searching devices by MAC substring,
+label, and assigned group all narrowed correctly with the pending card
+unaffected; searching domains by pattern and by note (e.g.
+"geolocation" matching four unrelated hostnames sharing that note) both
+worked, and the active `q=` was confirmed carried into a Next link.
+
+7 new tests in `tests/test_dashboard.py` (plus updating the existing
+search-box assertion test for the new `name="q"` markup instead of
+`data-filter-table`). 992 → 999 passed, 34 skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

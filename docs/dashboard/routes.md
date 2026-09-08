@@ -366,6 +366,13 @@ admin's next action is one edit + submit rather than starting from scratch:
   `?device_id=` filter is active is preserved across a page/per_page
   change (`filter_query_args`) -- clicking Next on a filtered view stays
   filtered, it doesn't silently fall back to the unfiltered full list.
+  **Since 2026-09-08**: `?q=` searches `pattern`/`note` (case-insensitive
+  substring), applied as one more Python filter pass over that same
+  already-materialized row list before pagination slices it -- replaces
+  the old client-side `data-filter-table` search box, which would only
+  have searched whichever page was rendered. `q` rides along
+  automatically in `filter_query_args` (it's just another query-string
+  key), so it's preserved across pagination the same way `?target=` is.
 - `POST /domains/add` -> `add_domain()` -- form fields `pattern`, `mode`
   (`splice`/`bump`/`trusted`, default `splice`), `is_global` (checkbox),
   `note` (optional), plus optional `user_id` purely to preserve the filtered
@@ -802,6 +809,15 @@ text here still said "not built" until now).
   over the (now-partial) paginated list, so a pending device never goes
   missing just because it isn't on whichever page of the full roster is
   currently showing.
+  **Since 2026-09-08**: `?q=` searches the main roster server-side --
+  a parameterized SQL `LIKE` against `mac_address`/`label`/
+  `display_name`/`group_name`, applied before the `LIMIT`/`OFFSET` --
+  replacing the old client-side `data-filter-table` box, which would
+  only have searched whichever page was rendered. Deliberately does
+  NOT filter the "awaiting login" card, same reasoning as its
+  pagination-independence above. `search_query_args` (`{"q": search}`
+  or `{}`) threads `q` through every Prev/Next link and the per-page
+  form.
 - `POST /devices/add` -> `add_device()` -- form fields `mac_address`
   (validated/normalized via `normalize_mac()`), `label` (optional),
   `assignment` (parsed by `_parse_device_assignment()` into a `(user_id,

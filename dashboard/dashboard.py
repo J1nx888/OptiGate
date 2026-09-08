@@ -366,11 +366,14 @@ if ("serviceWorker" in navigator) {
 
 // Instant client-side search, no page reload -- hides non-matching <tr>s
 // (header rows, identified by containing a <th> since these tables don't
-// use <thead>, are never hidden). Used by the Users/Domains/Devices/Groups
-// list pages. Separate from and layered on top of the server-side
-// ?user_id= / ?group_id= / ?device_id= filters elsewhere, which narrow
-// what's sent down in the first place. The combobox picker widgets below
-// have their own, unrelated search box.
+// use <thead>, are never hidden). Used by the Users/Groups/Categories/
+// Schedules/Events list pages -- Domains and Devices moved to
+// server-side ?q= search instead (2026-09-08) once those two paginated,
+// since a client-side filter over one page of results would silently
+// miss matches sitting on a page not currently shown. Separate from and layered on top
+// of the server-side ?user_id= / ?group_id= / ?device_id= filters
+// elsewhere, which narrow what's sent down in the first place. The
+// combobox picker widgets below have their own, unrelated search box.
 document.addEventListener("input", function (event) {
   var tableInput = event.target.closest("[data-filter-table]");
   if (!tableInput) return;
@@ -1687,9 +1690,15 @@ DOMAINS_BODY = """
   </form>
 </div>
 {% endif %}
-{% if domains %}
-<input type="search" data-filter-table="domainsTable" placeholder="Search domains&hellip;" style="margin-bottom:.3rem; width:100%; max-width:280px;">
-{% if total_pages > 1 %}<p class="hint" style="margin:0 0 .6rem;">This box only searches the domains currently shown below -- widen "Show N per page" first if what you're looking for might be on another page.</p>{% endif %}
+{% if any_domains_exist %}
+<form method="get" action="{{ url_for('domains') }}" class="inline" style="margin-bottom:.3rem; gap:.4rem;">
+  <input type="hidden" name="page" value="1">
+  {% for k, v in clear_search_args.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+  <input type="search" name="q" value="{{ search }}" placeholder="Search pattern or note&hellip;" style="width:100%; max-width:280px;">
+  <button class="btn small" type="submit">Search</button>
+  {% if search %}<a class="btn small" href="{{ url_for('domains', **clear_search_args) }}">Clear</a>{% endif %}
+</form>
+{% if search %}<p class="hint" style="margin:0 0 .6rem;">Searches every matching domain, not just this page &mdash; showing results for &ldquo;{{ search }}&rdquo;.</p>{% endif %}
 <div class="toolbar" style="justify-content:space-between;">
   <form method="get" action="{{ url_for('domains') }}" class="inline">
     <input type="hidden" name="page" value="1">
@@ -1736,7 +1745,7 @@ DOMAINS_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="6"><em>No domains configured.</em></td></tr>
+  <tr><td colspan="6"><em>{% if search %}No domains match &ldquo;{{ search }}&rdquo;.{% else %}No domains configured.{% endif %}</em></td></tr>
   {% endfor %}
 </table>
 </div>
@@ -2004,16 +2013,33 @@ def domains():
     else:
         rows = conn.execute("SELECT * FROM domains ORDER BY is_global DESC, pattern").fetchall()
 
+    # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
+    # 2026-09-07 pagination work, project owner's explicit request): now
+    # that this list only renders one page at a time, the old
+    # client-side search box would have silently only searched whatever
+    # page happened to be on screen -- so search moved server-side.
+    # Applied here in plain Python rather than SQL: the target-filter
+    # branch above already has to materialize the full row list before
+    # pagination gets a say (see this function's docstring), so this is
+    # just one more filter pass over that same list, not a second,
+    # SQL-level implementation of the same logic.
+    search = (request.args.get("q") or "").strip()
+    if search:
+        needle = search.lower()
+        rows = [d for d in rows if needle in (d["pattern"] or "").lower() or needle in (d["note"] or "").lower()]
+
     domain_count = len(rows)
     page, per_page = _parse_pagination(request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS)
     total_pages = max(1, math.ceil(domain_count / per_page))
     page = min(page, total_pages)
     page_rows = rows[(page - 1) * per_page : page * per_page]
     # Preserves whatever filter (?target=, or the legacy ?user_id=/
-    # ?group_id=/?device_id=) is active across a page/per_page change --
-    # without this, clicking Next on a filtered view would silently drop
-    # back to the unfiltered full list.
+    # ?group_id=/?device_id=) -- and now ?q= -- is active across a
+    # page/per_page change, without this, clicking Next on a filtered or
+    # searched view would silently drop back to the unfiltered full list.
     filter_query_args = {k: v for k, v in request.args.items() if k not in ("page", "per_page")}
+    clear_search_args = {k: v for k, v in filter_query_args.items() if k != "q"}
+    any_domains_exist = bool(conn.execute("SELECT EXISTS(SELECT 1 FROM domains) AS c").fetchone()["c"])
 
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
@@ -2032,6 +2058,7 @@ def domains():
             preselected_device_ids={filtered_device["id"]} if filtered_device else set(),
             domain_count=domain_count, page=page, per_page=per_page, total_pages=total_pages,
             page_size_options=LIST_PAGE_SIZE_OPTIONS, filter_query_args=filter_query_args,
+            search=search, clear_search_args=clear_search_args, any_domains_exist=any_domains_exist,
             range_start=0 if domain_count == 0 else (page - 1) * per_page + 1,
             range_end=min(page * per_page, domain_count),
         ),
@@ -2802,12 +2829,19 @@ DEVICES_BODY = """
   </form>
 </div>
 {% endif %}
-{% if devices %}
-<input type="search" data-filter-table="devicesTable" placeholder="Search devices&hellip;" style="margin-bottom:.3rem; width:100%; max-width:280px;">
-{% if total_pages > 1 %}<p class="hint" style="margin:0 0 .6rem;">This box only searches the devices currently shown below -- widen "Show N per page" first if what you're looking for might be on another page.</p>{% endif %}
+{% if any_devices_exist %}
+<form method="get" action="{{ url_for('devices') }}" class="inline" style="margin-bottom:.3rem; gap:.4rem;">
+  <input type="hidden" name="page" value="1">
+  <input type="hidden" name="per_page" value="{{ per_page }}">
+  <input type="search" name="q" value="{{ search }}" placeholder="Search MAC, label, assigned kid/group&hellip;" style="width:100%; max-width:280px;">
+  <button class="btn small" type="submit">Search</button>
+  {% if search %}<a class="btn small" href="{{ url_for('devices', per_page=per_page) }}">Clear</a>{% endif %}
+</form>
+{% if search %}<p class="hint" style="margin:0 0 .6rem;">Searches every device, not just this page &mdash; showing results for &ldquo;{{ search }}&rdquo;.</p>{% endif %}
 <div class="toolbar" style="justify-content:space-between;">
   <form method="get" action="{{ url_for('devices') }}" class="inline">
     <input type="hidden" name="page" value="1">
+    {% if search %}<input type="hidden" name="q" value="{{ search }}">{% endif %}
     <label class="hint" style="margin:0;">Show
       <select name="per_page" onchange="this.form.submit()">
         {% for opt in page_size_options %}
@@ -2819,10 +2853,10 @@ DEVICES_BODY = """
   </form>
   {% if total_pages > 1 %}
   <span>
-    {% if page > 1 %}<a class="btn small" href="{{ url_for('devices', page=page-1, per_page=per_page) }}">&larr; Prev</a>
+    {% if page > 1 %}<a class="btn small" href="{{ url_for('devices', page=page-1, per_page=per_page, **search_query_args) }}">&larr; Prev</a>
     {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
     <span class="hint">Page {{ page }} of {{ total_pages }}</span>
-    {% if page < total_pages %}<a class="btn small" href="{{ url_for('devices', page=page+1, per_page=per_page) }}">Next &rarr;</a>
+    {% if page < total_pages %}<a class="btn small" href="{{ url_for('devices', page=page+1, per_page=per_page, **search_query_args) }}">Next &rarr;</a>
     {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
   </span>
   {% endif %}
@@ -2881,16 +2915,16 @@ DEVICES_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="9"><em>No devices tracked yet.</em></td></tr>
+  <tr><td colspan="9"><em>{% if search %}No devices match &ldquo;{{ search }}&rdquo;.{% else %}No devices tracked yet.{% endif %}</em></td></tr>
   {% endfor %}
 </table>
 </div>
 {% if total_pages > 1 %}
 <div class="toolbar" style="justify-content:flex-end;">
-  {% if page > 1 %}<a class="btn small" href="{{ url_for('devices', page=page-1, per_page=per_page) }}">&larr; Prev</a>
+  {% if page > 1 %}<a class="btn small" href="{{ url_for('devices', page=page-1, per_page=per_page, **search_query_args) }}">&larr; Prev</a>
   {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
   <span class="hint">Page {{ page }} of {{ total_pages }}</span>
-  {% if page < total_pages %}<a class="btn small" href="{{ url_for('devices', page=page+1, per_page=per_page) }}">Next &rarr;</a>
+  {% if page < total_pages %}<a class="btn small" href="{{ url_for('devices', page=page+1, per_page=per_page, **search_query_args) }}">Next &rarr;</a>
   {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
 </div>
 {% endif %}
@@ -4676,13 +4710,33 @@ def devices():
         _DEVICE_LIST_SELECT + "WHERE d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0 "
         "ORDER BY d.created_at DESC"
     ).fetchall()
-    device_count = conn.execute("SELECT COUNT(*) AS c FROM devices").fetchone()["c"]
+    # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
+    # 2026-09-07 pagination work, project owner's explicit request): now
+    # that the main roster only renders one page at a time, the old
+    # client-side search box would have silently only searched whatever
+    # page happened to be on screen -- so search moved server-side, as a
+    # SQL WHERE applied before the LIMIT/OFFSET (this page already
+    # queries via SQL, unlike Domains' Python-list-slicing). Deliberately
+    # does NOT filter pending_devices above -- that card is intentionally
+    # every pending device regardless of what's searched for below.
+    search = (request.args.get("q") or "").strip()
+    where_sql = ""
+    where_params: list = []
+    if search:
+        like = f"%{search}%"
+        where_sql = "WHERE (d.mac_address LIKE ? OR d.label LIKE ? OR u.display_name LIKE ? OR g.name LIKE ?) "
+        where_params = [like, like, like, like]
+    device_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM devices d "
+        "LEFT JOIN users u ON u.id = d.user_id LEFT JOIN groups g ON g.id = d.group_id " + where_sql,
+        where_params,
+    ).fetchone()["c"]
     page, per_page = _parse_pagination(request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS)
     total_pages = max(1, math.ceil(device_count / per_page))
     page = min(page, total_pages)
     rows = conn.execute(
-        _DEVICE_LIST_SELECT + "ORDER BY pending DESC, d.created_at DESC LIMIT ? OFFSET ?",
-        (per_page, (page - 1) * per_page),
+        _DEVICE_LIST_SELECT + where_sql + "ORDER BY pending DESC, d.created_at DESC LIMIT ? OFFSET ?",
+        where_params + [per_page, (page - 1) * per_page],
     ).fetchall()
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
@@ -4690,6 +4744,8 @@ def devices():
         row["mac_address"]: _failed_login_attempts(conn, row["mac_address"])
         for row in pending_devices
     }
+    any_devices_exist = bool(conn.execute("SELECT EXISTS(SELECT 1 FROM devices) AS c").fetchone()["c"])
+    search_query_args = {"q": search} if search else {}
     return render(
         "devices",
         render_template_string(
@@ -4700,6 +4756,7 @@ def devices():
             page_size_options=LIST_PAGE_SIZE_OPTIONS,
             range_start=0 if device_count == 0 else (page - 1) * per_page + 1,
             range_end=min(page * per_page, device_count),
+            search=search, any_devices_exist=any_devices_exist, search_query_args=search_query_args,
         ),
     )
 
