@@ -323,7 +323,11 @@ admin's next action is one edit + submit rather than starting from scratch:
   deduped by `series_id`, excluding this user's own), fed to a combobox
   next to the add-show form so approving the same show for a second kid
   doesn't require re-pasting/re-resolving the same URL (see `/shows/add`
-  below). Renders `USER_DETAIL_BODY`. Redirects to
+  below). **Since 2026-09-07**: the "Assigned sites" table is paginated
+  (`?page=`/`?per_page=`, same `_parse_pagination()`/
+  `LIST_PAGE_SIZE_OPTIONS` shared with Categories/Devices/Domains) --
+  a heavily-assigned kid's own site list only ever grows over time.
+  Renders `USER_DETAIL_BODY`. Redirects to
   `users` with an error flash if the user id doesn't exist.
 - `POST /shows/add` -> `add_show()` -- form fields `user_id`, plus EITHER
   `existing_series_id` OR `url` (a Crunchyroll series URL) + `name`
@@ -353,7 +357,15 @@ admin's next action is one edit + submit rather than starting from scratch:
   `matching.user_has_domain()`, the same function the proxy itself uses at
   request time -- deliberately not reimplemented here). Renders
   `DOMAINS_BODY`, including the "Approve a specific page for {user}" section
-  only when `filtered_user` is set (see UI/UX notes below).
+  only when `filtered_user` is set (see UI/UX notes below). **Since
+  2026-09-07**: paginated (`?page=`/`?per_page=`) by slicing the
+  already-computed Python list, not a second SQL query -- the filtered
+  branch already evaluates `matching.*_has_domain()` per row in Python,
+  so the full (filtered or unfiltered) list is already in memory before
+  pagination applies. Whatever `?target=`/`?user_id=`/`?group_id=`/
+  `?device_id=` filter is active is preserved across a page/per_page
+  change (`filter_query_args`) -- clicking Next on a filtered view stays
+  filtered, it doesn't silently fall back to the unfiltered full list.
 - `POST /domains/add` -> `add_domain()` -- form fields `pattern`, `mode`
   (`splice`/`bump`/`trusted`, default `splice`), `is_global` (checkbox),
   `note` (optional), plus optional `user_id` purely to preserve the filtered
@@ -782,6 +794,14 @@ text here still said "not built" until now).
   `system_events.detail`, see below) so an admin can tell "this kid
   already tried and got denied because nobody's assigned this device
   yet" apart from a device nobody has touched at all.
+  **Since 2026-09-07**: the main roster below the pending card is
+  paginated (`?page=`/`?per_page=`, `LIST_PAGE_SIZE_OPTIONS`) via a real
+  `LIMIT`/`OFFSET` query -- the "Devices awaiting login" card is
+  deliberately its OWN separate, unbounded query
+  (`_DEVICE_LIST_SELECT`, shared by both) rather than a Jinja filter
+  over the (now-partial) paginated list, so a pending device never goes
+  missing just because it isn't on whichever page of the full roster is
+  currently showing.
 - `POST /devices/add` -> `add_device()` -- form fields `mac_address`
   (validated/normalized via `normalize_mac()`), `label` (optional),
   `assignment` (parsed by `_parse_device_assignment()` into a `(user_id,

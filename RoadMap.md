@@ -5398,6 +5398,61 @@ immediately reachable right after the (now-short) domain table.
 18 new tests in `tests/test_dashboard.py` (11 for bulk access/sync, 7
 for pagination). 962 → 980 passed, 34 skipped, zero regressions.
 
+### Pagination generalized to Devices, Domains, and a user's Assigned sites (2026-09-07)
+
+Same-day follow-up: "Check the devices, and domain pages for the same
+issues and use the page-size picker with the prev/next configuration
+for those pages as well as all of them can grow extensively with time.
+This includes managing the domains assigned to users in the user
+section too." The `_parse_pagination()` helper and page-size options
+built for Categories were already page-agnostic; renamed the two
+constants from `CATEGORY_DOMAINS_*` to generic `LIST_PAGE_SIZE_OPTIONS`/
+`DEFAULT_LIST_PAGE_SIZE` and reused them across three more lists:
+
+- **Devices** (`devices()`): the main roster is now paginated
+  (LIMIT/OFFSET on a single query, no per-row Python filtering
+  involved). The one real wrinkle: the "Devices awaiting login" card
+  above it used to be a Jinja `selectattr('pending')` filter over the
+  SAME (now-paginated) `devices` list -- that would have silently
+  hidden any pending device sitting on a page the admin wasn't
+  currently viewing. Split into a genuinely separate, unbounded query
+  (`_DEVICE_LIST_SELECT` factored out and reused by both) so every
+  pending device always shows regardless of which page of the full
+  roster is open.
+- **Domains** (`domains()`): paginated by slicing the already-computed
+  Python list, not a second SQL query -- the filtered-by-user/group/
+  device branch already has to evaluate `matching.*_has_domain()` per
+  row in Python (there's no SQL-level way to express that check without
+  duplicating the logic matching.py already owns), so the full list is
+  already materialized before pagination gets a say. Also had to
+  preserve whatever `?target=`/`?user_id=`/`?group_id=`/`?device_id=`
+  filter was active across a page change (`filter_query_args`, passed
+  through every Prev/Next/per-page link) -- without this, clicking Next
+  on a filtered view would have silently dropped back to the unfiltered
+  full list. Live-verified: confirmed the hidden `group_id` field
+  actually carries through the per-page form after filtering by a real
+  group.
+- **A user's own "Assigned sites"** (`user_detail()`): same
+  straightforward LIMIT/OFFSET shape as Categories' domain list -- a
+  heavily-assigned kid's site list is exactly the kind of thing that
+  only ever grows, one "Approve" click at a time.
+
+For Devices and Domains specifically, the existing client-side
+`data-filter-table` search box now only searches whatever page is
+currently rendered (it always operated on rendered DOM rows, which used
+to mean the whole list) -- a hint appears once pagination is actually
+active telling the admin to widen "Show N per page" first if what
+they're looking for might be on another page, rather than silently
+under-searching with no explanation. Converting that search to a real
+server-side search was considered and deliberately deferred -- the
+project owner asked specifically for pagination, and building a
+proper search-then-paginate flow is a big enough design decision (which
+columns, how it composes with the existing user/group/device filter on
+Domains) to be its own follow-up rather than folded in silently here.
+
+12 new tests in `tests/test_dashboard.py`. 980 → 992 passed, 34 skipped,
+zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

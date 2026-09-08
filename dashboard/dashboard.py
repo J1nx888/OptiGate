@@ -1274,7 +1274,31 @@ USER_DETAIL_BODY = """
 </div>
 
 <div class="card">
-<h2>Assigned sites</h2>
+<h2>Assigned sites ({{ domain_count }})</h2>
+{% if domain_count %}
+<div class="toolbar" style="justify-content:space-between;">
+  <form method="get" action="{{ url_for('user_detail', user_id=u.id) }}" class="inline">
+    <input type="hidden" name="page" value="1">
+    <label class="hint" style="margin:0;">Show
+      <select name="per_page" onchange="this.form.submit()">
+        {% for opt in domains_page_size_options %}
+        <option value="{{ opt }}" {{ 'selected' if opt == domains_per_page }}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+      per page &mdash; showing {{ domains_range_start }}-{{ domains_range_end }} of {{ domain_count }}
+    </label>
+  </form>
+  {% if domains_total_pages > 1 %}
+  <span>
+    {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('user_detail', user_id=u.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+    <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
+    {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('user_detail', user_id=u.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+  </span>
+  {% endif %}
+</div>
+{% endif %}
 <div class="table-scroll">
 <table>
   <tr><th>Domain</th><th>Mode</th></tr>
@@ -1285,6 +1309,15 @@ USER_DETAIL_BODY = """
   {% endfor %}
 </table>
 </div>
+{% if domains_total_pages > 1 %}
+<div class="toolbar" style="justify-content:flex-end;">
+  {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('user_detail', user_id=u.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+  <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
+  {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('user_detail', user_id=u.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+</div>
+{% endif %}
 <p class="hint">Manage assignment from the <a href="{{ url_for('domains') }}">Domains</a> page -- pick the site there and check this user.</p>
 </div>
 
@@ -1352,10 +1385,25 @@ def user_detail(user_id: int):
     u = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     if u is None:
         return flash_redirect("users", "That user no longer exists.", error=True)
+    # Paginated (added 2026-09-07, RoadMap.md's dated entry, project
+    # owner's explicit request, same "these can grow extensively with
+    # time" reasoning as Devices/Domains/Categories the same day) -- a
+    # heavily-assigned kid's own site list is exactly the kind of thing
+    # that only ever grows, one "Approve" click at a time, for as long as
+    # the household uses this.
+    domain_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM user_domains WHERE user_id = ?", (user_id,)
+    ).fetchone()["c"]
+    domains_page, domains_per_page = _parse_pagination(
+        request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS,
+    )
+    domains_total_pages = max(1, math.ceil(domain_count / domains_per_page))
+    domains_page = min(domains_page, domains_total_pages)
     assigned_domains = conn.execute(
         "SELECT d.pattern, d.mode FROM domains d "
         "JOIN user_domains ud ON ud.domain_id = d.id "
-        "WHERE ud.user_id = ? ORDER BY d.pattern", (user_id,),
+        "WHERE ud.user_id = ? ORDER BY d.pattern LIMIT ? OFFSET ?",
+        (user_id, domains_per_page, (domains_page - 1) * domains_per_page),
     ).fetchall()
     shows = conn.execute(
         "SELECT series_id, series_name FROM user_shows WHERE user_id = ? ORDER BY series_name",
@@ -1388,6 +1436,10 @@ def user_detail(user_id: int):
         user_devices=user_devices, paused_device_count=paused_device_count,
         active_schedules=active_schedules, global_domains=_global_domains(conn),
         all_approved_shows=_entity_combo(all_approved_shows, lambda s: s["series_name"]),
+        domain_count=domain_count, domains_page=domains_page, domains_per_page=domains_per_page,
+        domains_total_pages=domains_total_pages, domains_page_size_options=LIST_PAGE_SIZE_OPTIONS,
+        domains_range_start=0 if domain_count == 0 else (domains_page - 1) * domains_per_page + 1,
+        domains_range_end=min(domains_page * domains_per_page, domain_count),
     )
     return render("users", body)
 
@@ -1610,7 +1662,7 @@ DOMAINS_BODY = """
 </div>
 
 <div class="card">
-<h2>Domains ({{ domains|length }})</h2>
+<h2>Domains ({{ domain_count }})</h2>
 <p class="hint">
   <span class="badge mode-splice">splice</span> host-only, never decrypted &nbsp;
   <span class="badge mode-bump">bump</span> fully decrypted, path/show rules apply &nbsp;
@@ -1635,7 +1687,33 @@ DOMAINS_BODY = """
   </form>
 </div>
 {% endif %}
-{% if domains %}<input type="search" data-filter-table="domainsTable" placeholder="Search domains&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
+{% if domains %}
+<input type="search" data-filter-table="domainsTable" placeholder="Search domains&hellip;" style="margin-bottom:.3rem; width:100%; max-width:280px;">
+{% if total_pages > 1 %}<p class="hint" style="margin:0 0 .6rem;">This box only searches the domains currently shown below -- widen "Show N per page" first if what you're looking for might be on another page.</p>{% endif %}
+<div class="toolbar" style="justify-content:space-between;">
+  <form method="get" action="{{ url_for('domains') }}" class="inline">
+    <input type="hidden" name="page" value="1">
+    {% for k, v in filter_query_args.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+    <label class="hint" style="margin:0;">Show
+      <select name="per_page" onchange="this.form.submit()">
+        {% for opt in page_size_options %}
+        <option value="{{ opt }}" {{ 'selected' if opt == per_page }}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+      per page &mdash; showing {{ range_start }}-{{ range_end }} of {{ domain_count }}
+    </label>
+  </form>
+  {% if total_pages > 1 %}
+  <span>
+    {% if page > 1 %}<a class="btn small" href="{{ url_for('domains', page=page-1, per_page=per_page, **filter_query_args) }}">&larr; Prev</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+    <span class="hint">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}<a class="btn small" href="{{ url_for('domains', page=page+1, per_page=per_page, **filter_query_args) }}">Next &rarr;</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+  </span>
+  {% endif %}
+</div>
+{% endif %}
 <div class="table-scroll">
 <table id="domainsTable">
   <tr><th>{% if domains %}<input type="checkbox" id="domainSelectAll" title="Select all">{% endif %}</th><th>Pattern</th><th>Mode</th><th>Access</th><th>Note</th><th></th></tr>
@@ -1662,6 +1740,15 @@ DOMAINS_BODY = """
   {% endfor %}
 </table>
 </div>
+{% if total_pages > 1 %}
+<div class="toolbar" style="justify-content:flex-end;">
+  {% if page > 1 %}<a class="btn small" href="{{ url_for('domains', page=page-1, per_page=per_page, **filter_query_args) }}">&larr; Prev</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+  <span class="hint">Page {{ page }} of {{ total_pages }}</span>
+  {% if page < total_pages %}<a class="btn small" href="{{ url_for('domains', page=page+1, per_page=per_page, **filter_query_args) }}">Next &rarr;</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+</div>
+{% endif %}
 <script>
 (function () {
   var selectAll = document.getElementById("domainSelectAll");
@@ -1885,6 +1972,19 @@ def _get_filtered_target(conn, args_or_form):
 @app.route("/domains")
 @require_admin
 def domains():
+    """Added 2026-09-07 (RoadMap.md's dated entry, project owner's
+    explicit request, same "these can grow extensively with time"
+    reasoning as Devices/Categories the same day): paginated (page-size
+    picker + Prev/Next). Sliced in Python, not a SQL LIMIT/OFFSET --
+    unlike Devices, the filtered branch below already has to evaluate
+    matching.*_has_domain() per row in Python (there's no SQL-level way
+    to express "does this domain resolve for this specific user/group/
+    device" without reimplementing that logic as a second copy), so the
+    full filtered (or unfiltered) list is already materialized in memory
+    before pagination gets a say -- slicing it is simplest and correct,
+    and the domains table realistically never approaches the scale a
+    subscription-backed category can (that one is genuinely
+    hundreds-of-thousands; this one is hand-curated by an admin)."""
     conn = get_db()
     filtered_user, filtered_group, filtered_device, error = _get_filtered_target(conn, request.args)
     if error:
@@ -1904,13 +2004,24 @@ def domains():
     else:
         rows = conn.execute("SELECT * FROM domains ORDER BY is_global DESC, pattern").fetchall()
 
+    domain_count = len(rows)
+    page, per_page = _parse_pagination(request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS)
+    total_pages = max(1, math.ceil(domain_count / per_page))
+    page = min(page, total_pages)
+    page_rows = rows[(page - 1) * per_page : page * per_page]
+    # Preserves whatever filter (?target=, or the legacy ?user_id=/
+    # ?group_id=/?device_id=) is active across a page/per_page change --
+    # without this, clicking Next on a filtered view would silently drop
+    # back to the unfiltered full list.
+    filter_query_args = {k: v for k, v in request.args.items() if k not in ("page", "per_page")}
+
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
     all_devices = conn.execute("SELECT * FROM devices ORDER BY COALESCE(label, mac_address)").fetchall()
     return render(
         "domains",
         render_template_string(
-            DOMAINS_BODY, domains=rows, filtered_user=filtered_user, filtered_group=filtered_group,
+            DOMAINS_BODY, domains=page_rows, filtered_user=filtered_user, filtered_group=filtered_group,
             filtered_device=filtered_device, is_global_checked=False,
             filter_combo=_domains_filter_combo(all_users, all_groups, all_devices),
             all_users_combo=_entity_combo(all_users, lambda u: u["display_name"]),
@@ -1919,6 +2030,10 @@ def domains():
             preselected_user_ids={filtered_user["id"]} if filtered_user else set(),
             preselected_group_ids={filtered_group["id"]} if filtered_group else set(),
             preselected_device_ids={filtered_device["id"]} if filtered_device else set(),
+            domain_count=domain_count, page=page, per_page=per_page, total_pages=total_pages,
+            page_size_options=LIST_PAGE_SIZE_OPTIONS, filter_query_args=filter_query_args,
+            range_start=0 if domain_count == 0 else (page - 1) * per_page + 1,
+            range_end=min(page * per_page, domain_count),
         ),
     )
 
@@ -2537,7 +2652,6 @@ DEVICE_ASSIGNMENT_SELECT = """
 
 
 DEVICES_BODY = """
-{% set pending_devices = devices|selectattr('pending')|list %}
 {% if pending_devices %}
 <div class="card pending-card">
 <h2>Devices awaiting login ({{ pending_devices|length }})</h2>
@@ -2641,7 +2755,7 @@ DEVICES_BODY = """
 </div>
 
 <div class="card">
-<h2>Devices ({{ devices|length }})</h2>
+<h2>Devices ({{ device_count }})</h2>
 <p class="hint">
   Track known devices by MAC address ahead of the interception-layer work.
   <span class="badge mode-bump">SSL-Bump</span> devices will get full
@@ -2688,7 +2802,32 @@ DEVICES_BODY = """
   </form>
 </div>
 {% endif %}
-{% if devices %}<input type="search" data-filter-table="devicesTable" placeholder="Search devices&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
+{% if devices %}
+<input type="search" data-filter-table="devicesTable" placeholder="Search devices&hellip;" style="margin-bottom:.3rem; width:100%; max-width:280px;">
+{% if total_pages > 1 %}<p class="hint" style="margin:0 0 .6rem;">This box only searches the devices currently shown below -- widen "Show N per page" first if what you're looking for might be on another page.</p>{% endif %}
+<div class="toolbar" style="justify-content:space-between;">
+  <form method="get" action="{{ url_for('devices') }}" class="inline">
+    <input type="hidden" name="page" value="1">
+    <label class="hint" style="margin:0;">Show
+      <select name="per_page" onchange="this.form.submit()">
+        {% for opt in page_size_options %}
+        <option value="{{ opt }}" {{ 'selected' if opt == per_page }}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+      per page &mdash; showing {{ range_start }}-{{ range_end }} of {{ device_count }}
+    </label>
+  </form>
+  {% if total_pages > 1 %}
+  <span>
+    {% if page > 1 %}<a class="btn small" href="{{ url_for('devices', page=page-1, per_page=per_page) }}">&larr; Prev</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+    <span class="hint">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}<a class="btn small" href="{{ url_for('devices', page=page+1, per_page=per_page) }}">Next &rarr;</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+  </span>
+  {% endif %}
+</div>
+{% endif %}
 <div class="table-scroll">
 <table id="devicesTable">
   <tr><th>{% if devices %}<input type="checkbox" id="deviceSelectAll" title="Select all">{% endif %}</th><th>MAC address</th><th>Label</th><th>Assigned to</th><th>Status</th><th>SSL-Bump</th><th>Bypass login</th><th>Last seen</th><th></th></tr>
@@ -2746,6 +2885,15 @@ DEVICES_BODY = """
   {% endfor %}
 </table>
 </div>
+{% if total_pages > 1 %}
+<div class="toolbar" style="justify-content:flex-end;">
+  {% if page > 1 %}<a class="btn small" href="{{ url_for('devices', page=page-1, per_page=per_page) }}">&larr; Prev</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+  <span class="hint">Page {{ page }} of {{ total_pages }}</span>
+  {% if page < total_pages %}<a class="btn small" href="{{ url_for('devices', page=page+1, per_page=per_page) }}">Next &rarr;</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+</div>
+{% endif %}
 <script>
 (function () {
   var selectAll = document.getElementById("deviceSelectAll");
@@ -3367,9 +3515,13 @@ CATEGORY_DETAIL_BODY = """
 # was the reference the project owner pointed at): a page-size picker
 # plus Prev/Next, entirely server-side (LIMIT/OFFSET), so the page never
 # renders more than one page's worth of rows regardless of how large the
-# category actually is.
-CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS = [25, 50, 100, 250]
-CATEGORY_DOMAINS_DEFAULT_PAGE_SIZE = 50
+# category actually is. **Generalized the same day** to Devices, Domains,
+# and a user's own Assigned sites list -- same "these lists all grow
+# without bound over time" reasoning, same shared (page, per_page)
+# parsing and options list, so every paginated list on this site behaves
+# identically rather than each page inventing its own page-size choices.
+LIST_PAGE_SIZE_OPTIONS = [25, 50, 100, 250]
+DEFAULT_LIST_PAGE_SIZE = 50
 
 
 def _parse_pagination(args, *, default_per_page: int, options: list[int]) -> tuple[int, int]:
@@ -3407,7 +3559,7 @@ def category_detail(category_id: int):
         "SELECT COUNT(*) AS c FROM category_domains WHERE category_id = ?", (category_id,)
     ).fetchone()["c"]
     domains_page, domains_per_page = _parse_pagination(
-        request.args, default_per_page=CATEGORY_DOMAINS_DEFAULT_PAGE_SIZE, options=CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS,
+        request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS,
     )
     domains_total_pages = max(1, math.ceil(domain_count / domains_per_page))
     domains_page = min(domains_page, domains_total_pages)
@@ -3426,7 +3578,7 @@ def category_detail(category_id: int):
         ).fetchall(),
         domains_page=domains_page, domains_per_page=domains_per_page,
         domains_total_pages=domains_total_pages,
-        domains_page_size_options=CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS,
+        domains_page_size_options=LIST_PAGE_SIZE_OPTIONS,
         domains_range_start=0 if domain_count == 0 else (domains_page - 1) * domains_per_page + 1,
         domains_range_end=min(domains_page * domains_per_page, domain_count),
         overrides=conn.execute(
@@ -4485,43 +4637,69 @@ def _failed_login_attempts(conn, mac_address: str) -> dict | None:
     return {"count": row["c"], "last_attempt": row["last_ts"]}
 
 
+_DEVICE_LIST_SELECT = (
+    "SELECT d.*, u.display_name, g.name AS group_name, COALESCE(g.ignored, 0) AS group_ignored, "
+    "(d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending, "
+    # devices.last_seen_at is never actually populated by anything
+    # (see common/db.py's own schema comment) -- device_bindings is
+    # where a real network-observed last-seen/current-IP/source
+    # actually lives, so the pending-devices card reads from there
+    # instead, via the most-recently-updated binding for this MAC
+    # (active or not -- a device that's gone stale is still worth
+    # showing its last-known info for, not blanking out entirely).
+    "(SELECT ipv4_address FROM device_bindings WHERE mac_address = d.mac_address "
+    " ORDER BY last_seen_at DESC LIMIT 1) AS current_ip, "
+    "(SELECT last_seen_at FROM device_bindings WHERE mac_address = d.mac_address "
+    " ORDER BY last_seen_at DESC LIMIT 1) AS network_last_seen, "
+    "(SELECT source FROM device_bindings WHERE mac_address = d.mac_address "
+    " ORDER BY last_seen_at DESC LIMIT 1) AS binding_source "
+    "FROM devices d "
+    "LEFT JOIN users u ON u.id = d.user_id "
+    "LEFT JOIN groups g ON g.id = d.group_id "
+)
+
+
 @app.route("/devices")
 @require_admin
 def devices():
+    """Added 2026-09-07 (RoadMap.md's dated entry, project owner's
+    explicit request, same reasoning as the Categories domain-list
+    pagination the same day: "these can grow extensively with time"):
+    the main device roster is paginated (page-size picker + Prev/Next),
+    but the "Devices awaiting login" card above it deliberately is NOT --
+    it needs every currently-pending device regardless of which page of
+    the full roster is showing, so it's a genuinely separate,
+    independent query rather than a Python filter over the (now only
+    partial) paginated list the way it used to be."""
     conn = get_db()
+    pending_devices = conn.execute(
+        _DEVICE_LIST_SELECT + "WHERE d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0 "
+        "ORDER BY d.created_at DESC"
+    ).fetchall()
+    device_count = conn.execute("SELECT COUNT(*) AS c FROM devices").fetchone()["c"]
+    page, per_page = _parse_pagination(request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS)
+    total_pages = max(1, math.ceil(device_count / per_page))
+    page = min(page, total_pages)
     rows = conn.execute(
-        "SELECT d.*, u.display_name, g.name AS group_name, COALESCE(g.ignored, 0) AS group_ignored, "
-        "(d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending, "
-        # devices.last_seen_at is never actually populated by anything
-        # (see common/db.py's own schema comment) -- device_bindings is
-        # where a real network-observed last-seen/current-IP/source
-        # actually lives, so the pending-devices card reads from there
-        # instead, via the most-recently-updated binding for this MAC
-        # (active or not -- a device that's gone stale is still worth
-        # showing its last-known info for, not blanking out entirely).
-        "(SELECT ipv4_address FROM device_bindings WHERE mac_address = d.mac_address "
-        " ORDER BY last_seen_at DESC LIMIT 1) AS current_ip, "
-        "(SELECT last_seen_at FROM device_bindings WHERE mac_address = d.mac_address "
-        " ORDER BY last_seen_at DESC LIMIT 1) AS network_last_seen, "
-        "(SELECT source FROM device_bindings WHERE mac_address = d.mac_address "
-        " ORDER BY last_seen_at DESC LIMIT 1) AS binding_source "
-        "FROM devices d "
-        "LEFT JOIN users u ON u.id = d.user_id "
-        "LEFT JOIN groups g ON g.id = d.group_id "
-        "ORDER BY pending DESC, d.created_at DESC"
+        _DEVICE_LIST_SELECT + "ORDER BY pending DESC, d.created_at DESC LIMIT ? OFFSET ?",
+        (per_page, (page - 1) * per_page),
     ).fetchall()
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
     pending_login_attempts = {
         row["mac_address"]: _failed_login_attempts(conn, row["mac_address"])
-        for row in rows if row["pending"]
+        for row in pending_devices
     }
     return render(
         "devices",
         render_template_string(
-            DEVICES_BODY, devices=rows, groups=all_groups,
+            DEVICES_BODY, devices=rows, pending_devices=pending_devices, groups=all_groups,
             assignment_combo=_assignment_combo(all_users, all_groups), current="",
             pending_login_attempts=pending_login_attempts,
+            device_count=device_count, page=page, per_page=per_page, total_pages=total_pages,
+            page_size_options=LIST_PAGE_SIZE_OPTIONS,
+            range_start=0 if device_count == 0 else (page - 1) * per_page + 1,
+            range_end=min(page * per_page, device_count),
         ),
     )
 

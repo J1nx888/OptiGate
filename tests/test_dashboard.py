@@ -976,6 +976,71 @@ def test_user_detail_unknown_id_redirects_with_error(client):
     assert "error=1" in resp.headers["Location"]
 
 
+# ============================================================
+# User detail "Assigned sites" pagination -- added 2026-09-07, project
+# owner's explicit request: "This includes managing the domains assigned
+# to users in the user section too" -- same page-size-picker + Prev/Next
+# pattern as Categories/Devices/Domains the same day.
+# ============================================================
+
+def test_user_detail_assigned_sites_paginates_with_a_default_page_size(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    for i in range(60):
+        client.post(
+            "/domains/add", data={"pattern": f"site{i:04d}\\.example", "mode": "splice"}, headers=_auth_header()
+        )
+    domain_ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+    client.post(
+        "/domains/bulk-access",
+        data={"domain_ids": [str(i) for i in domain_ids], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Assigned sites (60)" in body
+    assert "Page 1 of 2" in body
+    assert "showing 1-50 of 60" in body
+
+
+def test_user_detail_assigned_sites_second_page_shows_the_rest(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    for i in range(60):
+        client.post(
+            "/domains/add", data={"pattern": f"site{i:04d}\\.example", "mode": "splice"}, headers=_auth_header()
+        )
+    domain_ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+    client.post(
+        "/domains/bulk-access",
+        data={"domain_ids": [str(i) for i in domain_ids], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/users/{user_id}?page=2", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert "Page 2 of 2" in resp.data.decode()
+
+
+def test_user_detail_assigned_sites_small_list_shows_no_pagination_controls(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    domain_id = db_conn.execute("SELECT id FROM domains").fetchone()["id"]
+    client.post(
+        "/domains/access", data={"domain_id": domain_id, "user_ids": [str(user_id)]}, headers=_auth_header()
+    )
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Page 1 of" not in resp.data
+
+
 def test_user_detail_shows_global_domains_separately_from_assigned(client, db_conn):
     """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
     the Users list's "N assigned" count includes every is_global domain
@@ -3530,6 +3595,127 @@ def test_devices_page_manage_panel_has_ignore_bulk_buttons(client, db_conn):
     assert b'id="bulkDeviceUnignoreForm"' in resp.data
 
 
+# ============================================================
+# Devices page pagination -- added 2026-09-07, project owner's explicit
+# request ("check the devices... page for the same issues... use the
+# page-size picker with the prev/next configuration"), same reasoning as
+# the Categories domain-list pagination the same day: these lists can
+# grow extensively with time.
+# ============================================================
+
+def _add_devices(client, count, prefix="aa:bb:cc:dd"):
+    for i in range(count):
+        client.post(
+            "/devices/add", data={"mac_address": f"{prefix}:{i // 256:02x}:{i % 256:02x}"},
+            headers=_auth_header(),
+        )
+
+
+def test_devices_page_paginates_with_a_default_page_size(client, db_conn):
+    _add_devices(client, 60)
+    resp = client.get("/devices", headers=_auth_header())
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Page 1 of 2" in body
+    assert "showing 1-50 of 60" in body
+
+
+def test_devices_page_second_page_shows_the_remaining_devices(client, db_conn):
+    _add_devices(client, 60)
+    resp = client.get("/devices?page=2", headers=_auth_header())
+    assert resp.status_code == 200
+    assert "Page 2 of 2" in resp.data.decode()
+
+
+def test_devices_page_pending_card_is_not_limited_by_pagination(client, db_conn):
+    """The "awaiting login" card must show every pending device regardless
+    of which page of the full roster is showing -- it's a separate query
+    now, not a Jinja filter over the (paginated) main list."""
+    import identity
+
+    # 55 ordinary devices (more than one page at the default size) plus
+    # one genuinely pending one (auto-created via record_binding(), same
+    # as a real never-seen MAC would be).
+    _add_devices(client, 55)
+    identity.record_binding(db_conn, "11:22:33:44:55:66", "192.168.1.99", source="rtnetlink")
+
+    resp = client.get("/devices?per_page=25", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"11:22:33:44:55:66" in resp.data
+    assert b"Devices awaiting login (1)" in resp.data
+
+
+def test_devices_page_small_list_shows_no_pagination_controls(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:01"}, headers=_auth_header())
+    resp = client.get("/devices", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"Page 1 of" not in resp.data
+
+
+def test_devices_page_rejects_an_arbitrary_per_page_value(client, db_conn):
+    _add_devices(client, 60)
+    resp = client.get("/devices?per_page=999999", headers=_auth_header())
+    body = resp.data.decode()
+    assert "Page 1 of 2" in body  # fell back to the default page size, not one giant page
+
+
+# ============================================================
+# Domains page pagination -- same request/reasoning as Devices above
+# ============================================================
+
+def _add_domains(client, count):
+    for i in range(count):
+        client.post(
+            "/domains/add", data={"pattern": f"site{i:04d}\\.example", "mode": "splice"},
+            headers=_auth_header(),
+        )
+
+
+def test_domains_page_paginates_with_a_default_page_size(client, db_conn):
+    _add_domains(client, 60)
+    resp = client.get("/domains", headers=_auth_header())
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Page 1 of 2" in body
+    assert "showing 1-50 of 60" in body
+
+
+def test_domains_page_second_page_shows_the_remaining_domains(client, db_conn):
+    _add_domains(client, 60)
+    resp = client.get("/domains?page=2", headers=_auth_header())
+    assert resp.status_code == 200
+    assert "Page 2 of 2" in resp.data.decode()
+
+
+def test_domains_page_pagination_preserves_an_active_group_filter(client, db_conn):
+    """Clicking Next on a filtered view must not silently drop back to
+    the unfiltered full list."""
+    client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    _add_domains(client, 60)
+    domain_ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+    client.post(
+        "/domains/bulk-access",
+        data={"domain_ids": [str(i) for i in domain_ids], "group_ids": [str(group_id)]},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/domains?group_id={group_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert f'name="group_id" value="{group_id}"' in body
+    assert f"group_id={group_id}" in body  # carried into the Next link's href too
+
+
+def test_domains_page_small_list_shows_no_pagination_controls(client, db_conn):
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    resp = client.get("/domains", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"Page 1 of" not in resp.data
+
+
 def test_domains_filter_by_group_shows_group_assigned_and_global_domains(client, db_conn):
     client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()[0]
@@ -4509,7 +4695,7 @@ def test_category_detail_respects_a_valid_per_page_choice(client, db_conn):
 def test_category_detail_rejects_an_arbitrary_per_page_value(client, db_conn):
     """A hand-edited URL asking for e.g. per_page=999999 must not be able
     to force the page back to rendering everything at once -- only the
-    real CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS values are honored."""
+    real LIST_PAGE_SIZE_OPTIONS values are honored."""
     client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
     _add_categories_domains(db_conn, category_id, 120)
