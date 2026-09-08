@@ -3842,6 +3842,189 @@ def test_export_categories_csv_requires_admin_auth(client):
     assert resp.status_code == 401
 
 
+# ============================================================
+# Categories toolbar: bulk access assignment + bulk sync (added
+# 2026-09-07, project owner's explicit request: "Add the ability for me
+# to bulk assign categories to users, groups, or everyone" and "Add the
+# ability for me to bulk sync categories")
+# ============================================================
+
+def test_categories_page_has_manage_access_and_sync_buttons(client, db_conn):
+    client.post("/categories/add", data={"name": "Cat1"}, headers=_auth_header())
+    resp = client.get("/categories", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b'id="categoryBulkManageToggle"' in resp.data
+    assert b'action="/categories/bulk-access"' in resp.data
+    assert b'action="/categories/bulk-sync"' in resp.data
+
+
+def test_bulk_update_category_access_applies_to_every_selected_category(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    client.post("/categories/add", data={"name": "Cat1"}, headers=_auth_header())
+    client.post("/categories/add", data={"name": "Cat2"}, headers=_auth_header())
+    category_ids = [r["id"] for r in db_conn.execute("SELECT id FROM categories WHERE name IN ('Cat1','Cat2')")]
+
+    resp = client.post(
+        "/categories/bulk-access",
+        data={"category_ids": [str(i) for i in category_ids], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith("/categories")
+    for category_id in category_ids:
+        assert db_conn.execute(
+            "SELECT 1 FROM category_users WHERE user_id = ? AND category_id = ?", (user_id, category_id)
+        ).fetchone() is not None
+
+
+def test_bulk_update_category_access_can_set_global(client, db_conn):
+    client.post("/categories/add", data={"name": "Cat1"}, headers=_auth_header())
+    client.post("/categories/add", data={"name": "Cat2"}, headers=_auth_header())
+    category_ids = [r["id"] for r in db_conn.execute("SELECT id FROM categories")]
+
+    client.post(
+        "/categories/bulk-access",
+        data={"category_ids": [str(i) for i in category_ids], "is_global": "on"},
+        headers=_auth_header(),
+    )
+
+    rows = db_conn.execute("SELECT is_global FROM categories").fetchall()
+    assert all(r["is_global"] == 1 for r in rows)
+
+
+def test_bulk_update_category_access_skips_oversized_category_requesting_scoped_access(client, db_conn, monkeypatch):
+    import matching
+
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    client.post("/categories/add", data={"name": "Huge"}, headers=_auth_header())
+    client.post("/categories/add", data={"name": "Small"}, headers=_auth_header())
+    huge_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Huge'").fetchone()["id"]
+    small_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Small'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO category_domains (category_id, pattern, source, created_at) VALUES (?, 'x', 'manual', datetime('now'))",
+        (huge_id,),
+    )
+    db_conn.commit()
+    # Cheaper than inserting 5001 real rows to exceed the real threshold:
+    # monkeypatch it down so "Huge"'s one domain already counts as oversized.
+    monkeypatch.setattr(matching, "MAX_SCOPED_CATEGORY_DOMAINS", 0)
+
+    resp = client.post(
+        "/categories/bulk-access",
+        data={"category_ids": [str(huge_id), str(small_id)], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert "Huge" in resp.headers["Location"]
+    assert db_conn.execute(
+        "SELECT 1 FROM category_users WHERE user_id = ? AND category_id = ?", (user_id, huge_id)
+    ).fetchone() is None
+    assert db_conn.execute(
+        "SELECT 1 FROM category_users WHERE user_id = ? AND category_id = ?", (user_id, small_id)
+    ).fetchone() is not None
+
+
+def test_bulk_update_category_access_without_selection_shows_error(client, db_conn):
+    resp = client.post("/categories/bulk-access", data={"is_global": "on"}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_bulk_update_category_access_requires_admin_auth(client):
+    resp = client.post("/categories/bulk-access", data={"category_ids": ["1"], "is_global": "on"})
+    assert resp.status_code == 401
+
+
+def test_bulk_sync_categories_syncs_every_selected_subscribed_category(client, db_conn, monkeypatch):
+    import category_fetch
+
+    client.post(
+        "/categories/add", data={"name": "Cat1", "subscription_url": "https://example.invalid/a.txt"},
+        headers=_auth_header(),
+    )
+    client.post(
+        "/categories/add", data={"name": "Cat2", "subscription_url": "https://example.invalid/b.txt"},
+        headers=_auth_header(),
+    )
+    ids = [r["id"] for r in db_conn.execute("SELECT id FROM categories")]
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 10)
+
+    resp = client.post(
+        "/categories/bulk-sync", data={"category_ids": [str(i) for i in ids]}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert "20" in resp.headers["Location"]  # 10 + 10 domains total
+
+
+def test_bulk_sync_categories_skips_manual_only_categories(client, db_conn, monkeypatch):
+    import category_fetch
+
+    client.post("/categories/add", data={"name": "ManualOnly"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'ManualOnly'").fetchone()["id"]
+    called = []
+    monkeypatch.setattr(
+        category_fetch, "fetch_and_sync_category",
+        lambda conn, category, timeout=None: called.append(category) or 0,
+    )
+
+    resp = client.post(
+        "/categories/bulk-sync", data={"category_ids": [str(category_id)]}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    assert not called
+    assert "ManualOnly" in resp.headers["Location"]
+
+
+def test_bulk_sync_categories_reports_a_failure_without_aborting_the_rest(client, db_conn, monkeypatch):
+    import category_fetch
+
+    client.post(
+        "/categories/add", data={"name": "Broken", "subscription_url": "https://example.invalid/broken.txt"},
+        headers=_auth_header(),
+    )
+    client.post(
+        "/categories/add", data={"name": "Good", "subscription_url": "https://example.invalid/good.txt"},
+        headers=_auth_header(),
+    )
+    ids = {
+        r["name"]: r["id"] for r in db_conn.execute("SELECT id, name FROM categories WHERE name IN ('Broken', 'Good')")
+    }
+
+    def _fake(conn, category, timeout=None):
+        if category["name"] == "Broken":
+            raise category_fetch.CategoryFetchError("could not reach host")
+        return 5
+
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", _fake)
+
+    resp = client.post(
+        "/categories/bulk-sync",
+        data={"category_ids": [str(ids["Broken"]), str(ids["Good"])]},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    message = resp.headers["Location"]
+    assert "Broken" in message
+    assert "could+not+reach+host" in message
+
+
+def test_bulk_sync_categories_without_selection_shows_error(client, db_conn):
+    resp = client.post("/categories/bulk-sync", data={}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_bulk_sync_categories_requires_admin_auth(client):
+    resp = client.post("/categories/bulk-sync", data={"category_ids": ["1"]})
+    assert resp.status_code == 401
+
+
 def test_schedules_page_has_bulk_actions_toolbar(client, db_conn):
     client.post(
         "/schedules/add",
@@ -4261,6 +4444,117 @@ def test_category_detail_shows_added_domains(client, db_conn):
         "SELECT * FROM category_domains WHERE category_id = ?", (category_id,)
     ).fetchone()
     assert row["source"] == "manual"
+
+
+# ============================================================
+# Category detail domain-list pagination -- added 2026-09-07, project
+# owner's explicit request: clicking "Manage" on a large category tried
+# to load and render every single domain, which was slow and made the
+# "Allow-exceptions" card practically unreachable. Paginated like a
+# modern list/detail view instead (page-size picker + Prev/Next).
+# ============================================================
+
+def _add_categories_domains(db_conn, category_id, count):
+    now_rows = [(category_id, f"site{i:04d}\\.example", "manual") for i in range(count)]
+    db_conn.executemany(
+        "INSERT INTO category_domains (category_id, pattern, source, created_at) VALUES (?, ?, ?, datetime('now'))",
+        now_rows,
+    )
+    db_conn.commit()
+
+
+def test_category_detail_paginates_domains_with_a_default_page_size(client, db_conn):
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "site0000\\.example" in body
+    assert "site0049\\.example" in body
+    assert "site0050\\.example" not in body  # default page size: only the first 50 rows render
+    assert "Page 1 of 3" in body
+    assert "showing 1-50 of 120" in body
+
+
+def test_category_detail_second_page_shows_the_next_slice(client, db_conn):
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}?page=2", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "site0050\\.example" in body
+    assert "site0000\\.example" not in body
+    assert "Page 2 of 3" in body
+
+
+def test_category_detail_respects_a_valid_per_page_choice(client, db_conn):
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}?per_page=25", headers=_auth_header())
+
+    body = resp.data.decode()
+    assert "site0024\\.example" in body
+    assert "site0025\\.example" not in body
+    assert "Page 1 of 5" in body
+
+
+def test_category_detail_rejects_an_arbitrary_per_page_value(client, db_conn):
+    """A hand-edited URL asking for e.g. per_page=999999 must not be able
+    to force the page back to rendering everything at once -- only the
+    real CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS values are honored."""
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}?per_page=999999", headers=_auth_header())
+
+    body = resp.data.decode()
+    assert "site0049\\.example" in body
+    assert "site0050\\.example" not in body  # fell back to the default page size
+
+
+def test_category_detail_clamps_a_page_number_past_the_end(client, db_conn):
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}?page=999", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert "Page 3 of 3" in resp.data.decode()
+
+
+def test_category_detail_negative_page_does_not_crash_or_go_negative(client, db_conn):
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}?page=-5", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert "Page 1 of 3" in resp.data.decode()
+
+
+def test_category_detail_small_category_shows_no_pagination_controls(client, db_conn):
+    client.post("/categories/add", data={"name": "Small"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Small'").fetchone()["id"]
+    client.post(
+        "/categories/domains/add", data={"category_id": category_id, "pattern": r"example\.com"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/categories/{category_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Page 1 of" not in resp.data
 
 
 # ============================================================

@@ -5341,6 +5341,63 @@ combined `docker compose --profile interception up -d`.
 4 new tests in `tests/test_dashboard.py`. 958 → 962 passed, 34 skipped,
 zero regressions.
 
+### Categories: bulk access assignment, bulk sync, and domain-list pagination (2026-09-07)
+
+Three requests, same session: (1) "Add the ability for me to Bulk
+assign categories to users, groups, or everyone on the Categories
+page", (2) "Add the ability for me to bulk sync categories on the
+categories page", and (3) clicking "Manage" on a large category tried
+to load every domain at once, which was slow, made scrolling janky, and
+buried the "Allow-exceptions" card at the bottom of a huge table.
+
+**Bulk access** (`bulk_update_category_access()`): same shape as the
+existing `bulk_update_domain_access()` -- checkboxes on the Categories
+list, a "Manage access" toggle button revealing the same
+`BLOCK_ACCESS_SELECTS` panel the single-category page already uses, one
+`BEGIN IMMEDIATE` transaction for the whole batch via a newly-factored-
+out `_replace_category_access()` helper (shared with the single-
+category route, same pattern as `_replace_domain_access()`). Each
+category's own `matching.MAX_SCOPED_CATEGORY_DOMAINS` check is applied
+individually -- a batch can freely mix small and huge categories, so an
+oversized one requesting a non-global scope is silently skipped (not
+applied) and named in the result message, rather than failing the whole
+batch or silently ignoring the size limit.
+
+**Bulk sync** (`bulk_sync_categories()`): distinct from the pre-existing
+"Sync all subscriptions now" card, which always syncs literally every
+subscription-backed category -- this respects the checkbox selection.
+A manual-only category (no `subscription_url`) has nothing to sync and
+is skipped, named in the result. One bad source doesn't abort the
+batch, same discipline as `category_fetch.sync_all_categories()`.
+
+**Domain-list pagination**: this was a real, severe issue, not just a
+UX nicety -- a real subscription list can run past 900,000 rows (see
+`idx_category_domains_pattern`'s own comment in `common/db.py`), and
+`category_detail()` used to render every one of them into the page
+unconditionally. Paginated like a modern list/detail view instead (the
+project owner pointed at
+https://design.infor.com/patterns/page-layouts/list-and-details/ as the
+reference): a page-size picker (25/50/100/250, default 50, auto-
+submitting on change) plus Prev/Next links, both entirely server-side
+(`LIMIT`/`OFFSET`) -- the page never renders more than one page's worth
+of rows regardless of category size. The `ORDER BY` was deliberately
+changed from `source, pattern` to `pattern` alone so this can be served
+straight off the existing `UNIQUE(category_id, pattern)` index; keeping
+`source` in the sort would force a full sort of every matching row on
+every single page load, defeating the entire point of paginating a
+huge category. New `_parse_pagination()` helper validates `?page=`/
+`?per_page=` from the query string (clamps a negative/zero/out-of-range
+page number, and only honors a real page-size option -- a hand-edited
+URL can't ask for an arbitrary, huge page size and force the old
+render-everything behavior back). Live-verified against a 130-domain
+scratch category in the dev server: exactly 50 rows rendered per page,
+correct "showing 1-50 of 130"/"Page 1 of 3" text, Next correctly
+advancing to the next 50-row slice, and the Allow-exceptions card now
+immediately reachable right after the (now-short) domain table.
+
+18 new tests in `tests/test_dashboard.py` (11 for bulk access/sync, 7
+for pagination). 962 → 980 passed, 34 skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

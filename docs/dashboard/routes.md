@@ -185,8 +185,8 @@ containing just the inner page content (no `<html>`/`<nav>` -- that's
 | `DOMAIN_DETAIL_BODY` | `domain_detail()` | One domain's mode/global/note edit form, assigned-users toggle table (only if not global), allowed-paths table + add form (only if mode is `bump`). |
 | `REPORT_BODY` | `report()` | Access-log table with a user/group/device/status GET filter form (combobox, since 2026-08-31) and inline per-row "Approve" actions. |
 | `SETTINGS_BODY` | `settings_page()` | Local network CIDR form, household time zone form (Phase 8), blocked-site experience mode form, admin username/password form. |
-| `CATEGORIES_BODY` | `categories()` | Phase 8. All categories table, "Add category" form, "Sync all subscriptions now" button (shown only if any category has a `subscription_url`). |
-| `CATEGORY_DETAIL_BODY` | `category_detail()` | Phase 8. Subscription info + "Sync now" (if `subscription_url` set), Blocked-for card (`BLOCK_ACCESS_SELECTS`, or a plain Everyone-only checkbox once over the scoping threshold), domains table + manual-add form, overrides table + add form. |
+| `CATEGORIES_BODY` | `categories()` | Phase 8. All categories table with a bulk-actions toolbar (Download CSV / Sync / Delete / "Manage access" -> `BLOCK_ACCESS_SELECTS` panel, added 2026-09-07), "Add category" form, "Sync all subscriptions now" button (shown only if any category has a `subscription_url`). |
+| `CATEGORY_DETAIL_BODY` | `category_detail()` | Phase 8. Subscription info + "Sync now" (if `subscription_url` set), Blocked-for card (`BLOCK_ACCESS_SELECTS`, or a plain Everyone-only checkbox once over the scoping threshold), a **paginated** (added 2026-09-07 -- a real subscription list can run past 900,000 rows) domains table + manual-add form, overrides table + add form. |
 | `SCHEDULES_BODY` | `schedules()` | Phase 8. All schedules table, "Add schedule" form (days/time/time-zone/lockout). |
 | `SCHEDULE_DETAIL_BODY` | `schedule_detail()` | Phase 8. When/window edit form, Blocked-for card, categories checkbox-list card (plain checkboxes, not a combobox -- see 2026-09-08 note below; omitted entirely when `lockout_all` is set). |
 
@@ -504,13 +504,45 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   category's domains (source-tagged), overrides, and Access
   (`BLOCK_ACCESS_SELECTS`) card; shows a "too large to scope" notice
   instead of the full picker once `domain_count` exceeds the threshold.
-  Renders `CATEGORY_DETAIL_BODY`.
+  Renders `CATEGORY_DETAIL_BODY`. **Since 2026-09-07**, the domains
+  table is paginated (`?page=`/`?per_page=`, parsed by
+  `_parse_pagination()` -- `per_page` only honors a real
+  `CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS` value, 25/50/100/250, default 50;
+  `page` clamps to `[1, total_pages]`), served via `ORDER BY pattern
+  LIMIT ? OFFSET ?` (not `source, pattern` -- see the query's own
+  comment for why: keeping `source` in the sort would force a full
+  table sort on every page load, off the `UNIQUE(category_id, pattern)`
+  index's own order, defeating the point of paginating a category that
+  can run past 900,000 rows). A page-size `<select>` (auto-submits on
+  change) plus Prev/Next links (top and bottom of the table) replace
+  what used to be an unconditional render of every domain at once.
 - `POST /categories/access` -> `update_category_access()` -- form fields
   `category_id`, `is_global`, `user_ids`/`group_ids`/`device_ids` (same
   shape as `update_domain_access()`). **Rejects** (error flash, no write)
   a non-global assignment on a category whose `domain_count` exceeds
   `matching.MAX_SCOPED_CATEGORY_DOMAINS` -- the one piece of server-side
   enforcement that makes the threshold real, not just a UI suggestion.
+  Delegates to `_replace_category_access()` (factored out 2026-09-07,
+  shared with `bulk_update_category_access()` below).
+- `POST /categories/bulk-access` -> `bulk_update_category_access()`
+  (added 2026-09-07, RoadMap.md's dated entry -- "bulk assign categories
+  to users, groups, or everyone") -- form fields `category_ids` (multi-
+  value, checkbox-collected), plus the same `is_global`/`user_ids`/
+  `group_ids`/`device_ids` fields as `/categories/access`. Applies
+  `_replace_category_access()` to every listed category in one `BEGIN
+  IMMEDIATE` transaction. Each category's own `MAX_SCOPED_CATEGORY_DOMAINS`
+  check is applied individually -- an oversized category requesting a
+  non-global scope is skipped (not applied), named in the result
+  message, rather than failing the whole batch.
+- `POST /categories/bulk-sync` -> `bulk_sync_categories()` (added
+  2026-09-07, same RoadMap.md entry -- "bulk sync categories", distinct
+  from the pre-existing `/categories/sync-all` below, which always syncs
+  literally every subscription-backed category regardless of selection)
+  -- form field `category_ids` (multi-value). Calls
+  `category_fetch.fetch_and_sync_category()` for each checked category
+  that has a `subscription_url`; a manual-only checked category is
+  skipped and named in the result rather than attempted. One failing
+  source doesn't abort the rest, same discipline as `/categories/sync-all`.
 - `POST /categories/domains/add` -> `add_category_domain()` -- form
   fields `category_id`, `pattern` (validated non-empty, <=200 chars,
   compiles as regex, same as `add_domain()`). `INSERT OR IGNORE` with

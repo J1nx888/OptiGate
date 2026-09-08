@@ -18,6 +18,7 @@ import csv
 import io
 import ipaddress
 import logging
+import math
 import os
 import re
 import secrets
@@ -2856,11 +2857,22 @@ CATEGORIES_BODY = """
 <div class="toolbar" id="categoryBulkToolbar">
   <a class="btn small" href="{{ url_for('export_categories_csv') }}">&darr; Download categories</a>
   <span class="toolbar-sep"></span>
+  <form id="bulkCategorySyncForm" class="inline" method="post" action="{{ url_for('bulk_sync_categories') }}">
+    <button class="btn small" type="submit" disabled>Sync</button>
+  </form>
   <form id="bulkCategoryDeleteForm" class="inline" method="post" action="{{ url_for('bulk_delete_categories') }}"
         onsubmit="return confirm('Delete every checked category? This cannot be undone.');">
     <button class="danger small" type="submit" disabled>Delete</button>
   </form>
-  <span class="hint" id="categoryBulkCount" style="margin:0;">Check categories below to delete several at once.</span>
+  <button class="btn small" type="button" id="categoryBulkManageToggle" disabled>Manage access</button>
+  <span class="hint" id="categoryBulkCount" style="margin:0;">Check categories below to act on several at once.</span>
+</div>
+<div id="categoryBulkManagePanel" hidden style="margin:-.3rem 0 .6rem;">
+  <p class="hint">Pick who the checked categories block, then apply -- replaces the ENTIRE block-target set for every one checked (same as editing each one's own Manage page, just all at once). A checked category over {{ max_scoped }} domains is skipped unless the result is Everyone-only.</p>
+  <form id="bulkCategoryAccessForm" class="add-form" method="post" action="{{ url_for('bulk_update_category_access') }}">
+""" + BLOCK_ACCESS_SELECTS + """
+    <button class="add small" type="submit">Apply to checked categories</button>
+  </form>
 </div>
 {% endif %}
 {% if categories %}
@@ -2895,14 +2907,17 @@ CATEGORIES_BODY = """
   var selectAll = document.getElementById("categorySelectAll");
   var countLabel = document.getElementById("categoryBulkCount");
   var toolbar = document.getElementById("categoryBulkToolbar");
+  var manageToggle = document.getElementById("categoryBulkManageToggle");
+  var managePanel = document.getElementById("categoryBulkManagePanel");
 
   function updateToolbarState() {
     if (!toolbar) return;
     var n = document.querySelectorAll(".bulk-category-check:checked").length;
     toolbar.querySelectorAll("button").forEach(function (btn) { btn.disabled = n === 0; });
+    if (n === 0 && managePanel) managePanel.hidden = true;
     if (countLabel) {
       countLabel.textContent = n === 0
-        ? "Check categories below to delete several at once."
+        ? "Check categories below to act on several at once."
         : n + " categor" + (n === 1 ? "y" : "ies") + " selected.";
     }
   }
@@ -2918,9 +2933,23 @@ CATEGORIES_BODY = """
   });
   updateToolbarState();
 
-  var form = document.getElementById("bulkCategoryDeleteForm");
-  if (form) {
+  // "Manage access" doesn't submit anything itself -- it reveals the
+  // access-assign panel below, same toggle-reveals-a-panel pattern as
+  // the Devices/Domains pages' own "Manage"/"Manage access" buttons.
+  if (manageToggle && managePanel) {
+    manageToggle.addEventListener("click", function () {
+      managePanel.hidden = !managePanel.hidden;
+    });
+  }
+
+  function wireBulkForm(formId) {
+    var form = document.getElementById(formId);
+    if (!form) return;
     form.addEventListener("submit", function (event) {
+      // The row checkboxes live in #categoriesTable, not inside any bulk
+      // form -- nesting a <form> around the table would break each row's
+      // own Delete form (HTML forms can't nest) -- so they're collected
+      // into hidden inputs here instead, right before submit.
       var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-category-check:checked"));
       if (!checked.length) {
         event.preventDefault();
@@ -2937,6 +2966,9 @@ CATEGORIES_BODY = """
       });
     });
   }
+  wireBulkForm("bulkCategorySyncForm");
+  wireBulkForm("bulkCategoryDeleteForm");
+  wireBulkForm("bulkCategoryAccessForm");
 })();
 </script>
 
@@ -3017,11 +3049,19 @@ def categories():
     rows = conn.execute("SELECT * FROM categories ORDER BY is_global DESC, name").fetchall()
     lookup_domain = request.args.get("domain", "").strip()
     lookup_results = matching.find_categories_for_hostname(conn, lookup_domain) if lookup_domain else None
+    all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
+    all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
+    all_devices = conn.execute("SELECT * FROM devices ORDER BY COALESCE(label, mac_address)").fetchall()
     body = render_template_string(
         CATEGORIES_BODY,
         categories=[_category_row_context(conn, c) for c in rows],
         max_scoped=matching.MAX_SCOPED_CATEGORY_DOMAINS,
         lookup_domain=lookup_domain, lookup_results=lookup_results,
+        is_global_checked=False,
+        all_users_combo=_entity_combo(all_users, lambda u: u["display_name"]),
+        all_groups_combo=_entity_combo(all_groups, lambda g: g["name"]),
+        all_devices_combo=_entity_combo(all_devices, lambda dev: dev["label"] or dev["mac_address"]),
+        preselected_user_ids=set(), preselected_group_ids=set(), preselected_device_ids=set(),
     )
     return render("categories", body)
 
@@ -3212,6 +3252,30 @@ CATEGORY_DETAIL_BODY = """
 
 <div class="card">
 <h2>Domains ({{ domain_count }})</h2>
+{% if domain_count %}
+<div class="toolbar" style="justify-content:space-between;">
+  <form method="get" action="{{ url_for('category_detail', category_id=c.id) }}" class="inline">
+    <input type="hidden" name="page" value="1">
+    <label class="hint" style="margin:0;">Show
+      <select name="per_page" onchange="this.form.submit()">
+        {% for opt in domains_page_size_options %}
+        <option value="{{ opt }}" {{ 'selected' if opt == domains_per_page }}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+      per page &mdash; showing {{ domains_range_start }}-{{ domains_range_end }} of {{ domain_count }}
+    </label>
+  </form>
+  {% if domains_total_pages > 1 %}
+  <span>
+    {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+    <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
+    {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+    {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+  </span>
+  {% endif %}
+</div>
+{% endif %}
 <div class="table-scroll">
 <table>
   <tr><th>Pattern</th><th>Source</th><th></th></tr>
@@ -3233,6 +3297,15 @@ CATEGORY_DETAIL_BODY = """
   {% endfor %}
 </table>
 </div>
+{% if domains_total_pages > 1 %}
+<div class="toolbar" style="justify-content:flex-end;">
+  {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
+  <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
+  {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+  {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
+</div>
+{% endif %}
 <form class="add-form" method="post" action="{{ url_for('add_category_domain') }}">
   <input type="hidden" name="category_id" value="{{ c.id }}">
   <input type="text" name="pattern" placeholder="e.g. example\\.com" required>
@@ -3283,6 +3356,43 @@ CATEGORY_DETAIL_BODY = """
 """
 
 
+# Added 2026-09-07, project owner's explicit request: clicking "Manage"
+# on a large category (a real subscription list can run past 900,000
+# rows -- see idx_category_domains_pattern's own comment in db.py) used
+# to render every single domain into the page at once, which is slow to
+# generate, slow for the browser to lay out, made scrolling janky, and
+# buried the "Allow-exceptions" card at the bottom of a huge table no
+# one could practically scroll past. Paginated like a modern list/detail
+# view instead (https://design.infor.com/patterns/page-layouts/list-and-details/
+# was the reference the project owner pointed at): a page-size picker
+# plus Prev/Next, entirely server-side (LIMIT/OFFSET), so the page never
+# renders more than one page's worth of rows regardless of how large the
+# category actually is.
+CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS = [25, 50, 100, 250]
+CATEGORY_DOMAINS_DEFAULT_PAGE_SIZE = 50
+
+
+def _parse_pagination(args, *, default_per_page: int, options: list[int]) -> tuple[int, int]:
+    """Parses `?page=`/`?per_page=` into a validated (page, per_page) pair
+    -- page defaults to 1 and is clamped to >=1 (a stale bookmark/back-
+    button to page 0 or a negative number doesn't become a SQL OFFSET of
+    the wrong sign); per_page falls back to `default_per_page` unless the
+    request asked for one of the real `options` specifically, so a
+    hand-edited URL can't ask for an arbitrary (e.g. huge) page size."""
+    try:
+        page = int(args.get("page", "1"))
+    except ValueError:
+        page = 1
+    page = max(1, page)
+    try:
+        per_page = int(args.get("per_page", str(default_per_page)))
+    except ValueError:
+        per_page = default_per_page
+    if per_page not in options:
+        per_page = default_per_page
+    return page, per_page
+
+
 @app.route("/categories/<int:category_id>")
 @require_admin
 def category_detail(category_id: int):
@@ -3296,13 +3406,29 @@ def category_detail(category_id: int):
     domain_count = conn.execute(
         "SELECT COUNT(*) AS c FROM category_domains WHERE category_id = ?", (category_id,)
     ).fetchone()["c"]
+    domains_page, domains_per_page = _parse_pagination(
+        request.args, default_per_page=CATEGORY_DOMAINS_DEFAULT_PAGE_SIZE, options=CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS,
+    )
+    domains_total_pages = max(1, math.ceil(domain_count / domains_per_page))
+    domains_page = min(domains_page, domains_total_pages)
     body = render_template_string(
         CATEGORY_DETAIL_BODY, c=c, domain_count=domain_count,
         over_threshold=domain_count > matching.MAX_SCOPED_CATEGORY_DOMAINS,
         max_scoped=matching.MAX_SCOPED_CATEGORY_DOMAINS,
+        # ORDER BY pattern alone (not source, pattern) so this can be
+        # served straight off the UNIQUE(category_id, pattern) index --
+        # source, pattern would force a full sort of every matching row on
+        # every page load regardless of LIMIT/OFFSET, defeating the whole
+        # point of paginating a 900,000-row category in the first place.
         category_domains=conn.execute(
-            "SELECT * FROM category_domains WHERE category_id = ? ORDER BY source, pattern", (category_id,)
+            "SELECT * FROM category_domains WHERE category_id = ? ORDER BY pattern LIMIT ? OFFSET ?",
+            (category_id, domains_per_page, (domains_page - 1) * domains_per_page),
         ).fetchall(),
+        domains_page=domains_page, domains_per_page=domains_per_page,
+        domains_total_pages=domains_total_pages,
+        domains_page_size_options=CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS,
+        domains_range_start=0 if domain_count == 0 else (domains_page - 1) * domains_per_page + 1,
+        domains_range_end=min(domains_page * domains_per_page, domain_count),
         overrides=conn.execute(
             "SELECT * FROM category_overrides WHERE category_id = ? ORDER BY pattern", (category_id,)
         ).fetchall(),
@@ -3327,6 +3453,29 @@ def category_detail(category_id: int):
         is_global_checked=bool(c["is_global"]),
     )
     return render("categories", body)
+
+
+def _replace_category_access(conn, category_id, is_global: int, user_ids: set[int], group_ids: set[int], device_ids: set[int]) -> None:
+    """Replaces one category's entire block-target set (Everyone + users +
+    groups + devices) with exactly what's passed in -- same grant-and-
+    revoke-are-the-same-action shape as _replace_domain_access(), just
+    BLOCK instead of allow. Shared by update_category_access() (one
+    category, from its own Manage page) and bulk_update_category_access()
+    (many categories at once, from the Categories list) -- deliberately no
+    conn.commit() here, so the bulk caller can wrap its whole loop in one
+    transaction rather than committing (and fsyncing) once per category.
+    Callers are responsible for their own matching.MAX_SCOPED_CATEGORY_DOMAINS
+    check -- this function applies whatever it's given unconditionally."""
+    conn.execute("UPDATE categories SET is_global = ? WHERE id = ?", (is_global, category_id))
+    conn.execute("DELETE FROM category_users WHERE category_id = ?", (category_id,))
+    for uid in user_ids:
+        conn.execute("INSERT OR IGNORE INTO category_users (category_id, user_id) VALUES (?,?)", (category_id, uid))
+    conn.execute("DELETE FROM category_groups WHERE category_id = ?", (category_id,))
+    for gid in group_ids:
+        conn.execute("INSERT OR IGNORE INTO category_groups (category_id, group_id) VALUES (?,?)", (category_id, gid))
+    conn.execute("DELETE FROM category_devices WHERE category_id = ?", (category_id,))
+    for did in device_ids:
+        conn.execute("INSERT OR IGNORE INTO category_devices (category_id, device_id) VALUES (?,?)", (category_id, did))
 
 
 @app.route("/categories/access", methods=["POST"])
@@ -3355,18 +3504,112 @@ def update_category_access():
             "it can only be blocked for Everyone.", error=True, category_id=category_id,
         )
 
-    conn.execute("UPDATE categories SET is_global = ? WHERE id = ?", (is_global, category_id))
-    conn.execute("DELETE FROM category_users WHERE category_id = ?", (category_id,))
-    for uid in user_ids:
-        conn.execute("INSERT OR IGNORE INTO category_users (category_id, user_id) VALUES (?,?)", (category_id, uid))
-    conn.execute("DELETE FROM category_groups WHERE category_id = ?", (category_id,))
-    for gid in group_ids:
-        conn.execute("INSERT OR IGNORE INTO category_groups (category_id, group_id) VALUES (?,?)", (category_id, gid))
-    conn.execute("DELETE FROM category_devices WHERE category_id = ?", (category_id,))
-    for did in device_ids:
-        conn.execute("INSERT OR IGNORE INTO category_devices (category_id, device_id) VALUES (?,?)", (category_id, did))
+    _replace_category_access(conn, category_id, is_global, user_ids, group_ids, device_ids)
     conn.commit()
     return flash_redirect("category_detail", "Access updated.", category_id=category_id)
+
+
+@app.route("/categories/bulk-access", methods=["POST"])
+@require_admin
+def bulk_update_category_access():
+    """Categories list's "Manage access" bulk action -- added 2026-09-07,
+    project owner's explicit request: "Add the ability for me to bulk
+    assign categories to users, groups, or everyone." Same shape as
+    bulk_update_domain_access(): checkboxes on the list (collected
+    client-side, since the checkboxes live in the table, not inside this
+    form, to avoid nesting <form> elements around each row's own Delete
+    form) plus the same is_global/user_ids/group_ids/device_ids fields as
+    the single-category form. One BEGIN IMMEDIATE transaction for the
+    whole batch via the shared _replace_category_access() helper, same
+    "one commit, not one per row" discipline as every other bulk route
+    in this file.
+
+    Each category's own matching.MAX_SCOPED_CATEGORY_DOMAINS check is
+    applied individually -- a batch can freely mix small and huge
+    categories, so an oversized one requesting a non-global scope is
+    silently skipped (not applied) rather than failing the whole batch,
+    and named in the result message so it's not a silent no-op."""
+    category_ids = {int(x) for x in request.form.getlist("category_ids") if x.isdigit()}
+    is_global = 1 if request.form.get("is_global") else 0
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    group_ids = {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+
+    if not category_ids:
+        return flash_redirect("categories", "No categories selected.", error=True)
+
+    conn = get_db()
+    placeholders = ",".join("?" * len(category_ids))
+    rows = conn.execute(
+        f"SELECT c.id, c.name, (SELECT COUNT(*) FROM category_domains cd WHERE cd.category_id = c.id) AS domain_count "
+        f"FROM categories c WHERE c.id IN ({placeholders})",
+        tuple(category_ids),
+    ).fetchall()
+
+    wants_scoped = not is_global and (user_ids or group_ids or device_ids)
+    too_large = [r["name"] for r in rows if wants_scoped and r["domain_count"] > matching.MAX_SCOPED_CATEGORY_DOMAINS]
+    applicable_ids = [r["id"] for r in rows if not (wants_scoped and r["domain_count"] > matching.MAX_SCOPED_CATEGORY_DOMAINS)]
+
+    if applicable_ids:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for category_id in applicable_ids:
+                _replace_category_access(conn, category_id, is_global, user_ids, group_ids, device_ids)
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.commit()
+
+    message = f"Access updated for {len(applicable_ids)} categor{'y' if len(applicable_ids) != 1 else 'ies'}."
+    if too_large:
+        message += f" Skipped (too large to scope to specific people/devices): {', '.join(too_large)}."
+    return flash_redirect("categories", message, error=not applicable_ids and bool(too_large))
+
+
+@app.route("/categories/bulk-sync", methods=["POST"])
+@require_admin
+def bulk_sync_categories():
+    """Categories list's "Sync" bulk action -- added 2026-09-07, project
+    owner's explicit request: "Add the ability for me to bulk sync
+    categories." Distinct from the pre-existing "Sync all subscriptions
+    now" card (sync_all_categories_now(), which always syncs literally
+    every subscription-backed category) -- this one respects the
+    checkbox selection, same as every other bulk route on this page. A
+    manual-only category (no subscription_url) has nothing to sync and
+    is silently skipped, named in the result rather than attempted and
+    failing. One bad source is skipped, not fatal to the rest -- same
+    "one failure doesn't take down the batch" discipline as
+    category_fetch.sync_all_categories()."""
+    category_ids = {int(x) for x in request.form.getlist("category_ids") if x.isdigit()}
+    if not category_ids:
+        return flash_redirect("categories", "No categories selected.", error=True)
+
+    conn = get_db()
+    placeholders = ",".join("?" * len(category_ids))
+    rows = conn.execute(f"SELECT * FROM categories WHERE id IN ({placeholders})", tuple(category_ids)).fetchall()
+
+    manual_only = [r["name"] for r in rows if not r["subscription_url"]]
+    synced: dict[str, int] = {}
+    failed: dict[str, str] = {}
+    for row in rows:
+        if not row["subscription_url"]:
+            continue
+        try:
+            synced[row["name"]] = category_fetch.fetch_and_sync_category(conn, row)
+        except category_fetch.CategoryFetchError as exc:
+            failed[row["name"]] = str(exc)
+
+    total = sum(synced.values())
+    message = f"Synced {len(synced)} categor{'y' if len(synced) != 1 else 'ies'}, {total} domains total."
+    empty = [name for name, count in synced.items() if count == 0]
+    if empty:
+        message += f" 0 domains found (likely an unsupported URL format): {', '.join(empty)}."
+    if failed:
+        message += f" Failed: {', '.join(f'{name} ({reason})' for name, reason in failed.items())}."
+    if manual_only:
+        message += f" Skipped (manual-only, no subscription set): {', '.join(manual_only)}."
+    return flash_redirect("categories", message, error=not synced and bool(failed or manual_only))
 
 
 @app.route("/categories/domains/add", methods=["POST"])
