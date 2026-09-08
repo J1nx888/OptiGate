@@ -6228,8 +6228,141 @@ question to be root-caused first. Recommended waiting; respected the
 decision once made. Resuming with the one concrete, verified fix
 (busy-timeout) actually deployed first, and as an actively-watched
 short window this time -- not another unattended multi-day run --
-specifically because that open question is still unresolved. See the
-next entry for how the resume itself went.
+specifically because that open question is still unresolved.
+
+**Resume result, actively watched, not just started and left**: after
+deploying both fixes (the busy-timeout fix + the User-detail devices
+card) and pulling clean on production, started the interception
+profile fresh. One single, isolated `database is locked` from
+`nftables-manager` right at the six-container startup instant (down
+from repeated failures across two separate services before the fix) --
+self-healed on the very next cycle, nothing since across 30+ continuous
+seconds of watching afterward. `controller` logged zero lock errors
+this time (previously it hit the same error on its own
+`rtnetlink_listener`). `interception_runtime` confirmed genuinely
+healthy (`mode='running'`/`nft_mode='running'`, fresh timestamps, no
+fail reason) both immediately after start and after the extended
+watch. A real, measurable improvement, not a full guarantee the
+busy-timeout was the *only* contributor to the earlier incident --
+still watching for the "internet super slow" report specifically,
+which has no confirmed root cause yet and needs the project owner's
+own real-world usage to actually confirm one way or the other.
+
+### Five more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
+
+Project owner asked to log these now (so they survive regardless of
+how long this window runs or any context/session boundary in between)
+but explicitly NOT act on any of them until after the soak test
+completes -- these are lower-stakes dashboard/UX items, not anything
+that should compete for attention with an active household network
+test.
+
+1. **A "Dismiss" action for the "Devices awaiting login" card.** Should
+   do nothing except clear that one device from the card until it
+   attempts to log in again (i.e. purely a display/dismissal action,
+   not a policy change of any kind -- explicitly NOT the same as
+   Bypass, which grants real access). Needs a way to distinguish
+   "dismissed, don't show again until next login attempt" from every
+   device that's still genuinely pending -- likely a new column or a
+   dismissed-until timestamp on `devices`, re-shown the next time
+   `record_binding()`/login-attempt activity touches that MAC.
+2. **Ignoring a device, or putting it in Bypass, should automatically
+   clear it from "awaiting login."** Related to #1 -- once a device is
+   `ignored` (or its group is), `classify_device()` already puts it in
+   BYPASS, which by definition means it's outside the whole login-gate
+   system entirely, so it has no business still appearing on a card
+   about pending logins. Currently the "awaiting login" card's own
+   query (`devices()` route's pending-devices query, see the
+   2026-09-07 dated entry on that card's own history) filters on
+   `ignored = 0 AND bypass_login = 0 AND is_authenticated = 0` already
+   -- worth confirming live whether this is a real bug (the filter not
+   actually excluding a just-ignored device promptly) or already
+   correct and just perceived as stale due to a caching/refresh
+   timing issue, before assuming which.
+3. **UI consolidation: one Save button per settings-shaped page, not
+   several.** Named examples: the Schedules page has two separate save
+   actions; the Settings page has an individual save button per
+   individual setting. Project owner's own framing: "it is obvious
+   this has been pieced together slowly, but now we need everything to
+   feel like a single integrated product." This is a real, cross-
+   cutting design pass (which fields batch together, whether every
+   save becomes one form submission or an AJAX-style multi-field save,
+   how per-field validation/error messages work once fields share one
+   submit) -- needs its own design conversation before implementation,
+   not a quick mechanical merge.
+4. **`optigate.home` shows only a username/password prompt, not the
+   device-info troubleshooting page it's supposed to.** Confirmed the
+   project owner is remembering correctly, not misremembering --
+   `dashboard/block_page_server.py`'s `_respond_device_info()` exists
+   specifically for this (Label/User-or-Group/IP/MAC), gated on the
+   request's `Host` header matching `db.optigate_hostname(conn)`
+   exactly (case-insensitive). Something is preventing that match from
+   firing in practice -- worth checking live whether the browser is
+   actually hitting port 80 (`block_page_server.py`'s own listener) at
+   all, versus e.g. an HTTPS auto-upgrade landing nowhere useful (this
+   feature has no HTTPS/443 equivalent, deliberately), or the request
+   somehow reaching the main dashboard (port 8787, `require_admin`
+   everywhere) instead -- that class of confusion would produce exactly
+   "a username/password prompt" instead of the info page.
+5. **The Report page shows a domain was blocked but not *why*.**
+   Concrete example given: `speedtest.net` blocked on Matthew's device,
+   no indication whether that was a category match, a plain
+   not-assigned domain, a path restriction, or something else. Real
+   gap, and NOT a simple "just display an existing hidden field" fix --
+   `access_log.reason` already exists and is populated by
+   `common/matching.py`'s `device_domain_reason()`, but that function's
+   own reason values (`global_domain`/`user_domain`/`group_domain`/
+   `device_domain`) explain why something was ALLOWED, not why it was
+   BLOCKED, and category-tier blocks happen at the DNS layer via
+   AdGuard's own `$client=` custom rules (`controller/adguard_sync.py`)
+   *before* Squid ever sees the connection at all -- meaning a
+   category-blocked domain may never reach `access_log`'s own
+   Squid-driven logging path in the first place. Needs real
+   investigation into what's actually loggable and where (Squid-side
+   `access_log.reason` vs. AdGuard's own query log vs. something new)
+   before designing the fix, not an assumption that the data already
+   exists somewhere just waiting to be displayed.
+6. **SSL-Bump enabled on Matthew's device, but nothing is actually
+   getting bumped.** Reported first against Crunchyroll, then the user
+   clarified it's not site-specific -- Asurascans doesn't get bumped
+   either. That broadens this from "one site's cert pinning defeats the
+   bump" (which would be normal/expected for some apps) to "SSL-Bump
+   appears to not be functioning at all" for this device
+   (`14:05:89:a4:e5:0e`, `bump_enabled` found `0` earlier this same
+   session -- see the entry above -- so it was flipped on but may not
+   have actually taken effect anywhere downstream). Needs checking,
+   once the test window is over, in this order: whether the device's
+   current `classify_device()` result is actually AUTHENTICATED
+   (`bump_eligible()` requires both `bump_enabled` AND that); whether
+   it's actually a member of the real kernel `bump_v4` set (`nft list
+   table inet optigate`); whether nftables-manager's own reconcile
+   cycle has actually run since the flag was flipped (it polls on an
+   interval, not instantly on a DB write); and if the device IS in
+   `bump_v4` and traffic IS reaching Squid's intercept port, whether
+   Squid's own SSL-Bump config/CA setup is working at all right now --
+   this last angle is new information suggesting the fault may be in
+   Squid's bumping itself, not just in getting a specific device
+   classified into the right set.
+7. **`http://optigate.home` gets blocked by Squid on Matthew's
+   device.** Likely connected to #6, not a separate root cause: a
+   device that's a member of BOTH `authenticated_v4` and `bump_v4`
+   gets its tcp/80 and tcp/443 traffic redirected to Squid's own
+   intercept ports (`baselineRules` in
+   `phase3/nftables-manager/internal/nft/knftables_adapter.go`)
+   regardless of destination -- so a bump-eligible device's request for
+   the `optigate.home` troubleshooting page never reaches
+   `dashboard/block_page_server.py`'s own port-80 listener at all, it
+   hits Squid first. Squid has no special-case awareness that
+   `optigate.home` is a synthetic system hostname, not a real
+   configured domain -- so its own domain-assignment check (correctly,
+   from Squid's own perspective) denies it as not-assigned. This is a
+   genuinely new interaction between two features that were likely
+   never tested together before (the memorable-hostname troubleshooting
+   page, and SSL-Bump's own port-80/443 redirect) -- needs a real
+   design decision (e.g. an nftables exception carving the box's own IP
+   out of the bump_v4 redirect, or a Squid-side always-allow rule for
+   `optigate.home` specifically) once the test window is over, not a
+   quick patch decided under time pressure.
 
 ---
 
