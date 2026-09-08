@@ -6403,6 +6403,57 @@ or their explicit real-time approval in a live conversation turn.**
    this last angle is new information suggesting the fault may be in
    Squid's bumping itself, not just in getting a specific device
    classified into the right set.
+
+   **Investigated 2026-09-08, while the project owner was away --
+   inconclusive, no code bug found, but real supporting evidence
+   gathered.** Everything checkable via code review + read-only DB/log
+   inspection (no live re-test attempted -- interception was already
+   off by the time this investigation started, and re-enabling it
+   unsupervised was explicitly ruled out) came back correct:
+   - `bump_eligible()`/`classify_device()` (`common/policy_class.py`):
+     logic confirmed correct against this device's real row
+     (`bump_enabled=1`, `is_authenticated=1`, `ignored=0`,
+     `quarantined_at=NULL`, no group) -- should evaluate bump-eligible.
+   - The desired-policy snapshot captured earlier this session (before
+     shutdown) had this device's IP (`192.168.1.30`) in BOTH
+     `authenticated` and `bump` -- the DB-level policy computation was
+     correct at that moment.
+   - `phase3/nftables-manager`'s `baselineRules()`: rule order was
+     re-checked specifically for the "device in both bump_v4 and
+     authenticated_v4" case -- `bump_v4`'s tcp/80 and tcp/443 redirects
+     correctly precede `authenticated_v4`'s catch-all `ct mark set 0x1`
+     rule, so a bump-eligible device's HTTPS traffic should correctly
+     hit Squid's bump-capable port 3130, not fall through to plain
+     pass-through. No ordering bug.
+   - `internal/policy/reconcile.go`'s `Reconcile()`/`diffSet()`: `Bump`
+     is diffed the same way as the four exclusive sets: no special-
+     cased logic that could silently drop it. No bug.
+   - `proxy/sni_helper.py`'s `handle_bump()`: purely checks
+     `domains.mode == 'bump'` for the SNI, nothing device-specific.
+     Checked the LIVE production `domains` table directly: both
+     `crunchyroll.com` (kind='crunchyroll') and `asurascans.com` are
+     correctly configured `mode='bump'`. Not a domain-configuration
+     bug either.
+   - Could **not** find a log trace of an actual Crunchyroll or
+     Asurascans connection attempt from this device anywhere in the
+     currently-retained `optigate-proxy` container's `access.log` --
+     the retained window is short (rotated/restarted since), and
+     almost certainly doesn't reach back to when the user actually hit
+     the issue. Every device-generic search of what IS retained shows
+     background system traffic (Google Play services, connectivity
+     checks), not an actual site visit -- so the specific failure could
+     not be directly reproduced or observed after the fact.
+
+   **Bottom line: every individual piece of the bump decision chain
+   checks out correct in isolation, but the end-to-end behavior could
+   not be verified live.** This needs a genuinely supervised re-test:
+   next time interception resumes, have Matthew visit Crunchyroll (or
+   Asurascans) while tailing `docker logs -f optigate-proxy` and
+   `docker exec optigate-proxy tail -f /var/log/squid/access.log` in
+   real time, to catch the actual request and see exactly which
+   `ssl_bump` rule matched. Not closing this out as fixed or as a false
+   alarm -- genuinely unresolved, needs a live observation this
+   investigation could not safely perform.
 7. **`http://optigate.home` gets blocked by Squid on Matthew's
    device.** Likely connected to #6, not a separate root cause: a
    device that's a member of BOTH `authenticated_v4` and `bump_v4`
@@ -6436,31 +6487,67 @@ or their explicit real-time approval in a live conversation turn.**
    turn out to be a direct symptom of item 6's root cause rather than
    an independent bug -- needs re-testing AFTER 6 is fixed before
    concluding there's a second, separate problem here.
-9. **netflix.com is blocked, but no category is configured to block
-   it.** A real discrepancy worth treating as higher-priority than the
-   others once investigation resumes -- possible causes to check: a
-   stale/leftover AdGuard custom rule from before the wipe-and-restore
-   (`backup.py` deliberately excludes `category_domains` since it's
-   subscription-sourced, so a rule that predates the current category
-   config could have survived); a subscription list
-   (`refresh_adguard_filters()`) that happens to include netflix.com
-   under a category the user doesn't realize is active; or a
-   miscategorization in `controller/adguard_sync.py`'s own rule
-   generation. Needs checking against the actual live AdGuard rules
-   (`$client=` rule set) and the `category_domains`/`domains` tables
-   directly, not assumed to be either side's fault in advance.
-10. **AdGuard username/password is not synced properly.** Likely
-    connected to the 2026-09-07 credential-unification design
-    (`update_admin()` in `dashboard/dashboard.py` is supposed to be the
-    one place that sets `adguard_password`, with `/settings/adguard`
-    only ever saving the URL field -- see the dashboard test fixes
-    earlier this same session for the exact mechanics). Needs
-    reproducing precisely: what was changed, where, and what
-    "not synced" looked like (AdGuard rejecting the dashboard's own API
-    calls? the dashboard's stored credential not matching what's
-    actually configured in AdGuard itself, e.g. after AdGuard's admin
-    password was changed directly rather than through the dashboard?).
-    Don't guess at a fix without first confirming which side is stale.
+9. **LIKELY NOT A BUG (investigated 2026-09-08, while the project owner
+   was away): netflix.com is blocked, but no category is configured to
+   block it.** Checked the live production DB directly: `domains` has
+   zero rows matching netflix anywhere, and all three assignment
+   tables (`user_domains`, `group_domains`, `device_domains`) reference
+   domains only by `domain_id` -- with no `domains` row for netflix to
+   even point at, there is categorically no way any user, group, or
+   device has netflix.com assigned. This project's whole enforcement
+   model is **allow-list, not deny-list**: a domain isn't blocked
+   because some rule specifically targets it, it's blocked by default
+   unless it's global or explicitly assigned to that user/group/device.
+   So "no category is configured to block it" was true, but doesn't
+   imply it should be allowed -- the actual reason is almost certainly
+   "netflix.com was never added/assigned to anyone at all," the same
+   default-deny that applies to any unrecognized domain. **This is very
+   likely the exact case item 5 (Report page not explaining WHY
+   something was blocked) is about** -- if that feature already
+   existed, the Report page would have said "not an assigned domain"
+   directly and this wouldn't have looked like a discrepancy at all.
+   Not marking this fully closed (an admin should still add
+   netflix.com deliberately, with a real `mode`, once they decide the
+   household should have it), but the "why is this happening" question
+   itself is answered with real evidence, not a guess.
+10. **DONE (root cause found + a real gap fixed 2026-09-08, while the
+    project owner was away): AdGuard username/password is not synced
+    properly.** Found the exact mechanism by reading
+    `adguard_config_sync.sync_adguard_credentials()`'s own docstring,
+    which already stated it plainly: changing the admin password
+    (`update_admin()`) rewrites `AdGuardHome.yaml` on disk with the new
+    bcrypt hash, but **AdGuard itself only reads that file at
+    startup** -- it does not hot-reload. So every AdGuard-authenticated
+    call (filter refresh, category sync, SafeSearch, the optigate.home
+    rewrite) starts failing with a real 401 the moment the password
+    changes, and keeps failing until someone runs `docker compose
+    restart adguard`. This is not silent: `update_admin()` already
+    returns "...run 'docker compose restart adguard' for it to take
+    effect" on success -- but that's a one-time flash message, easy to
+    miss or forget, with nothing persistent on the page to catch it
+    later. The REAL bug this investigation found and fixed: the
+    Settings page's existing "Memorable troubleshooting address" status
+    card (`_optigate_rewrite_status()`) already makes exactly this kind
+    of authenticated call, but its `except adguard_client.AdGuardError`
+    handler collapsed a 401 (AdGuard up, rejecting stale credentials)
+    into the SAME generic "couldn't check -- AdGuard isn't reachable
+    right now" message as AdGuard being genuinely offline -- sending
+    anyone troubleshooting this down the wrong path (checking the
+    container/network) instead of the real, one-line fix (restart
+    adguard). Fixed: `common/adguard_client.py`'s `AdGuardError` now
+    carries a `status_code` attribute (`None` for a real connection
+    failure, the real HTTP status otherwise); `_optigate_rewrite_status()`
+    checks it and, on a 401 specifically, says "AdGuard rejected this
+    login... run 'docker compose restart adguard'" instead of the
+    generic message. 4 new tests (2 in `tests/test_adguard_client.py`
+    confirming `status_code` is set/None correctly, 2 in
+    `tests/test_dashboard.py` confirming the Settings page shows the
+    right message for each case). This makes the NEXT occurrence of
+    this exact scenario self-diagnosing on the page itself, rather than
+    relying on remembering a one-time flash message from whenever the
+    password was last changed. Not deployed live yet -- same reasoning
+    as items 1/2/4/12 above (dashboard restart needs the project
+    owner's own approval).
 11. **Device MAC `76:33:41:e8:8a:0e` (IP `192.168.1.54`, per user
     clarification) still has full internet access and isn't getting
     blocked/intercepted at all.** Checked read-only against the live
@@ -6499,6 +6586,47 @@ or their explicit real-time approval in a live conversation turn.**
     (compare ARP-worker's own view of "what's on this LAN right now"
     against `devices`) once investigation resumes, not just fixing this
     one MAC.
+
+    **Root cause found 2026-09-08, while the project owner was away --
+    a real, confirmed architectural gap, not a hidden bug in existing
+    code.** Read every discovery code path end to end:
+    `common/identity.py`'s `record_binding()` is the ONLY place a new
+    `devices` row ever gets auto-created, and it only ever runs when
+    something ELSE has already observed a MAC<->IP pair and calls it.
+    The only three things that ever call it are: `controller/
+    rtnetlink_listener.py` (passively reacts to real-time kernel
+    neighbor-table CHANGES), `controller/discovery.py`'s periodic
+    snapshot (passively reads whatever `ip neigh show` already has,
+    unchanged), and `controller/active_scan.py`. That last one looked
+    like the most promising candidate for an active sweep -- it isn't:
+    its own docstring says outright, **"discovering a brand-new device
+    is inherently something only a passive/link-layer source... can
+    ever do"** -- it only ever refreshes an IP `devices`/`device_bindings`
+    ALREADY knows about and has gone stale; there is categorically no
+    code path anywhere in this project that actively probes/sweeps the
+    whole local subnet to find a device that has never generated
+    traffic this box's own kernel happened to independently observe or
+    resolve. So a device that joined the LAN, and has simply sat there
+    without triggering a fresh kernel neighbor-table entry since this
+    box's own containers last restarted (very plausible during this
+    exact session -- the boxes' containers were rebuilt/restarted
+    several times today), is genuinely, by design, invisible to this
+    system -- not a misconfiguration, not a range mismatch, a true gap
+    in what "discovery" currently means here (reactive-only, no active
+    inventory sweep). **Real fix, not attempted in this unattended
+    session** (it needs new privileged raw-socket code and only-safely-
+    verifiable-live testing, both explicitly out of scope for
+    unsupervised work): give `phase3/arp-worker` (the only component
+    with `CAP_NET_RAW`) a genuine active-sweep capability -- broadcast
+    real ARP requests across the configured LAN subnet, not just
+    `active_scan.py`'s narrower "nudge one already-known IP" UDP trick
+    -- run once at startup and on a slow periodic interval, feeding any
+    newly-resolved MAC/IP pair back through the exact same
+    `record_binding()` path real traffic already uses. This also needs
+    a genuinely configured subnet/CIDR setting to exist at all (see the
+    settings-table check earlier in this entry -- none exists today).
+    This is a real, scoped feature request for a future session, backed
+    by a confirmed architectural read, not a guess.
 12. **DONE (implemented + tested 2026-09-08, while the project owner
     was away): `nftables-manager` now has a graceful teardown on
     stop/SIGTERM, matching `arp-worker`.** New `(*nft.Manager)
@@ -6528,36 +6656,75 @@ or their explicit real-time approval in a live conversation turn.**
     against; this will simply take effect the next time `nftables-manager`
     is rebuilt and the interception profile is started again.
 
-13. **Reference: https://github.com/v2fly/domain-list-community/tree/master
-    -- a large, actively-maintained, per-service/per-category set of
-    domain lists, possibly worth integrating as `categories.subscription_url`
-    sources later.** Ties directly to the earlier question this same
-    session about why a `github.com/.../blob/master/data/youtube` URL
-    doesn't work as a subscription: that's GitHub's HTML-rendered file
-    view, not raw text -- the actual content lives at
-    `raw.githubusercontent.com/v2fly/domain-list-community/master/data/youtube`.
-    BUT even the raw URL is not yet a drop-in fit: `common/blocklist_parser.py`'s
-    `parse_hostlist()` (checked while writing this note) only recognizes
-    four line shapes -- full-line comments, AdGuard/uBlock `||domain^`,
-    hosts-file `0.0.0.0 example.com`, a bare URL, or a bare domain -- and
-    v2fly's own format uses none of those: every line is `domain:example.com`,
-    `full:example.com`, `keyword:somefragment`, `regexp:...`, or
-    `include:other-list-name` (that last one recursively pulls in
-    another file from the same repo). A `domain:`/`full:`-prefixed line
-    would currently fall through `parse_hostlist()`'s "matches none of
-    these shapes" path and be silently skipped -- so pointing a
-    category's `subscription_url` straight at one of these raw files
-    today would likely yield zero or near-zero domains, not an error,
-    which could look deceptively like "it worked" until someone checks
-    the actual `category_domains` count. Real integration, if pursued
-    later, needs either (a) a fifth `parse_hostlist()` branch
-    recognizing the `domain:`/`full:` prefixes (dropping `keyword:`/
-    `regexp:` entries, since those aren't literal domains a static list
-    can represent) and following `include:` references, or (b) fetching
-    via v2fly's own separate release artifacts (they publish pre-built
-    plain files for some consumers) instead of the raw per-category
-    source files directly -- worth checking their README for that
-    before building a custom parser branch.
+13. **CORRECTED (2026-09-08, while the project owner was away -- this
+    entry originally guessed wrong, see below): reference
+    https://github.com/v2fly/domain-list-community/tree/master, a
+    large, actively-maintained, per-service/per-category set of domain
+    lists.** This project is **already using it, successfully, right
+    now** -- the live production DB has `categories` rows for YouTube
+    (`raw.githubusercontent.com/.../data/youtube`, 193 real domains
+    landed in `category_domains`) and Reddit (12 domains), both fetched
+    and parsed correctly. This entry originally claimed the raw file
+    format was `domain:`/`full:`/`keyword:`/`regexp:`/`include:`
+    prefixes incompatible with `parse_hostlist()`, and that pointing a
+    subscription at one would silently yield zero domains -- **that
+    was wrong, written without actually fetching the file to check**.
+    Corrected by actually curling the real raw URL: of 182 lines in the
+    youtube list, the overwhelming majority are bare domains one per
+    line (`youtube.com`, `googlevideo.com`, etc.), which
+    `parse_hostlist()`'s existing bare-domain shape already handles
+    fine -- confirmed by the 193 real domains already sitting in
+    `category_domains`. There IS a small, real, narrower gap, not the
+    total-failure one originally claimed: a handful of lines carry a
+    trailing `@attribute` tag v2fly uses for region-specific rules
+    (e.g. `ggpht.cn @cn`, `ads.youtube.com @ads`) -- `parse_hostlist()`
+    splits that into 2+ tokens, none of its four shapes match a 2-token
+    line, so it's silently skipped (confirmed: `ggpht.cn` alone is
+    missing from `category_domains` despite being a real
+    YouTube-related domain in the source file). A small number of
+    `full:example.com`-prefixed lines (exact-match-only rules) are also
+    silently dropped, since `_normalize()`'s domain regex correctly
+    rejects the literal `full:` prefix as an invalid hostname
+    character. Neither gap is remotely as severe as this entry
+    originally suggested -- both are minor coverage loss on the margins
+    of an already-working integration, not a reason to avoid or rework
+    it. If ever worth closing: teach `parse_hostlist()` to strip a
+    trailing `@\S+` token before the existing bare-domain check, and to
+    strip a leading `full:`/`domain:` prefix the same way. Not urgent.
+    **Lesson for future me: verify against the real fetched content
+    before writing a technical claim into this file, not just by
+    reading the consuming code's own doc comment.**
+14. **NEW, found 2026-09-08 while investigating item 6, not something
+    the project owner reported: repeated "SECURITY ALERT: Host header
+    forgery detected" entries in `optigate-proxy`'s `cache.log`,
+    against Google's own service domains from Matthew's device
+    (`clients2.google.com`, `clients4.google.com`, both flagged
+    "local IP does not match any domain IP").** This is Squid's own
+    built-in anti-spoofing check, not something this project added --
+    it fires when the SNI/CONNECT-target IP a connection claims doesn't
+    match what a DNS lookup of the actual request's hostname resolves
+    to. A likely (not yet confirmed) explanation: Google's own
+    infrastructure aggressively reuses/coalesces HTTP/2 connections
+    across many hostnames that happen to share an IP (a well-documented
+    real-world false-positive trigger for this exact Squid check with
+    Android/Google traffic specifically, not unique to this project's
+    setup) -- worth confirming that's actually what's happening here
+    before assuming it's totally benign, though. Flagging this because
+    (a) it's a security-relevant log signal worth a human's eyes before
+    dismissing, not something to silently ignore, and (b) if Squid's
+    default reaction to a detected forgery is to reset/deny that
+    connection (needs checking `qos_flows`/`buffered_logs`/the relevant
+    squid.conf directive -- not yet looked into), this could be an
+    actual user-visible connectivity gap for Google-dependent services
+    on bump-enabled devices, separate from and possibly getting
+    conflated with item 6's Crunchyroll/Asurascans report. Needs: (a)
+    confirming what Squid actually does to a flagged connection here
+    (silently continues vs. resets it), (b) if it's genuinely a
+    Google-side false positive, deciding whether an explicit
+    `sni_trusted`/allowlist exception for known Google connection-reuse
+    domains is warranted, matching this project's own existing
+    "trusted: always splice, never checked" mode for exactly this kind
+    of legitimate-but-noisy infrastructure traffic.
 
 ### Soak test stopped (2026-09-08)
 

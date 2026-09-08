@@ -7041,7 +7041,23 @@ def _optigate_rewrite_status(conn, adguard_url: str, adguard_username: str, adgu
     desired_domain = db.optigate_hostname(conn)
     try:
         current = adguard_client.get_rewrites(adguard_url, adguard_username, adguard_password)
-    except adguard_client.AdGuardError:
+    except adguard_client.AdGuardError as exc:
+        # Fixed 2026-09-08, real gap found investigating an "AdGuard
+        # username/password not synced" report: a 401 here (AdGuard is
+        # up, but rejects the credentials stored in this project's own
+        # DB -- exactly what happens after an admin password change via
+        # update_admin() until someone restarts the adguard container,
+        # since AdGuard only reads its config at startup) used to show
+        # the exact same message as AdGuard being genuinely offline,
+        # sending whoever's troubleshooting down the wrong path
+        # entirely (checking the container/network instead of just
+        # restarting adguard).
+        if exc.status_code == 401:
+            return (
+                "couldn't check -- AdGuard rejected this login. If you changed the admin "
+                "password recently, run 'docker compose restart adguard' (it only reads "
+                "new credentials at startup)"
+            )
         return "couldn't check -- AdGuard isn't reachable right now"
     if any(
         isinstance(r, dict) and r.get("domain") == desired_domain and r.get("answer") == block_page_ip

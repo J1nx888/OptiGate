@@ -156,8 +156,14 @@ def test_http_error_is_wrapped_with_status_and_detail(monkeypatch):
         raise HTTPError(request.full_url, 401, "Unauthorized", None, FakeResponse(b"bad credentials"))
 
     monkeypatch.setattr(adguard_client._OPENER, "open", fake_open)
-    with pytest.raises(adguard_client.AdGuardError, match="HTTP 401"):
+    with pytest.raises(adguard_client.AdGuardError, match="HTTP 401") as excinfo:
         adguard_client.get_custom_rules("http://127.0.0.1:3000", "admin", "wrong")
+    # Added 2026-09-08, real gap found investigating an "AdGuard
+    # username/password not synced" report: callers need to tell a
+    # stale-credentials 401 apart from AdGuard being genuinely
+    # unreachable (status_code is None for that case, see the test
+    # right below) -- see dashboard.py's _optigate_rewrite_status().
+    assert excinfo.value.status_code == 401
 
 
 def test_url_error_is_wrapped_as_unreachable(monkeypatch):
@@ -165,8 +171,9 @@ def test_url_error_is_wrapped_as_unreachable(monkeypatch):
         raise URLError("connection refused")
 
     monkeypatch.setattr(adguard_client._OPENER, "open", fake_open)
-    with pytest.raises(adguard_client.AdGuardError, match="could not reach"):
+    with pytest.raises(adguard_client.AdGuardError, match="could not reach") as excinfo:
         adguard_client.get_custom_rules("http://127.0.0.1:3000", "admin", "x")
+    assert excinfo.value.status_code is None
 
 
 def test_timeout_is_wrapped(monkeypatch):

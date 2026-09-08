@@ -103,7 +103,27 @@ class AdGuardError(RuntimeError):
     a non-2xx response, or a malformed body. Callers (adguard_sync.py)
     must treat this the same way controller/discovery.py treats a
     failed snapshot: log it and retry next cycle, never crash the
-    process over a transient AdGuard restart or network hiccup."""
+    process over a transient AdGuard restart or network hiccup.
+
+    `status_code` (added 2026-09-08, real gap found investigating a
+    "AdGuard username/password not synced" report): the HTTP status
+    AdGuard responded with, when there was one -- None for a genuine
+    connection failure (unreachable, timed out). Lets a caller tell
+    "AdGuard is down/unreachable" apart from "AdGuard is up but
+    rejected these credentials" (401), which used to collapse into the
+    same generic error everywhere -- see dashboard.py's
+    _optigate_rewrite_status() for the first caller that actually acts
+    on this distinction. A password change made through this project's
+    own admin form (dashboard.py's update_admin()) only writes AdGuard's
+    real config file on disk -- AdGuard itself only reads it at
+    startup -- so every AdGuard-authenticated call fails with exactly
+    this 401 until someone restarts the `adguard` container, and
+    without this attribute that looked identical to AdGuard simply
+    being offline."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _basic_auth_header(username: str, password: str) -> str:
@@ -134,7 +154,7 @@ def _request(
             return response.read(MAX_RESPONSE_BYTES)
     except HTTPError as exc:
         detail = exc.read(300).decode("utf-8", errors="replace")
-        raise AdGuardError(f"HTTP {exc.code} from {url}: {detail}") from exc
+        raise AdGuardError(f"HTTP {exc.code} from {url}: {detail}", status_code=exc.code) from exc
     except URLError as exc:
         raise AdGuardError(f"could not reach {url}: {exc.reason}") from exc
     except TimeoutError as exc:

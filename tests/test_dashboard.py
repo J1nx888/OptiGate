@@ -1679,6 +1679,36 @@ def test_settings_page_status_check_survives_adguard_being_unreachable(client, d
     assert b"couldn" in resp.data  # "couldn't check -- AdGuard isn't reachable right now"
 
 
+def test_settings_page_distinguishes_stale_credentials_from_adguard_being_down(client, db_conn, monkeypatch):
+    """Real gap found 2026-09-08 investigating an "AdGuard username/
+    password not synced" report: a 401 (AdGuard is up, but rejects the
+    stored login -- exactly what happens after an admin password
+    change until someone restarts the adguard container) used to show
+    the identical "isn't reachable right now" message as AdGuard being
+    genuinely offline, pointing troubleshooting in the wrong direction
+    entirely."""
+    import dashboard
+
+    monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
+    client.post(
+        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+    )
+    client.post(
+        "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
+    )
+
+    def fake_get_rewrites(*a, **kw):
+        raise dashboard.adguard_client.AdGuardError("HTTP 401 from x: unauthorized", status_code=401)
+
+    monkeypatch.setattr(dashboard.optigate_rewrite.adguard_client, "get_rewrites", fake_get_rewrites)
+
+    resp = client.get("/settings", headers=_auth_header(username="admin", password="hunter2"))
+
+    assert resp.status_code == 200
+    assert b"rejected this login" in resp.data
+    assert b"docker compose restart adguard" in resp.data
+
+
 def test_refresh_adguard_filters_also_retries_the_optigate_rewrite(client, db_conn, monkeypatch):
     """The "Check for filter updates now" button doubles as a manual
     fallback for the rewrite too -- for the case where AdGuard was reset
