@@ -5713,6 +5713,10 @@ HEALTH_BODY = """
 {% else %}
 <p class="hint">Applied ARP-worker generation: {{ runtime_row.applied_generation }}.</p>
 {% endif %}
+<p class="hint">
+  {% if controller_up %}Currently running -- to turn it off, run on the host:{% else %}Currently off -- to turn it on, run on the host:{% endif %}
+  <br><code>{{ controller_toggle_command }}</code>
+</p>
 </div>
 
 <div class="card">
@@ -5728,6 +5732,10 @@ HEALTH_BODY = """
 {% elif not runtime_row.nft_last_healthy_at %}
 <p class="hint">Never reported healthy yet -- the nftables-manager container may still be starting.</p>
 {% endif %}
+<p class="hint">
+  {% if nft_up %}Currently running -- to turn it off, run on the host:{% else %}Currently off -- to turn it on, run on the host:{% endif %}
+  <br><code>{{ nft_toggle_command }}</code>
+</p>
 </div>
 
 <div class="card">
@@ -5787,6 +5795,24 @@ def _subsystem_unhealthy(mode: str, last_healthy_at: str | None) -> bool:
     instead of independently in two different shapes that could drift
     apart (found via code review 2026-08-30)."""
     return mode == "fail_open" or _subsystem_stale(mode, last_healthy_at)
+
+
+def _subsystem_is_up(mode: str, stale: bool) -> bool:
+    """Whether this subsystem's own container is (probably) actually
+    running right now -- added 2026-09-07 for the Health page's "run
+    this command" toggle (project owner's explicit request, in place of
+    a riskier dashboard-driven start/stop control: granting the
+    dashboard container Docker socket access to actually flip these
+    containers itself was explicitly declined the same day -- see
+    RoadMap.md's dated entry). `running`/`fail_open`/`repair_only` all
+    mean the process is actively self-reporting, even if degraded --
+    only an explicitly `stopped` mode (the schema default, never
+    actually written by any real code path today, but a legitimate
+    value per the CHECK constraint) or a stale (frozen -- presumably
+    crashed) status count as "down" here. Callers must also treat a
+    missing `runtime_row` entirely as down (this function assumes one
+    exists)."""
+    return mode in ("running", "fail_open", "repair_only") and not stale
 
 
 def _get_runtime_row(conn):
@@ -5862,15 +5888,27 @@ def health_page():
     runtime_row = _get_runtime_row(get_db())
     nft_mode_badge_class = mode_badge_class = "mode-trusted"
     mode_stale = nft_mode_stale = False
+    controller_up = nft_up = False
     if runtime_row:
         mode_stale = _subsystem_stale(runtime_row["mode"], runtime_row["last_healthy_at"])
         nft_mode_stale = _subsystem_stale(runtime_row["nft_mode"], runtime_row["nft_last_healthy_at"])
         mode_badge_class = HEALTH_MODE_BADGE_CLASS.get(runtime_row["mode"], "mode-trusted")
         nft_mode_badge_class = HEALTH_MODE_BADGE_CLASS.get(runtime_row["nft_mode"], "mode-trusted")
+        controller_up = _subsystem_is_up(runtime_row["mode"], mode_stale)
+        nft_up = _subsystem_is_up(runtime_row["nft_mode"], nft_mode_stale)
     body = render_template_string(
         HEALTH_BODY, runtime_row=runtime_row,
         mode_badge_class=mode_badge_class, nft_mode_badge_class=nft_mode_badge_class,
         mode_stale=mode_stale, nft_mode_stale=nft_mode_stale,
+        controller_up=controller_up, nft_up=nft_up,
+        controller_toggle_command=(
+            "docker compose stop controller arp-worker" if controller_up
+            else "docker compose up -d controller arp-worker"
+        ),
+        nft_toggle_command=(
+            "docker compose stop nftables-manager" if nft_up
+            else "docker compose up -d nftables-manager"
+        ),
         stale_after_seconds=HEALTH_STALE_AFTER_SECONDS,
     )
     return render("health", body)

@@ -1593,6 +1593,50 @@ def test_health_page_shows_nft_fail_open_reason(client, db_conn):
     assert b"NOT being kept in sync" in resp.data
 
 
+# ============================================================
+# Health page "run this command" toggle -- added 2026-09-07, project
+# owner's explicit request in place of a dashboard-driven start/stop
+# control (granting the dashboard container Docker socket access to
+# actually flip these containers was explicitly declined the same day)
+# ============================================================
+
+def test_health_page_shows_stop_commands_when_running(client, db_conn):
+    import db
+    _insert_runtime_row(db_conn, last_healthy_at=db.now_iso(), nft_last_healthy_at=db.now_iso())
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"docker compose stop controller arp-worker" in resp.data
+    assert b"docker compose stop nftables-manager" in resp.data
+    assert b"docker compose up -d controller arp-worker" not in resp.data
+    assert b"docker compose up -d nftables-manager" not in resp.data
+
+
+def test_health_page_shows_start_commands_when_stale(client, db_conn):
+    import db
+    _insert_runtime_row(db_conn, last_healthy_at=db.iso_secs_ago(60), nft_last_healthy_at=db.iso_secs_ago(60))
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"docker compose up -d controller arp-worker" in resp.data
+    assert b"docker compose up -d nftables-manager" in resp.data
+
+
+def test_health_page_shows_stop_command_even_when_fail_open(client, db_conn):
+    """fail_open still means the process IS running (it's actively
+    self-reporting the failure) -- the toggle command is about container
+    up/down state, not health, so it should still offer to stop it."""
+    import db
+    _insert_runtime_row(db_conn, mode="fail_open", last_healthy_at=db.now_iso())
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"docker compose stop controller arp-worker" in resp.data
+
+
+def test_health_page_shows_combined_start_command_when_never_run(client):
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"docker compose --profile interception up -d" in resp.data
+
+
 def test_sidebar_shows_alarm_badge_only_when_fail_open(client, db_conn):
     resp = client.get("/settings", headers=_auth_header())
     assert b'class="badge blocked">!' not in resp.data

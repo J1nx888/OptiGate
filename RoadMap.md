@@ -5302,6 +5302,45 @@ assignment to restore.
 and `tests/test_controller_adguard_sync.py`. 939 → 958 passed, 34
 skipped, zero regressions.
 
+### Health page: "run this command" toggle, not a dashboard-driven switch (2026-09-07)
+
+Requested: "Add an option in settings to turn off/on Device tracking &
+blocking (controller & arp-worker) as well as Traffic redirection
+(nftables-manager)." Before building anything, asked the project owner
+how they wanted it built, since a REAL functional toggle would require
+giving the dashboard container Docker socket access to start/stop
+sibling containers -- a privilege it deliberately has none of today
+(the same question was already settled, smaller-scale, for AdGuard
+restarts earlier this session, and declined). Two options were put to
+them: (1) a "desired-state" toggle that only records intent and shows
+live status, with the actual start/stop left to a manual command; (2) a
+fully functional toggle backed by Docker socket access.
+
+**Decision: neither.** The project owner pointed out the Health page
+already shows each subsystem's live status, and asked instead for the
+*opposite* action's exact command to be shown right there -- if a
+subsystem shows up, show the command to bring it down, and vice versa.
+No new privilege granted to the dashboard container at all; this is
+a documentation/convenience feature layered on the health status that
+already existed, not a new control plane.
+
+Implementation: a new `_subsystem_is_up(mode, stale)` helper
+(`running`/`fail_open`/`repair_only` all count as "up" -- the toggle is
+about container up/down state, not health, so a degraded-but-running
+process still offers the stop command) drives which command
+`health_page()` computes for each of the two existing cards:
+`docker compose stop controller arp-worker` / `docker compose up -d
+controller arp-worker` for the first, and the `nftables-manager`
+equivalents for the second. (Explicitly naming a profiled service on
+the command line starts/stops just that service, bypassing the
+`interception` profile gate -- confirmed against Docker Compose's own
+documented behavior before relying on it.) The pre-existing "never
+started at all" card is untouched -- it already recommended the
+combined `docker compose --profile interception up -d`.
+
+4 new tests in `tests/test_dashboard.py`. 958 → 962 passed, 34 skipped,
+zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

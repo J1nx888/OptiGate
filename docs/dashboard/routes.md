@@ -985,7 +985,18 @@ shape, not an error).
   write its own `fail_open` row, so a frozen timestamp is itself the
   signal something's wrong (found live via a sustained OOM-kill test,
   see RoadMap.md). This page doesn't auto-refresh; reload to see the
-  latest status.
+  latest status. **Since 2026-09-07**: each subsystem card also shows
+  the exact `docker compose` command to flip its current state (up ->
+  the `docker compose stop <service...>` command; down -> `docker
+  compose up -d <service...>`), via a new `_subsystem_is_up(mode,
+  stale)` helper (`running`/`fail_open`/`repair_only` all count as "up"
+  -- this is about container state, not health, so a degraded-but-
+  running process still offers the stop command). This is deliberately
+  NOT a working button -- the dashboard container has no Docker socket
+  access and none was added; the project owner explicitly chose "show
+  me the command" over granting that access. Naming a profiled service
+  explicitly on the command line starts/stops just that service,
+  bypassing the `interception` profile gate.
 - `render()` (the shared page-chrome wrapper every route calls into, not
   a route itself) separately queries the same singleton row on every
   page load to decide whether to show a "!" alarm badge next to "Health"
