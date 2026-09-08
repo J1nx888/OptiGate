@@ -2964,6 +2964,30 @@ def test_pending_devices_are_sorted_ahead_of_already_authenticated_ones(client, 
     assert body.index("aa:bb:cc:dd:ee:45") < body.index("aa:bb:cc:dd:ee:44")
 
 
+def test_devices_page_does_not_treat_a_group_ignored_device_as_pending(client, db_conn):
+    """Real bug found live 2026-09-08 (RoadMap.md's dated entry): the
+    pending check only ever looked at d.ignored, not at the device's
+    GROUP being in Ignore mode -- a device that's effectively ignored
+    only via group membership (same as the group_ignored/
+    effective_ignored handling already used for the Status column's
+    "Ignored" badge) still showed up in "Devices awaiting login" and
+    still got the "Awaiting login" badge, even though every other part
+    of the UI already treated it as ignored."""
+    db_conn.execute("INSERT INTO groups (name, ignored, created_at) VALUES ('TVs', 1, datetime('now'))")
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, is_authenticated, ignored, group_id, created_at) "
+        "VALUES ('aa:bb:cc:dd:ee:51', 0, 0, ?, '2026-08-31T00:00:00Z')",
+        (group_id,),
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+
+    assert b"Devices awaiting login" not in resp.data
+    assert b"Awaiting login" not in resp.data
+
+
 def test_bypass_login_sets_the_flag_without_touching_other_fields(client, db_conn):
     device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:46")
     db_conn.execute("UPDATE devices SET label = 'Roku' WHERE id = ?", (device_id,))
@@ -2976,6 +3000,113 @@ def test_bypass_login_sets_the_flag_without_touching_other_fields(client, db_con
     assert row["bypass_login"] == 1
     assert row["label"] == "Roku", "must not clobber fields the pending-card form never submitted"
     assert row["is_authenticated"] == 0, "bypass exempts the device, it doesn't authenticate it"
+
+
+def test_dismiss_pending_hides_the_device_from_the_card(client, db_conn):
+    """2026-09-08, project owner's explicit request: "I need a 'dismiss'
+    option ... I don't want it to do anything but clear the device
+    showing as awaiting logon.\""""
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:52")
+
+    resp = client.post("/devices/dismiss_pending", data={"device_id": device_id}, headers=_auth_header())
+    assert resp.status_code == 302
+
+    resp = client.get("/devices", headers=_auth_header())
+    # The card itself (heading + table) only renders at all when
+    # pending_devices is non-empty -- its absence here is the proof the
+    # dismissed device dropped out of that query. It still legitimately
+    # appears in the separate main-roster table below (see
+    # test_dismiss_pending_does_not_hide_the_device_from_the_main_roster),
+    # so asserting the MAC is absent from the whole page would be wrong.
+    assert b"Devices awaiting login" not in resp.data
+
+
+def test_dismiss_pending_does_not_touch_any_real_policy_field(client, db_conn):
+    """The whole point: purely a display suppression, never a policy
+    change -- unlike Bypass, which sets bypass_login=1."""
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:53")
+
+    client.post("/devices/dismiss_pending", data={"device_id": device_id}, headers=_auth_header())
+
+    row = db_conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["ignored"] == 0
+    assert row["bypass_login"] == 0
+    assert row["is_authenticated"] == 0
+    assert row["pending_dismissed_at"] is not None
+
+
+def test_dismiss_pending_reappears_after_a_new_network_sighting(client, db_conn):
+    """Self-expiring, not permanent: a fresh device_bindings row dated
+    AFTER the dismissal means the device is genuinely active again, so
+    it must come back on its own -- no separate "un-dismiss" action
+    exists or is needed."""
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:54")
+    db_conn.execute(
+        "UPDATE devices SET pending_dismissed_at = '2026-09-08T10:00:00Z' WHERE id = ?", (device_id,)
+    )
+    db_conn.execute(
+        "INSERT INTO device_bindings (device_id, mac_address, ipv4_address, first_seen_at, last_seen_at, "
+        "source, active) VALUES (?, 'aa:bb:cc:dd:ee:54', '192.168.1.80', "
+        "'2026-09-08T11:00:00Z', '2026-09-08T11:00:00Z', 'rtnetlink', 1)",
+        (device_id,),
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+    assert b"Devices awaiting login" in resp.data
+    assert b"aa:bb:cc:dd:ee:54" in resp.data
+
+
+def test_dismiss_pending_reappears_after_a_new_login_attempt(client, db_conn):
+    """Same self-expiring rule, via the other real "it's active again"
+    signal: a fresh captive-portal login attempt dated after the
+    dismissal, even with no new device_bindings row."""
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:55")
+    db_conn.execute(
+        "UPDATE devices SET pending_dismissed_at = '2026-09-08T10:00:00Z' WHERE id = ?", (device_id,)
+    )
+    db_conn.execute(
+        "INSERT INTO system_events (ts, source, severity, message, detail) VALUES "
+        "('2026-09-08T11:00:00Z', 'captive_portal_login', 'error', 'x', 'aa:bb:cc:dd:ee:55')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+    assert b"Devices awaiting login" in resp.data
+    assert b"aa:bb:cc:dd:ee:55" in resp.data
+
+
+def test_dismiss_pending_stays_hidden_when_only_stale_activity_predates_it(client, db_conn):
+    """The inverse of the two tests above: a device_bindings row or
+    login attempt from BEFORE the dismissal must not un-hide it -- only
+    activity strictly newer than pending_dismissed_at counts."""
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:56")
+    db_conn.execute(
+        "INSERT INTO device_bindings (device_id, mac_address, ipv4_address, first_seen_at, last_seen_at, "
+        "source, active) VALUES (?, 'aa:bb:cc:dd:ee:56', '192.168.1.81', "
+        "'2026-09-08T09:00:00Z', '2026-09-08T09:00:00Z', 'rtnetlink', 1)",
+        (device_id,),
+    )
+    db_conn.execute(
+        "UPDATE devices SET pending_dismissed_at = '2026-09-08T10:00:00Z' WHERE id = ?", (device_id,)
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+    assert b"Devices awaiting login" not in resp.data
+
+
+def test_dismiss_pending_does_not_hide_the_device_from_the_main_roster(client, db_conn):
+    """Dismissal only declutters the summary card -- the main device
+    table (a different query, no dismissal awareness at all) must keep
+    showing the device and its real "Awaiting login" status."""
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:57")
+    client.post("/devices/dismiss_pending", data={"device_id": device_id}, headers=_auth_header())
+
+    resp = client.get("/devices", headers=_auth_header())
+    text = resp.data.decode()
+    assert "aa:bb:cc:dd:ee:57" in text
+    assert "Awaiting login" in text
 
 
 def test_bypassed_device_no_longer_appears_in_the_pending_card(client, db_conn):

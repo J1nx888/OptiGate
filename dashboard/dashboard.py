@@ -2862,6 +2862,10 @@ DEVICES_BODY = """
         <input type="hidden" name="device_id" value="{{ d.id }}">
         <button class="btn small" type="submit" title="Let this device online without ever needing to log in">Bypass</button>
       </form>
+      <form class="inline" method="post" action="{{ url_for('dismiss_pending_device') }}">
+        <input type="hidden" name="device_id" value="{{ d.id }}">
+        <button class="btn small" type="submit" title="Just hide this from the list until it's active again -- doesn't change anything about the device itself">Dismiss</button>
+      </form>
     </td>
   </tr>
   {% endfor %}
@@ -4856,7 +4860,16 @@ def _failed_login_attempts(conn, mac_address: str) -> dict | None:
 
 _DEVICE_LIST_SELECT = (
     "SELECT d.*, u.display_name, g.name AS group_name, COALESCE(g.ignored, 0) AS group_ignored, "
-    "(d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending, "
+    # Fixed 2026-09-08 (real bug found live, RoadMap.md's dated entry):
+    # this used to only check d.ignored, not the device's GROUP being in
+    # Ignore mode -- a device made effectively-ignored only via group
+    # membership (see the `effective_ignored` Jinja variable elsewhere on
+    # this page, which already accounts for both) still read `pending`
+    # here, so it kept showing up in "Devices awaiting login" and kept
+    # its "Awaiting login" badge in the main table even though it was,
+    # in every other respect, already treated as ignored.
+    "(d.ignored = 0 AND COALESCE(g.ignored, 0) = 0 "
+    " AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending, "
     # devices.last_seen_at is never actually populated by anything
     # (see common/db.py's own schema comment) -- device_bindings is
     # where a real network-observed last-seen/current-IP/source
@@ -4890,7 +4903,23 @@ def devices():
     partial) paginated list the way it used to be."""
     conn = get_db()
     pending_devices = conn.execute(
-        _DEVICE_LIST_SELECT + "WHERE d.ignored = 0 AND d.bypass_login = 0 AND d.is_authenticated = 0 "
+        _DEVICE_LIST_SELECT + "WHERE d.ignored = 0 AND COALESCE(g.ignored, 0) = 0 "
+        "AND d.bypass_login = 0 AND d.is_authenticated = 0 "
+        # "Dismiss" (2026-09-08, project owner's explicit request):
+        # pending_dismissed_at hides a device from this card ONLY until
+        # something genuinely newer happens to it -- a fresh network
+        # sighting, or a new captive-portal login attempt -- at which
+        # point it reappears on its own. Nothing ever resets the column
+        # back to NULL; this comparison is what makes a dismissal
+        # self-expiring instead of permanent. Deliberately does NOT
+        # affect the main roster's own `pending`/"Awaiting login" badge
+        # above -- dismissal only declutters this summary card, it
+        # doesn't change what the device's real state actually is.
+        "AND (d.pending_dismissed_at IS NULL "
+        "     OR EXISTS (SELECT 1 FROM device_bindings b WHERE b.mac_address = d.mac_address "
+        "                AND b.last_seen_at > d.pending_dismissed_at) "
+        "     OR EXISTS (SELECT 1 FROM system_events e WHERE e.source = 'captive_portal_login' "
+        "                AND e.detail = d.mac_address AND e.ts > d.pending_dismissed_at)) "
         "ORDER BY d.created_at DESC"
     ).fetchall()
     # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
@@ -5109,6 +5138,28 @@ def bypass_login_device():
     )
     conn.commit()
     return flash_redirect("devices", "Device will no longer be asked to log in.")
+
+
+@app.route("/devices/dismiss_pending", methods=["POST"])
+@require_admin
+def dismiss_pending_device():
+    """"Dismiss" on the "Devices awaiting login" card (2026-09-08,
+    RoadMap.md's dated entry, project owner's explicit request):
+    "I don't want it to do anything but clear the device showing as
+    awaiting logon until it attempts to logon again." Deliberately NOT
+    the same as Bypass above -- this is purely a display suppression
+    (see the pending_devices query's own comment in devices() for
+    exactly how the self-expiring comparison works), never touches
+    ignored/bypass_login/is_authenticated, and grants no access at all.
+    Harmless to call on a device that isn't actually pending (e.g. a
+    stale request replayed after the device already logged in) --
+    pending_dismissed_at is only ever read back for devices the pending
+    filter already excludes for every other reason too."""
+    device_id = request.form.get("device_id", "")
+    conn = get_db()
+    conn.execute("UPDATE devices SET pending_dismissed_at = ? WHERE id = ?", (db.now_iso(), device_id))
+    conn.commit()
+    return flash_redirect("devices", "Dismissed -- it'll reappear here on its own if it's active again.")
 
 
 # G6: ad-hoc "pause the internet" -- Bark Home has one-tap pause per
@@ -6911,15 +6962,22 @@ SETTINGS_BODY = """
   Currently <code>{{ optigate_hostname_prefix }}.home</code> --
   {% if optigate_rewrite_status.startswith('live') %}<span class="badge allowed">{{ optigate_rewrite_status }}</span>
   {% else %}<span class="badge blocked">{{ optigate_rewrite_status }}</span>{% endif %}
+  <br>Visit it plain, with <strong>no port</strong> --
+  <code>http://{{ optigate_hostname_prefix }}.home</code>, not
+  <code>{{ optigate_hostname_prefix }}.home:8787</code> or any other port
+  (that reaches this admin login instead, which is a real gap found live
+  2026-09-08: nothing here previously said this, and the DASHBOARD_URL
+  hint just below shows a port right next to this hostname, an easy mix-up).
 </p>
 <p class="hint">
   <strong>Requires <code>DASHBOARD_URL</code> set in <code>.env</code></strong> (this
-  machine's own address, e.g. <code>http://192.168.1.50:8787</code>) so
-  AdGuard knows which IP to resolve this hostname to -- same requirement
-  the "Blocked-site experience" card's friendly page above already has.
-  Pushed to AdGuard immediately when you click Save (and again
-  automatically whenever this dashboard container starts) -- no need to
-  wait on anything else.
+  machine's own address, e.g. <code>http://192.168.1.50:8787</code> --
+  <em>that port is for DASHBOARD_URL only, never for visiting the
+  troubleshooting address above</em>) so AdGuard knows which IP to
+  resolve this hostname to -- same requirement the "Blocked-site
+  experience" card's friendly page above already has. Pushed to AdGuard
+  immediately when you click Save (and again automatically whenever
+  this dashboard container starts) -- no need to wait on anything else.
 </p>
 </div>
 """

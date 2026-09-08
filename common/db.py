@@ -155,25 +155,33 @@ CREATE TABLE IF NOT EXISTS group_domains (
 --       because none of them have been seen yet.
 --   quarantined_at: Milestone 8's operator-triggered isolation state
 --       (the QUARANTINE policy class -- see common/policy_class.py).
---       NULL means not quarantined (the default for every device).
---       Nothing sets this yet -- no dashboard control exists to
---       trigger it -- this column exists so the policy-classification
---       logic and the nftables quarantine_v4 set have something real
---       to read once that control is built.
+--       NULL means not quarantined (the default for every device). Set
+--       by dashboard.py's pause/resume routes (_set_quarantine()) --
+--       this comment used to say "nothing sets this yet," which stopped
+--       being true once those routes shipped; corrected 2026-09-08.
+--   pending_dismissed_at: the "Dismiss" action on the "Devices awaiting
+--       login" card (dashboard.py's dismiss_pending_device()) -- purely
+--       a display suppression, not a policy change. NULL means never
+--       dismissed. A non-NULL value stops hiding the device again on
+--       its own once something newer happens (a fresh device_bindings
+--       row or captive-portal login attempt) -- devices()'s
+--       pending_devices query compares timestamps to decide this
+--       live, nothing ever writes this column back to NULL.
 CREATE TABLE IF NOT EXISTS devices (
-    id               INTEGER PRIMARY KEY,
-    mac_address      TEXT UNIQUE NOT NULL,
-    label            TEXT,
-    user_id          INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    group_id         INTEGER REFERENCES groups(id) ON DELETE SET NULL,
-    ignored          INTEGER NOT NULL DEFAULT 0,
-    last_known_ip    TEXT,
-    last_seen_at     TEXT,
-    bump_enabled     INTEGER NOT NULL DEFAULT 0,
-    bypass_login     INTEGER NOT NULL DEFAULT 0,
-    is_authenticated INTEGER NOT NULL DEFAULT 1,
-    quarantined_at   TEXT,
-    created_at       TEXT NOT NULL,
+    id                    INTEGER PRIMARY KEY,
+    mac_address           TEXT UNIQUE NOT NULL,
+    label                 TEXT,
+    user_id               INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    group_id              INTEGER REFERENCES groups(id) ON DELETE SET NULL,
+    ignored               INTEGER NOT NULL DEFAULT 0,
+    last_known_ip         TEXT,
+    last_seen_at          TEXT,
+    bump_enabled          INTEGER NOT NULL DEFAULT 0,
+    bypass_login          INTEGER NOT NULL DEFAULT 0,
+    is_authenticated      INTEGER NOT NULL DEFAULT 1,
+    quarantined_at        TEXT,
+    pending_dismissed_at  TEXT,
+    created_at            TEXT NOT NULL,
     CHECK (user_id IS NULL OR group_id IS NULL)
 );
 
@@ -589,6 +597,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE devices ADD COLUMN last_seen_at TEXT")
     if "quarantined_at" not in device_columns:
         conn.execute("ALTER TABLE devices ADD COLUMN quarantined_at TEXT")
+    if "pending_dismissed_at" not in device_columns:
+        # 2026-09-08, project owner's explicit request: a "Dismiss" action
+        # for the "Devices awaiting login" card that does nothing except
+        # hide that one device from the card until it's genuinely active
+        # again (a new network binding or captive-portal login attempt) --
+        # deliberately not the same as Bypass/ignore, which are real policy
+        # changes. See dashboard.py's dismiss_pending_device() and the
+        # pending_devices query in devices() for how this is read back.
+        conn.execute("ALTER TABLE devices ADD COLUMN pending_dismissed_at TEXT")
 
     # interception_runtime is itself a new (Milestone 4) table, so an
     # existing pre-Milestone-4 database won't have it at all yet --

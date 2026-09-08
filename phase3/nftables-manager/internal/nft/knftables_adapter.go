@@ -143,6 +143,62 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 	return m.ensureDockerUserException(ctx)
 }
 
+// Teardown removes the "optigate" table entirely (the Go equivalent of
+// `nft delete table inet optigate`) and the one rule this project adds
+// outside it (see ensureDockerUserException). Real fix for the gap
+// found live 2026-09-08 shutting down a soak-test window: SIGTERM
+// (cmd/pp-nftables-manager/main.go) used to just log and return,
+// leaving every baseline redirect rule active in the kernel with the
+// managing process gone -- forcing a manual `sudo nft delete table
+// inet optigate` on the host to actually return the box to normal
+// pass-through. Tolerates the table already being gone (knftables'
+// IsNotFound), so this is safe to call even if EnsureBaseline was
+// never reached (e.g. this process crashed during its own startup) --
+// same "call it unconditionally, let idempotency do the work" style as
+// EnsureBaseline itself.
+func (m *Manager) Teardown(ctx context.Context) error {
+	tx := m.nft.NewTransaction()
+	tx.Delete(&knftables.Table{})
+	if err := m.nft.Run(ctx, tx); err != nil && !knftables.IsNotFound(err) {
+		return fmt.Errorf("delete optigate table: %w", err)
+	}
+
+	return m.removeDockerUserException(ctx)
+}
+
+// removeDockerUserException undoes ensureDockerUserException's own
+// insert, by the same comment-match that function already uses to
+// avoid duplicating it on every EnsureBaseline call -- see that
+// function's doc comment for the full reasoning. Never touches
+// DOCKER-USER itself (deleting or flushing the whole chain isn't this
+// project's business, only removing the one rule it added).
+func (m *Manager) removeDockerUserException(ctx context.Context) error {
+	if m.dockerUserNft == nil {
+		// Same "nothing to do" case EnsureBaseline's own
+		// ensureDockerUserException documents for a Manager built
+		// directly rather than via New().
+		return nil
+	}
+	existing, err := m.dockerUserNft.ListRules(ctx, "DOCKER-USER")
+	if err != nil {
+		log.Printf("DOCKER-USER chain not found (%v) -- nothing to remove", err)
+		return nil
+	}
+
+	tx := m.dockerUserNft.NewTransaction()
+	found := false
+	for _, rule := range existing {
+		if rule.Comment != nil && *rule.Comment == dockerUserComment {
+			tx.Delete(&knftables.Rule{Chain: "DOCKER-USER", Handle: rule.Handle})
+			found = true
+		}
+	}
+	if !found {
+		return nil
+	}
+	return m.dockerUserNft.Run(ctx, tx)
+}
+
 // dockerUserComment tags the one rule this project ever adds outside
 // its own table, so ensureDockerUserException can find and replace
 // exactly that rule (and nothing else a human or another tool put in

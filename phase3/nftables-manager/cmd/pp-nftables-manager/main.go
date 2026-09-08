@@ -5,11 +5,14 @@
 // controller/policy_state.py (Python) computes and writes into the
 // shared SQLite database's interception_runtime table.
 //
-// NOT a real deployable yet: there's no systemd unit or Dockerfile for
-// this component, and EnsureBaseline isn't yet safe to call against an
-// already-populated table (see internal/nft's own note) -- a restart
-// of this process against a live table would currently duplicate the
-// baseline rules. See RoadMap.md's Milestone 5-7 entries.
+// Deployed live as of Milestone 9/10 (see phase3/nftables-manager's own
+// Dockerfile and docker-compose.yml's nftables-manager service) --
+// the doc comment above used to say this was "not a real deployable
+// yet"; corrected 2026-09-08 while fixing the SIGTERM-teardown gap
+// below, since that claim had been stale for a while and would mislead
+// anyone reading this file fresh. EnsureBaseline is safe to call
+// against an already-populated table (idempotent, see its own doc
+// comment).
 package main
 
 import (
@@ -85,7 +88,22 @@ func main() {
 	for {
 		select {
 		case <-sig:
-			log.Print("shutting down")
+			log.Print("shutting down: removing the optigate table and its rules")
+			// Fixed 2026-09-08: this used to just log and return, leaving
+			// every baseline redirect rule (DNS/HTTP/HTTPS DNAT, the
+			// DOCKER-USER exception) active in the kernel with this
+			// process gone -- found live shutting down a soak-test
+			// window, where it forced a manual `sudo nft delete table
+			// inet optigate` on the host to actually return the box to
+			// normal pass-through. Teardown is idempotent/best-effort
+			// the same way EnsureBaseline is -- logged, not fatal, since
+			// the process is exiting either way and a half-torn-down
+			// table is still strictly better than a fully-intact one.
+			if err := mgr.Teardown(ctx); err != nil {
+				log.Printf("teardown failed (a future EnsureBaseline call, e.g. this process "+
+					"restarting, will reconverge the table itself, but a manual `sudo nft delete "+
+					"table inet optigate` may be needed until then): %v", err)
+			}
 			return
 		case <-ticker.C:
 			if err := reconcileOnce(ctx, mgr, *dbPath); err != nil {

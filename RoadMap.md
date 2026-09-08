@@ -6257,28 +6257,53 @@ completes -- these are lower-stakes dashboard/UX items, not anything
 that should compete for attention with an active household network
 test.
 
-1. **A "Dismiss" action for the "Devices awaiting login" card.** Should
-   do nothing except clear that one device from the card until it
-   attempts to log in again (i.e. purely a display/dismissal action,
-   not a policy change of any kind -- explicitly NOT the same as
-   Bypass, which grants real access). Needs a way to distinguish
-   "dismissed, don't show again until next login attempt" from every
-   device that's still genuinely pending -- likely a new column or a
-   dismissed-until timestamp on `devices`, re-shown the next time
-   `record_binding()`/login-attempt activity touches that MAC.
-2. **Ignoring a device, or putting it in Bypass, should automatically
-   clear it from "awaiting login."** Related to #1 -- once a device is
-   `ignored` (or its group is), `classify_device()` already puts it in
-   BYPASS, which by definition means it's outside the whole login-gate
-   system entirely, so it has no business still appearing on a card
-   about pending logins. Currently the "awaiting login" card's own
-   query (`devices()` route's pending-devices query, see the
-   2026-09-07 dated entry on that card's own history) filters on
-   `ignored = 0 AND bypass_login = 0 AND is_authenticated = 0` already
-   -- worth confirming live whether this is a real bug (the filter not
-   actually excluding a just-ignored device promptly) or already
-   correct and just perceived as stale due to a caching/refresh
-   timing issue, before assuming which.
+1. **DONE (implemented + tested 2026-09-08, while the project owner was
+   away): a "Dismiss" action for the "Devices awaiting login" card.**
+   New `devices.pending_dismissed_at` column (migration in
+   `common/db.py`), a new `POST /devices/dismiss_pending` route
+   (`dashboard.py`'s `dismiss_pending_device()`) that only ever writes
+   that one timestamp column -- never `ignored`/`bypass_login`/
+   `is_authenticated`, so it genuinely grants no access, matching the
+   project owner's own framing exactly. Self-expiring by design, no
+   separate "un-dismiss" control needed: the `pending_devices` query
+   re-shows a dismissed device on its own once something newer than the
+   dismissal happens to it -- a fresh `device_bindings` row (device
+   seen on the network again) or a new `captive_portal_login`
+   `system_events` row (a real login attempt) -- compared by timestamp,
+   nothing ever resets the column back to NULL. Deliberately does NOT
+   affect the main device roster's own "Awaiting login" badge --
+   dismissal only declutters this one summary card, the device's real
+   state is unchanged and still shown accurately elsewhere. 6 new tests
+   in `tests/test_dashboard.py` (hides from the card; touches no policy
+   field; reappears after a newer binding; reappears after a newer
+   login attempt; stays hidden when only STALE prior activity exists;
+   main roster is unaffected). Full local suite green (1045 passed,
+   up from 1038) before this was committed. Deployable whenever the
+   project owner rebuilds `dashboard` -- not yet deployed to production
+   as of this note, since redeploying without anyone able to verify the
+   result live felt like the more cautious call; flagged for their
+   review.
+2. **DONE (fixed + tested 2026-09-08, while the project owner was
+   away): ignoring a device, or putting it in Bypass, now correctly
+   clears it from "awaiting login."** Investigated live: the
+   PER-DEVICE case (`d.ignored=1` or `d.bypass_login=1` directly) was
+   already working correctly and promptly -- not a bug, confirmed by
+   an existing passing test. The real, confirmed bug was narrower and
+   different from what this note originally guessed: a device made
+   effectively-ignored only via its GROUP being in Ignore mode
+   (`groups.ignored=1`, `devices.group_id` pointing at it,
+   `devices.ignored` itself still 0) was NOT excluded -- the `pending`
+   SQL column in `dashboard.py`'s `_DEVICE_LIST_SELECT` only ever
+   checked `d.ignored`, never `g.ignored`, even though the same page's
+   own `effective_ignored` Jinja logic (used for the Status column's
+   "Ignored" badge) already correctly accounts for both. Fixed by
+   adding `COALESCE(g.ignored, 0) = 0` to that one SQL expression, which
+   fixes both the "Devices awaiting login" card's query AND the main
+   roster's own "Awaiting login" badge/Bypass-button visibility in one
+   place. New regression test:
+   `test_devices_page_does_not_treat_a_group_ignored_device_as_pending`.
+   Same deploy status as #1 above (fixed, tested, not yet pushed to the
+   live box).
 3. **UI consolidation: one Save button per settings-shaped page, not
    several.** Named examples: the Schedules page has two separate save
    actions; the Settings page has an individual save button per
@@ -6290,20 +6315,37 @@ test.
    how per-field validation/error messages work once fields share one
    submit) -- needs its own design conversation before implementation,
    not a quick mechanical merge.
-4. **`optigate.home` shows only a username/password prompt, not the
-   device-info troubleshooting page it's supposed to.** Confirmed the
-   project owner is remembering correctly, not misremembering --
-   `dashboard/block_page_server.py`'s `_respond_device_info()` exists
-   specifically for this (Label/User-or-Group/IP/MAC), gated on the
-   request's `Host` header matching `db.optigate_hostname(conn)`
-   exactly (case-insensitive). Something is preventing that match from
-   firing in practice -- worth checking live whether the browser is
-   actually hitting port 80 (`block_page_server.py`'s own listener) at
-   all, versus e.g. an HTTPS auto-upgrade landing nowhere useful (this
-   feature has no HTTPS/443 equivalent, deliberately), or the request
-   somehow reaching the main dashboard (port 8787, `require_admin`
-   everywhere) instead -- that class of confusion would produce exactly
-   "a username/password prompt" instead of the info page.
+4. **RESOLVED (investigated + fixed 2026-09-08, while the project owner
+   was away): `optigate.home` shows only a username/password prompt,
+   not the device-info troubleshooting page.** Confirmed the project
+   owner was remembering correctly -- the feature exists and is coded
+   correctly. Tested live against the actual production box (safe --
+   `dashboard` isn't in the live traffic path right now):
+   `curl -H 'Host: optigate.home' http://127.0.0.1:80/` on the real
+   Beelink correctly returned the device-info page, 200 OK, no auth
+   prompt. So `block_page_server.py`'s port-80 listener and its
+   `_respond_device_info()` match were never broken. The real
+   explanation: `DASHBOARD_URL` is documented (and, per its own .env
+   comment, meant) to be set WITH a port --
+   `http://192.168.1.250:8787` in this deployment, `:8787` being the
+   real Flask admin dashboard's own port (`require_admin` -> HTTP Basic
+   Auth -> exactly the "username/password prompt" symptom). The
+   Settings page's "Memorable troubleshooting address" card showed that
+   same port-included example directly underneath the bare
+   `optigate.home` hostname, with nothing telling the reader those are
+   two different destinations at two different ports -- an easy mix-up
+   (browser history/autocomplete offering `optigate.home:8787` after
+   typing the hostname would produce exactly this symptom, landing on
+   the real admin login instead of the plain-port-80 info page). Fixed
+   by adding an explicit "visit it plain, with no port" note right next
+   to the "Currently `{prefix}.home`" status line, and clarifying the
+   DASHBOARD_URL example's port is for that setting only, never for
+   visiting the troubleshooting address (`dashboard/dashboard.py`'s
+   `SETTINGS_BODY` template). No code/routing bug existed; this was a
+   documentation/UX gap, not a functional one -- worth the project
+   owner spot-checking `http://optigate.home` (bare, no port) themselves
+   once back, to confirm it now reads clearly and behaves as expected
+   on their own devices, but this is otherwise considered closed.
 5. **The Report page shows a domain was blocked but not *why*.**
    Concrete example given: `speedtest.net` blocked on Matthew's device,
    no indication whether that was a category match, a plain
@@ -6439,29 +6481,34 @@ test.
     (compare ARP-worker's own view of "what's on this LAN right now"
     against `devices`) once investigation resumes, not just fixing this
     one MAC.
-12. **`nftables-manager` has no graceful teardown on stop/SIGTERM,
-    unlike `arp-worker`.** Found while shutting down this soak-test
-    window (see "Soak test stopped" below): `arp-worker`'s
-    `main.go` SIGTERM handler correctly calls `w.Shutdown()`, which
-    sends corrective ARPs restoring the real gateway MAC to every
-    poisoned device before the process exits -- confirmed live via its
-    own log line ("shutting down: sending corrective ARPs before
-    exit"). `nftables-manager`'s SIGTERM handler
-    (`cmd/pp-nftables-manager/main.go`) just logs "shutting down" and
-    returns -- it never removes the `optigate` nftables table or its
-    baseline redirect rules, so `docker compose stop nftables-manager`
-    leaves the kernel still redirecting DNS/HTTP/HTTPS traffic through
-    Squid/AdGuard's intercept ports indefinitely, with the managing
-    process gone. This forced a manual `sudo nft delete table inet
-    optigate` on the host to actually return the box to normal
-    pass-through behavior this time. Real fix, once the test window is
-    over: give `nft.Manager` a `Teardown(ctx)` method (an `nft delete
-    table inet optigate`-equivalent, or a Batch removing the baseline
-    rules it created) and call it from the same SIGTERM handler that
-    already exists in `main.go`, so stopping the container is
-    sufficient on its own -- no separate manual step required, and no
-    silent stale-redirect state left behind for the next person to
-    discover the hard way.
+12. **DONE (implemented + tested 2026-09-08, while the project owner
+    was away): `nftables-manager` now has a graceful teardown on
+    stop/SIGTERM, matching `arp-worker`.** New `(*nft.Manager)
+    Teardown(ctx)` method (`internal/nft/knftables_adapter.go`) --
+    deletes the whole `optigate` table in one transaction (the Go
+    equivalent of `nft delete table inet optigate`, tolerant of the
+    table already being gone via `knftables.IsNotFound`) and removes
+    the one rule this project injects into Docker's own `DOCKER-USER`
+    chain (`removeDockerUserException`, undoing
+    `ensureDockerUserException` by the same comment-match it already
+    uses to avoid duplicating that rule). Wired into
+    `cmd/pp-nftables-manager/main.go`'s existing SIGTERM handler --
+    logged, not fatal, since the process exits either way regardless of
+    whether teardown fully succeeds. Also corrected a stale top-of-file
+    doc comment in the same file that still said "NOT a real deployable
+    yet," left over from before this component was actually deployed.
+    2 new tests in `internal/nft/fault_test.go`
+    (`TestTeardown_RemovesTheTableEnsureBaselineCreated`,
+    `TestTeardown_ToleratesATableThatWasNeverCreated`), verified
+    against the real edited source (not stale Beelink copies -- scp'd
+    the actual files over first, learned that distinction the hard way
+    earlier this same investigation) via the same
+    `golang:1.25-bookworm` Docker-based build/test workflow used for
+    the busy_timeout fix earlier in this doc. Full package suite green.
+    Not yet deployed live -- the interception profile is off right now
+    (Bark Home is back on), so there's nothing running to redeploy
+    against; this will simply take effect the next time `nftables-manager`
+    is rebuilt and the interception profile is started again.
 
 13. **Reference: https://github.com/v2fly/domain-list-community/tree/master
     -- a large, actively-maintained, per-service/per-category set of

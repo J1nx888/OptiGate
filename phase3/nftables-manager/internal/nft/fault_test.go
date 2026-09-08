@@ -225,6 +225,50 @@ func TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls(t *testing.T) {
 	}
 }
 
+// TestTeardown_RemovesTheTableEnsureBaselineCreated is a regression
+// test for the real gap found live 2026-09-08 shutting down a
+// soak-test window: SIGTERM used to just log and return, leaving the
+// optigate table (and every baseline redirect rule in it) active in
+// the kernel with the managing process gone. Confirms Teardown
+// actually removes what EnsureBaseline created, at the same
+// Fake-interface level TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls
+// already verifies creation at.
+func TestTeardown_RemovesTheTableEnsureBaselineCreated(t *testing.T) {
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
+	m := &Manager{nft: fake}
+	ctx := context.Background()
+
+	if err := m.EnsureBaseline(ctx); err != nil {
+		t.Fatalf("EnsureBaseline: %v", err)
+	}
+	if _, err := fake.ListRules(ctx, "prerouting"); err != nil {
+		t.Fatalf("ListRules after EnsureBaseline should succeed (table should exist): %v", err)
+	}
+
+	if err := m.Teardown(ctx); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	if _, err := fake.ListRules(ctx, "prerouting"); err == nil {
+		t.Fatal("expected ListRules to fail after Teardown (table should be gone), but it succeeded")
+	} else if !knftables.IsNotFound(err) {
+		t.Fatalf("expected a not-found error after Teardown, got: %v", err)
+	}
+}
+
+// TestTeardown_ToleratesATableThatWasNeverCreated confirms Teardown is
+// safe to call unconditionally -- e.g. this process exiting via SIGTERM
+// before EnsureBaseline ever ran -- rather than requiring callers to
+// track whether the baseline actually got established first.
+func TestTeardown_ToleratesATableThatWasNeverCreated(t *testing.T) {
+	fake := knftables.NewFake(knftables.InetFamily, "optigate")
+	m := &Manager{nft: fake}
+
+	if err := m.Teardown(context.Background()); err != nil {
+		t.Fatalf("Teardown on a never-created table should be a no-op, not an error: %v", err)
+	}
+}
+
 // TestBaselineRules_RedirectsDNSOverTLS is a regression test for a real
 // DNS-tier bypass found by code review (2026-09-02): before this fix,
 // baselineRules only ever touched port 53, so a device with
