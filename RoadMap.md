@@ -6248,7 +6248,7 @@ still watching for the "internet super slow" report specifically,
 which has no confirmed root cause yet and needs the project owner's
 own real-world usage to actually confirm one way or the other.
 
-### Eleven more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
+### Twelve more follow-up items, deliberately deferred until after this soak-test window closes (2026-09-08)
 
 Project owner asked to log these now (so they survive regardless of
 how long this window runs or any context/session boundary in between)
@@ -6439,6 +6439,50 @@ test.
     (compare ARP-worker's own view of "what's on this LAN right now"
     against `devices`) once investigation resumes, not just fixing this
     one MAC.
+12. **`nftables-manager` has no graceful teardown on stop/SIGTERM,
+    unlike `arp-worker`.** Found while shutting down this soak-test
+    window (see "Soak test stopped" below): `arp-worker`'s
+    `main.go` SIGTERM handler correctly calls `w.Shutdown()`, which
+    sends corrective ARPs restoring the real gateway MAC to every
+    poisoned device before the process exits -- confirmed live via its
+    own log line ("shutting down: sending corrective ARPs before
+    exit"). `nftables-manager`'s SIGTERM handler
+    (`cmd/pp-nftables-manager/main.go`) just logs "shutting down" and
+    returns -- it never removes the `optigate` nftables table or its
+    baseline redirect rules, so `docker compose stop nftables-manager`
+    leaves the kernel still redirecting DNS/HTTP/HTTPS traffic through
+    Squid/AdGuard's intercept ports indefinitely, with the managing
+    process gone. This forced a manual `sudo nft delete table inet
+    optigate` on the host to actually return the box to normal
+    pass-through behavior this time. Real fix, once the test window is
+    over: give `nft.Manager` a `Teardown(ctx)` method (an `nft delete
+    table inet optigate`-equivalent, or a Batch removing the baseline
+    rules it created) and call it from the same SIGTERM handler that
+    already exists in `main.go`, so stopping the container is
+    sufficient on its own -- no separate manual step required, and no
+    silent stale-redirect state left behind for the next person to
+    discover the hard way.
+
+### Soak test stopped (2026-09-08)
+
+Project owner said they were done sending feedback for this window and
+asked to shut the soak test down so Bark Home could be turned back on
+and the 12 items above (plus whatever else the test surfaced) could be
+digested properly. Sequence used, correctly this time (see the
+`--profile X down` lesson earlier in this doc): `docker compose stop
+arp-worker nftables-manager controller` -- stopping only the three
+interception services by name, leaving `proxy`/`adguard`/`dashboard`
+running untouched (confirmed via `docker ps` immediately after).
+`arp-worker`'s own graceful shutdown fired correctly (see item 12 for
+the log line). `nftables-manager` left the `optigate` table behind
+(see item 12) -- removed manually with the project owner running `sudo
+nft delete table inet optigate` on the host directly (this needed real
+`sudo`, not just docker-group access -- confirmed by the project owner
+themselves rather than worked around). Verified gone via `sudo nft
+list table inet optigate` returning "Error: No such file or
+directory". Box confirmed left in a clean, fully-passthrough state
+(no ARP spoofing, no nftables redirects) before handing back to Bark
+Home.
 
 ---
 
