@@ -3136,6 +3136,68 @@ def test_user_detail_page_shows_pause_card_even_with_no_devices(client, db_conn)
     assert b'action="/users/pause"' not in resp.data  # no pause form when there's nothing to pause
 
 
+# ============================================================
+# User-detail "Devices" card (2026-09-08) -- real live-testing feedback:
+# no way to see which devices are assigned to a user on this page at
+# all, had to search for the username on the Devices page instead.
+# Mirrors group_detail()'s own pre-existing "Devices in this group" card.
+# ============================================================
+
+def test_user_detail_shows_its_assigned_devices(client, db_conn):
+    client.post("/users/add", data={"username": "kid5", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid5'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, label, user_id, created_at) "
+        "VALUES ('aa:bb:cc:dd:ee:72', 'Kid5 Tablet', ?, datetime('now'))",
+        (user_id,),
+    )
+    db_conn.commit()
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Devices (1)" in body
+    assert "aa:bb:cc:dd:ee:72" in body
+    assert "Kid5 Tablet" in body
+    assert "Active" in body
+
+
+def test_user_detail_devices_card_shows_no_devices_message_when_empty(client, db_conn):
+    client.post("/users/add", data={"username": "kid6", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid6'").fetchone()["id"]
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Devices (0)" in resp.data
+    assert b"No devices assigned." in resp.data
+
+
+def test_user_detail_devices_card_shows_paused_and_ignored_status(client, db_conn):
+    client.post("/users/add", data={"username": "kid7", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid7'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, user_id, quarantined_at, created_at) "
+        "VALUES ('aa:bb:cc:dd:ee:73', ?, datetime('now'), datetime('now'))",
+        (user_id,),
+    )
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, user_id, ignored, created_at) "
+        "VALUES ('aa:bb:cc:dd:ee:74', ?, 1, datetime('now'))",
+        (user_id,),
+    )
+    db_conn.commit()
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Devices (2)" in body
+    assert "Paused" in body
+    assert "Ignored" in body
+
+
 def test_user_detail_shows_currently_active_schedule(client, db_conn):
     client.post("/users/add", data={"username": "kid5", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid5'").fetchone()["id"]

@@ -1385,6 +1385,29 @@ USER_DETAIL_BODY = """
 </div>
 
 <div class="card">
+<h2>Devices ({{ assigned_devices|length }})</h2>
+<div class="table-scroll">
+<table>
+  <tr><th>MAC address</th><th>Label</th><th>Status</th></tr>
+  {% for d in assigned_devices %}
+  <tr>
+    <td><code>{{ d.mac_address }}</code></td>
+    <td>{{ d.label or '' }}</td>
+    <td>
+      {% if d.ignored %}<span class="badge pending">Ignored</span>
+      {% elif d.quarantined_at %}<span class="badge blocked">Paused</span>
+      {% else %}<span class="badge allowed">Active</span>{% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3"><em>No devices assigned.</em></td></tr>
+  {% endfor %}
+</table>
+</div>
+<p class="hint">Assign or reassign a device to {{ u.display_name }} from its own row on the <a href="{{ url_for('devices') }}">Devices</a> page.</p>
+</div>
+
+<div class="card">
 <h2>Assigned sites ({{ domain_count }})</h2>
 {% if domain_count %}
 <div class="toolbar" style="justify-content:space-between;">
@@ -1528,6 +1551,21 @@ def user_detail(user_id: int):
         "SELECT id, quarantined_at FROM devices WHERE user_id = ? AND ignored = 0", (user_id,)
     ).fetchall()
     paused_device_count = sum(1 for row in user_devices if row["quarantined_at"])
+    # Added 2026-09-08, real live-testing feedback: this page had no way
+    # to see WHICH devices are assigned to this user at all -- an admin
+    # had to go to the Devices page and search/filter by name instead,
+    # the exact gap the Group-detail page's own "Devices in this group"
+    # card (added earlier) never had. Deliberately ALL devices with this
+    # user_id, including an ignored one if that combination somehow
+    # exists (unlike user_devices above, which excludes those for the
+    # pause-count's own different reasoning) -- this card's job is
+    # accurately answering "what's assigned here", not "what's
+    # pausable".
+    assigned_devices = conn.execute(
+        "SELECT mac_address, label, ignored, quarantined_at FROM devices "
+        "WHERE user_id = ? ORDER BY label IS NULL, label, mac_address",
+        (user_id,),
+    ).fetchall()
     active_schedules = schedule_eval.active_schedules_for_target(
         conn, datetime.now(timezone.utc), user_id=user_id
     )
@@ -1545,6 +1583,7 @@ def user_detail(user_id: int):
     body = render_template_string(
         USER_DETAIL_BODY, u=u, assigned_domains=assigned_domains, shows=shows,
         user_devices=user_devices, paused_device_count=paused_device_count,
+        assigned_devices=assigned_devices,
         active_schedules=active_schedules, global_domains=_global_domains(conn),
         all_approved_shows=_entity_combo(all_approved_shows, lambda s: s["series_name"]),
         domain_count=domain_count, domains_page=domains_page, domains_per_page=domains_per_page,

@@ -51,7 +51,19 @@ type desiredPolicyWire struct {
 // legitimate "nothing computed yet" state, not a fault worth failing a
 // reconcile cycle over.
 func ReadDesiredPolicy(dbPath string) (policy.DesiredPolicy, error) {
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	// _busy_timeout=5000 matches common/db.py's own PRAGMA busy_timeout=5000
+	// on the Python side (confirmed live 2026-09-08: this driver
+	// (modernc.org/sqlite) accepts a bare _busy_timeout DSN query param,
+	// applied as `pragma busy_timeout = <ms>` -- see sqlite.go's own
+	// dsnPick("_busy_timeout", "_timeout") handling). Without this, a
+	// SQLITE_BUSY here failed immediately instead of waiting a
+	// realistic amount of time for whichever other process (dashboard,
+	// proxy, controller's own Python connection, which already sets
+	// this) briefly held the write lock -- found live resuming the
+	// soak test after the wipe-and-redeploy: WriteHealth() below hit
+	// this within the first few seconds of all six containers starting
+	// and touching the shared file at once.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_busy_timeout=5000")
 	if err != nil {
 		return policy.DesiredPolicy{}, fmt.Errorf("open %s: %w", dbPath, err)
 	}
@@ -103,7 +115,11 @@ func ReadDesiredPolicy(dbPath string) (policy.DesiredPolicy, error) {
 // before the dashboard's staleness view (see dashboard/dashboard.py's
 // _is_stale) grew a reason to compare this column directly.
 func WriteHealth(dbPath, mode string, failReason error) error {
-	db, err := sql.Open("sqlite", dbPath)
+	// _busy_timeout=5000: see ReadDesiredPolicy's own comment above --
+	// this write path is the one that actually hit SQLITE_BUSY live,
+	// since it's a real write racing dashboard/proxy/controller's own
+	// writes to the same file, not just a read.
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dbPath, err)
 	}

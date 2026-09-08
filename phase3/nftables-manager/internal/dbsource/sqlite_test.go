@@ -1,9 +1,11 @@
 package dbsource
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -160,6 +162,51 @@ func TestWriteHealth_FailOpenOnFirstWriteLeavesLastHealthyNull(t *testing.T) {
 	if !failReason.Valid || failReason.String != "never started" {
 		t.Fatalf("nft_fail_reason = %+v, want \"never started\"", failReason)
 	}
+}
+
+// Regression test for the real bug found live 2026-09-08, resuming the
+// soak test after the wipe-and-redeploy: WriteHealth (and
+// ReadDesiredPolicy) opened their modernc.org/sqlite connection with no
+// _busy_timeout DSN parameter at all, unlike common/db.py's own
+// `PRAGMA busy_timeout=5000` on the Python side -- so a real
+// SQLITE_BUSY here (all six containers touching the shared file within
+// the same second at startup) failed immediately instead of waiting a
+// realistic amount of time for whichever other process briefly held
+// the write lock. Holds a real write lock on the same file from a
+// separate connection for longer than SQLite's own default (zero)
+// busy_timeout would tolerate, but well inside the 5000ms this
+// package now sets, then releases it -- WriteHealth must wait it out
+// and succeed, not fail with "database is locked".
+func TestWriteHealth_WaitsOutABriefLockInsteadOfFailingImmediately(t *testing.T) {
+	path := setupDB(t, "")
+
+	holder, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open holder: %v", err)
+	}
+	defer holder.Close()
+	conn, err := holder.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire pinned conn: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+			t.Errorf("release lock: %v", err)
+		}
+		close(released)
+	}()
+
+	if err := WriteHealth(path, "running", nil); err != nil {
+		t.Fatalf("WriteHealth should have waited out the brief lock, not failed: %v", err)
+	}
+	<-released
 }
 
 type errFake struct{ msg string }

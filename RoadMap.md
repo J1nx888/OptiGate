@@ -6124,9 +6124,112 @@ a cleaner fix would register the router itself as `ignored` in the
 `devices` table so it's excluded upstream, not just downstream. Not
 done in this pass; flagged for the project owner.
 
-First real window of this soak test now running against the
-rebranded, wiped-and-rebuilt stack -- Bark Home stays paused for its
-duration, same as every prior window.
+First real window of this soak test started running against the
+rebranded, wiped-and-rebuilt stack -- see the very next entry for how
+that actually went (paused again within ~15 minutes over a real
+household-impacting incident).
+
+### First real soak-test window paused again: real households issues, real root causes found (2026-09-08)
+
+Roughly 15 minutes into the resumed window, the project owner reported
+active, real problems: some devices had no internet, overall internet
+was "SUPER SLOW", one specific device wasn't getting Crunchyroll bump
+treatment, and (unrelated to interception) the Users page has no way
+to see which devices are assigned to a user. **Paused the interception
+profile immediately** (`docker compose --profile interception down`)
+to restore normal connectivity before diagnosing -- matching this
+project's own established response to the 2026-09-07 incident.
+
+**Mistake made and caught in the same breath**: the very first pause
+command, `docker compose --profile interception down` with no service
+names, stopped and REMOVED all six containers, not just the three
+interception ones -- passing `--profile interception` puts every
+service (default and interception) into the "active set" `down`
+without arguments then tears down entirely. Caught immediately (`docker
+ps` came back empty) and fixed by a plain `docker compose up -d` (no
+profile flag) to bring the three default services straight back --
+but it cost the household the DNS/AdGuard/Squid tier too for the
+several minutes in between, on top of the interception-caused problem
+already in progress. Worth remembering: `docker compose --profile X
+down` is never the right way to stop only X's own services -- `docker
+compose stop <service> <service>` (or down with explicit service
+names) is.
+
+**Diagnosis, using persisted DB records since container logs were
+already gone** (removed containers don't keep their logs):
+
+- **"Some devices have no internet"**: real, but not a new bug.
+  `system_events` showed real household devices repeatedly hitting the
+  captive portal and failing to log in (`mattheW`/`MattHew` -- a
+  password or case-sensitivity mismatch, from Matthew's own tablet).
+  Traced the exact device (`14:05:89:a4:e5:0e`, `device_bindings`
+  showed a single clean binding to `192.168.1.30` from 18:44:41
+  onward, `devices.is_authenticated` now reads `1`): the most likely
+  explanation is this device's `is_authenticated` was already `0`
+  *before* today's wipe (probably from whatever state the interrupted
+  2026-09-07 soak-test window left it in), correctly restored as-is
+  by the backup, and correctly gated to the captive portal once
+  interception actually started routing its traffic there for the
+  first time in this household's real experience. Working as designed,
+  but a real UX/expectations gap worth softening later: a household
+  used to "it just works" is not expecting devices to suddenly need a
+  login.
+- **A real, separate bug likely contributed too**: `controller`'s own
+  `rtnetlink_listener` logged `database is locked` in `system_events`
+  at 18:44:50 -- the SAME missing-busy-timeout bug already flagged (not
+  yet fixed) in the entry above. If that dropped a device's binding
+  update, that device simply wouldn't be classified/targeted that
+  cycle -- a second, real contributor to "some devices behave
+  differently than others" beyond the captive-portal explanation above.
+- **"Internet super slow"**: no confirmed root cause found from DB
+  records alone -- honestly reported as unresolved rather than
+  guessed at. Candidates worth checking in a future, actively-monitored
+  retry: the single-NIC hairpin overhead for forwarded
+  `bypass_v4`/`authenticated_v4` traffic, the DB-lock contention above
+  adding latency to reconciliation, or an ARP-spoofing stability issue
+  not yet isolated.
+- **Crunchyroll not bumping on `14:05:89:a4:e5:0e`**: not a bug --
+  that device's own `bump_enabled` is `0` in the database. A one-click
+  fix from that device's own Devices-page row, left for the project
+  owner to decide on rather than flipped unilaterally.
+
+**Real fix, not deferred this time**: `phase3/nftables-manager/internal/dbsource/sqlite.go`'s
+`WriteHealth()`/`ReadDesiredPolicy()` both opened their
+`modernc.org/sqlite` connection with no `_busy_timeout` DSN parameter
+at all -- confirmed via `go doc`-equivalent source inspection inside a
+real `golang:1.25-bookworm` container (this driver accepts a bare
+`_busy_timeout` query parameter, applied as `pragma busy_timeout =
+<ms>`) that this was the actual, fixable gap, not a guess. Added
+`_busy_timeout=5000` to both, matching `common/db.py`'s own `PRAGMA
+busy_timeout=5000` on the Python side exactly. **Verified as a real
+regression test, not just a plausible-sounding fix**: added
+`TestWriteHealth_WaitsOutABriefLockInsteadOfFailingImmediately`, which
+holds a real write lock on the shared file from a separate connection
+for 300ms (inside the new 5000ms timeout, well past SQLite's own
+default of zero) -- confirmed this test genuinely FAILS
+(`database is locked (5) (SQLITE_BUSY)`) against the pre-fix code and
+PASSES against the fix, not just written to always pass. Full Go suite
+(`go build`/`go vet`/`go test ./...`) clean afterward.
+
+**Also shipped in the same pass**: the User-detail page gained a
+"Devices" card (mirroring `group_detail()`'s own pre-existing "Devices
+in this group" card), showing every device assigned to that user with
+its MAC/label/Active-Paused-Ignored status, closing the "have to
+search the Devices page instead" gap directly. Deliberately read-only
+(links to the Devices page for actually changing an assignment) --
+no bulk-assign-to-user workflow was requested or built here, unlike
+the group page's own bulk-add form. 3 new tests (plus 1 new Go
+regression test above). 1035 → 1038 passed, 34 skipped, zero
+regressions.
+
+**Project owner's explicit call, asked directly**: resume now anyway,
+rather than wait for the still-unresolved "internet super slow"
+question to be root-caused first. Recommended waiting; respected the
+decision once made. Resuming with the one concrete, verified fix
+(busy-timeout) actually deployed first, and as an actively-watched
+short window this time -- not another unattended multi-day run --
+specifically because that open question is still unresolved. See the
+next entry for how the resume itself went.
 
 ---
 
