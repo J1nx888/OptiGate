@@ -6043,6 +6043,14 @@ trusted because the suite total looked right.
 
 1028 → 1035 passed, 34 skipped, zero regressions.
 
+**Deployed and confirmed live**: pulled and rebuilt the dashboard
+container on the production Beelink box. `optigate-dashboard`'s
+startup push ran automatically, with no manual step and no Settings
+page visit -- `dig @127.0.0.1 -p 5354 optigate.home +short` immediately
+afterward correctly returned `192.168.1.250`, the real production
+address. The exact real-world outcome this fix was built to guarantee
+by default, confirmed, not just asserted by tests.
+
 ---
 
 ## Cross-cutting: security-by-design
