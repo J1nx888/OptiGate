@@ -4900,6 +4900,52 @@ def test_category_detail_small_category_shows_no_pagination_controls(client, db_
     assert b"Page 1 of" not in resp.data
 
 
+def test_category_detail_search_filters_the_domain_list(client, db_conn):
+    """Added 2026-09-08, project owner's explicit follow-up request --
+    same reasoning as Devices/Domains' server-side search: a category's
+    domain list is the one list on this site that can genuinely reach
+    the hundreds of thousands of rows, so finding one specific domain by
+    paging through by hand doesn't scale."""
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}?q=site0075", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "site0075\\.example" in body
+    assert "site0000\\.example" not in body
+    assert "showing 1-1 of 1" in body
+    assert "Domains (1 of 120)" in body
+
+
+def test_category_detail_search_with_no_matches_still_shows_the_search_box(client, db_conn):
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 5)
+
+    resp = client.get(f"/categories/{category_id}?q=nonexistent-search-term", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'name="q"' in body
+    assert "No domains match" in body
+
+
+def test_category_detail_search_is_carried_across_pagination_links(client, db_conn):
+    client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
+    _add_categories_domains(db_conn, category_id, 120)
+
+    resp = client.get(f"/categories/{category_id}?q=site&per_page=25", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Page 1 of 5" in body
+    assert "q=site" in body  # carried into the Next link's href
+
+
 # ============================================================
 # Category "Add many domains at once" -- added 2026-09-07 (RoadMap.md's
 # dated entry, project owner's explicit request to import a whole list of

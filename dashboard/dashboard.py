@@ -3433,26 +3433,35 @@ CATEGORY_DETAIL_BODY = """
 </div>
 
 <div class="card">
-<h2>Domains ({{ domain_count }})</h2>
-{% if domain_count %}
+<h2>Domains ({{ filtered_domain_count }}{% if search %} of {{ domain_count }}{% endif %})</h2>
+{% if any_category_domains_exist %}
+<form method="get" action="{{ url_for('category_detail', category_id=c.id) }}" class="inline" style="margin-bottom:.3rem; gap:.4rem;">
+  <input type="hidden" name="page" value="1">
+  <input type="hidden" name="per_page" value="{{ domains_per_page }}">
+  <input type="search" name="q" value="{{ search }}" placeholder="Search domains&hellip;" style="width:100%; max-width:280px;">
+  <button class="btn small" type="submit">Search</button>
+  {% if search %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, per_page=domains_per_page) }}">Clear</a>{% endif %}
+</form>
+{% if search %}<p class="hint" style="margin:0 0 .6rem;">Searches every domain in this category, not just this page &mdash; showing results for &ldquo;{{ search }}&rdquo;.</p>{% endif %}
 <div class="toolbar" style="justify-content:space-between;">
   <form method="get" action="{{ url_for('category_detail', category_id=c.id) }}" class="inline">
     <input type="hidden" name="page" value="1">
+    {% if search %}<input type="hidden" name="q" value="{{ search }}">{% endif %}
     <label class="hint" style="margin:0;">Show
       <select name="per_page" onchange="this.form.submit()">
         {% for opt in domains_page_size_options %}
         <option value="{{ opt }}" {{ 'selected' if opt == domains_per_page }}>{{ opt }}</option>
         {% endfor %}
       </select>
-      per page &mdash; showing {{ domains_range_start }}-{{ domains_range_end }} of {{ domain_count }}
+      per page &mdash; showing {{ domains_range_start }}-{{ domains_range_end }} of {{ filtered_domain_count }}
     </label>
   </form>
   {% if domains_total_pages > 1 %}
   <span>
-    {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+    {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page-1, per_page=domains_per_page, **search_query_args) }}">&larr; Prev</a>
     {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
     <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
-    {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+    {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page+1, per_page=domains_per_page, **search_query_args) }}">Next &rarr;</a>
     {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
   </span>
   {% endif %}
@@ -3475,16 +3484,16 @@ CATEGORY_DETAIL_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="3"><em>No domains yet.</em></td></tr>
+  <tr><td colspan="3"><em>{% if search %}No domains match &ldquo;{{ search }}&rdquo;.{% else %}No domains yet.{% endif %}</em></td></tr>
   {% endfor %}
 </table>
 </div>
 {% if domains_total_pages > 1 %}
 <div class="toolbar" style="justify-content:flex-end;">
-  {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page-1, per_page=domains_per_page) }}">&larr; Prev</a>
+  {% if domains_page > 1 %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page-1, per_page=domains_per_page, **search_query_args) }}">&larr; Prev</a>
   {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">&larr; Prev</span>{% endif %}
   <span class="hint">Page {{ domains_page }} of {{ domains_total_pages }}</span>
-  {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page+1, per_page=domains_per_page) }}">Next &rarr;</a>
+  {% if domains_page < domains_total_pages %}<a class="btn small" href="{{ url_for('category_detail', category_id=c.id, page=domains_page+1, per_page=domains_per_page, **search_query_args) }}">Next &rarr;</a>
   {% else %}<span class="btn small" style="opacity:.4; pointer-events:none;">Next &rarr;</span>{% endif %}
 </div>
 {% endif %}
@@ -3592,29 +3601,56 @@ def category_detail(category_id: int):
     domain_count = conn.execute(
         "SELECT COUNT(*) AS c FROM category_domains WHERE category_id = ?", (category_id,)
     ).fetchone()["c"]
+    # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
+    # 2026-09-07 pagination work): a category's own domain list is the
+    # one paginated list on this site that can genuinely reach the
+    # hundreds of thousands of rows (a real subscription source), so
+    # finding one specific domain by paging through by hand doesn't
+    # scale at all. `?q=` searches `pattern` via SQL `LIKE` before the
+    # `LIMIT`/`OFFSET`. Honest tradeoff, unlike Devices/Domains' search:
+    # a leading-wildcard LIKE can't use the `UNIQUE(category_id,
+    # pattern)` index the unfiltered path is built to exploit, so an
+    # active search on a 900K-row category does a real sequential scan
+    # per page load -- still bounded to returning one page's worth of
+    # rows, and still far faster than manually paging through thousands
+    # of pages, but not index-backed the way browsing unfiltered is.
+    search = (request.args.get("q") or "").strip()
+    domain_where_sql = "WHERE category_id = ? "
+    domain_where_params: list = [category_id]
+    if search:
+        domain_where_sql += "AND pattern LIKE ? "
+        domain_where_params.append(f"%{search}%")
+    filtered_domain_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM category_domains " + domain_where_sql, domain_where_params
+    ).fetchone()["c"]
     domains_page, domains_per_page = _parse_pagination(
         request.args, default_per_page=DEFAULT_LIST_PAGE_SIZE, options=LIST_PAGE_SIZE_OPTIONS,
     )
-    domains_total_pages = max(1, math.ceil(domain_count / domains_per_page))
+    domains_total_pages = max(1, math.ceil(filtered_domain_count / domains_per_page))
     domains_page = min(domains_page, domains_total_pages)
+    any_category_domains_exist = domain_count > 0
+    search_query_args = {"q": search} if search else {}
     body = render_template_string(
         CATEGORY_DETAIL_BODY, c=c, domain_count=domain_count,
+        filtered_domain_count=filtered_domain_count, search=search,
+        any_category_domains_exist=any_category_domains_exist, search_query_args=search_query_args,
         over_threshold=domain_count > matching.MAX_SCOPED_CATEGORY_DOMAINS,
         max_scoped=matching.MAX_SCOPED_CATEGORY_DOMAINS,
-        # ORDER BY pattern alone (not source, pattern) so this can be
-        # served straight off the UNIQUE(category_id, pattern) index --
-        # source, pattern would force a full sort of every matching row on
-        # every page load regardless of LIMIT/OFFSET, defeating the whole
-        # point of paginating a 900,000-row category in the first place.
+        # ORDER BY pattern alone (not source, pattern) so the unfiltered
+        # (no search) path can be served straight off the
+        # UNIQUE(category_id, pattern) index -- source, pattern would
+        # force a full sort of every matching row on every page load
+        # regardless of LIMIT/OFFSET, defeating the whole point of
+        # paginating a 900,000-row category in the first place.
         category_domains=conn.execute(
-            "SELECT * FROM category_domains WHERE category_id = ? ORDER BY pattern LIMIT ? OFFSET ?",
-            (category_id, domains_per_page, (domains_page - 1) * domains_per_page),
+            "SELECT * FROM category_domains " + domain_where_sql + "ORDER BY pattern LIMIT ? OFFSET ?",
+            domain_where_params + [domains_per_page, (domains_page - 1) * domains_per_page],
         ).fetchall(),
         domains_page=domains_page, domains_per_page=domains_per_page,
         domains_total_pages=domains_total_pages,
         domains_page_size_options=LIST_PAGE_SIZE_OPTIONS,
-        domains_range_start=0 if domain_count == 0 else (domains_page - 1) * domains_per_page + 1,
-        domains_range_end=min(domains_page * domains_per_page, domain_count),
+        domains_range_start=0 if filtered_domain_count == 0 else (domains_page - 1) * domains_per_page + 1,
+        domains_range_end=min(domains_page * domains_per_page, filtered_domain_count),
         overrides=conn.execute(
             "SELECT * FROM category_overrides WHERE category_id = ? ORDER BY pattern", (category_id,)
         ).fetchall(),

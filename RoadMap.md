@@ -5514,6 +5514,42 @@ scratch group, confirmed "Assigned sites (87)", "showing 1-50 of 87",
 3 new tests in `tests/test_dashboard.py`. 999 → 1002 passed, 34
 skipped, zero regressions.
 
+### Categories domain-list search (2026-09-08)
+
+Follow-up requested by the project owner right after the Group-detail
+pagination above. A category's own domain list is the one paginated
+list on this site that can genuinely reach the hundreds of thousands of
+rows (a real subscription source), so finding one specific domain by
+paging through by hand doesn't scale at all -- same motivation as
+Devices/Domains' search, applied here to `category_detail()`'s domain
+table. `?q=` searches `pattern` via SQL `LIKE`, applied before the
+`LIMIT`/`OFFSET`.
+
+**Honest tradeoff, called out rather than glossed over**: unlike
+Devices/Domains (small, hand-curated lists), an active search here
+gives up the `UNIQUE(category_id, pattern)` index's fast path -- a
+leading-wildcard `LIKE` can't be served off that index, so searching a
+900K-row category does a real sequential scan per page load. Still
+bounded to returning one page's worth of rows, and still far faster
+than paging through thousands of pages by hand, but not index-backed
+the way unfiltered browsing is. `domain_count` (the true, unfiltered
+total) is kept separate from a new `filtered_domain_count` specifically
+so an active search can never corrupt the "too large to scope"
+threshold check or the subscription-source domain count, both of which
+must always reflect the category's real size regardless of what's
+currently searched for.
+
+Live-verified against the real production-scale data already in the
+dev server -- the actual 953,197-domain Adult category (synced from its
+real subscription source) -- searching "skynetblogs" correctly narrowed
+to 125 real matching domains across 3 pages, with the "953197 domains
+... over the 5000-domain limit" threshold text staying correct and
+unaffected by the active search, and the Next link correctly carrying
+`q=` forward.
+
+3 new tests in `tests/test_dashboard.py`. 1002 → 1005 passed, 34
+skipped, zero regressions.
+
 ---
 
 ## Cross-cutting: security-by-design

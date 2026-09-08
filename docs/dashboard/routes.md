@@ -526,15 +526,25 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   Renders `CATEGORY_DETAIL_BODY`. **Since 2026-09-07**, the domains
   table is paginated (`?page=`/`?per_page=`, parsed by
   `_parse_pagination()` -- `per_page` only honors a real
-  `CATEGORY_DOMAINS_PAGE_SIZE_OPTIONS` value, 25/50/100/250, default 50;
-  `page` clamps to `[1, total_pages]`), served via `ORDER BY pattern
-  LIMIT ? OFFSET ?` (not `source, pattern` -- see the query's own
-  comment for why: keeping `source` in the sort would force a full
-  table sort on every page load, off the `UNIQUE(category_id, pattern)`
-  index's own order, defeating the point of paginating a category that
-  can run past 900,000 rows). A page-size `<select>` (auto-submits on
-  change) plus Prev/Next links (top and bottom of the table) replace
-  what used to be an unconditional render of every domain at once.
+  `LIST_PAGE_SIZE_OPTIONS` value, 25/50/100/250, default 50; `page`
+  clamps to `[1, total_pages]`), served via `ORDER BY pattern LIMIT ?
+  OFFSET ?` (not `source, pattern` -- see the query's own comment for
+  why: keeping `source` in the sort would force a full table sort on
+  every page load, off the `UNIQUE(category_id, pattern)` index's own
+  order, defeating the point of paginating a category that can run past
+  900,000 rows). A page-size `<select>` (auto-submits on change) plus
+  Prev/Next links (top and bottom of the table) replace what used to be
+  an unconditional render of every domain at once. **Since 2026-09-08**:
+  `?q=` searches `pattern` via SQL `LIKE`, applied before the pagination
+  query -- an active search loses the index-backed fast path (a
+  leading-wildcard `LIKE` can't use `UNIQUE(category_id, pattern)`),
+  a real, honestly-noted tradeoff at this table's scale, but still
+  returns only one page's worth of rows regardless. `domain_count`
+  stays the TRUE unfiltered total throughout (used by the threshold
+  check and the subscription-info text above); a separate
+  `filtered_domain_count` drives the domain list's own header/
+  pagination math so an active search doesn't corrupt the "too large to
+  scope" logic.
 - `POST /categories/access` -> `update_category_access()` -- form fields
   `category_id`, `is_global`, `user_ids`/`group_ids`/`device_ids` (same
   shape as `update_domain_access()`). **Rejects** (error flash, no write)
