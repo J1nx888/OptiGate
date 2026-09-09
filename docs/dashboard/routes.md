@@ -1171,6 +1171,14 @@ the project owner asked for, not only an operational-health trail.
 - `POST /settings/block-page-mode` -> `update_block_page_mode()` -- form
   field `block_page_mode`, must be `"redirect"` or `"terminate"` or it's
   rejected with an error flash.
+- `POST /settings/network-sweep` -> `update_network_sweep()` -- form
+  fields `network_sweep_enabled` (checkbox, absent means off) and
+  `network_sweep_interval_minutes` (whole number, 1+, rejected with an
+  error flash otherwise -- the save is atomic, a rejected interval
+  leaves BOTH settings unchanged, not just the interval). Controls
+  `controller/network_sweep.py`'s active whole-subnet discovery sweep;
+  takes effect on that process's next ~30s check tick, no restart
+  needed.
 - `POST /settings/admin` -> `update_admin()` -- form fields
   `admin_username` (required, non-empty), `admin_password` (optional --
   leaving it blank keeps the current password hash). Updates

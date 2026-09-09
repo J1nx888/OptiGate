@@ -81,6 +81,15 @@ FORMAT_VERSION = 1
 #                           an old one from a different install.
 #   cr_resolver_last_error Diagnostic-only (Crunchyroll resolver's own last
 #                           failure), not configuration.
+#   network_sweep_last_run_at / _last_host_count
+#                           Diagnostic-only (controller/network_sweep.py's
+#                           own status, for the Settings page's live
+#                           display), same reasoning as cr_resolver_last_error
+#                           above -- restoring a "last ran" timestamp from a
+#                           different box onto a fresh install would just be
+#                           misleading, not useful. network_sweep_enabled/
+#                           _interval_minutes (the actual admin configuration)
+#                           ARE included, below.
 # A NEW setting added later defaults to EXCLUDED unless deliberately added
 # here -- safer than a denylist, which would silently include a future
 # secret nobody thought to exclude.
@@ -97,6 +106,8 @@ SETTINGS_ALLOWLIST = (
     "optigate_hostname_prefix",
     "device_stale_days",
     "cert_banner_dismissed",
+    "network_sweep_enabled",
+    "network_sweep_interval_minutes",
 )
 
 # Ordered so every table is inserted only after whatever it references by

@@ -9,14 +9,15 @@ reconciliation. Milestone 6 adds systemd sd_notify/watchdog integration
 and interception_runtime health reporting; Milestone 7 adds computing
 and publishing the DesiredPolicy blob phase3/nftables-manager reads.
 
-NOT a real deployable yet: --db-path wires in the real Milestone 4
-desired-state source (controller/desired_state.py, devices +
-device_bindings), but there's still no Dockerfile/systemd unit for this
-component, and the gateway is passed in on the command line rather than
-resolved live (that's the ARP worker's own job at startup -- see
-phase3/arp-worker/internal/worker/safety.go's ResolveGateway -- not
-something the controller should do a second time). See
-docs/design/phase3-technical-design.md and RoadMap.md's milestone list.
+Deployed live as of the interception profile (controller/Dockerfile,
+docker-compose.yml's controller service) -- the doc comment above used
+to say this was "not a real deployable yet"; corrected 2026-09-08 since
+that claim had been stale for a while. The gateway is still passed in
+on the command line rather than resolved live (that's the ARP worker's
+own job at startup -- see phase3/arp-worker/internal/worker/safety.go's
+ResolveGateway -- not something the controller should do a second
+time). See docs/design/phase3-technical-design.md and RoadMap.md's
+milestone list.
 
 **Discovery is now wired in (2026-08-30)**: when --db-path is given,
 run() also starts controller/discovery.py's snapshot loop on its own
@@ -55,6 +56,7 @@ import adguard_discovery
 import adguard_sync
 import category_fetch
 import discovery
+import network_sweep
 import readiness
 import rtnetlink_listener
 import health
@@ -120,6 +122,7 @@ def run(
     active_scan_stale_after: float = 300.0,
     active_scan_limit: int = 5,
     category_fetch_interval: float | None = None,
+    enable_network_sweep: bool = False,
 ) -> None:
     """The main control loop. Runs until SIGTERM/SIGINT.
 
@@ -199,6 +202,22 @@ def run(
     adguard_sync.py's build_category_deny_rules()/
     sync_category_subscriptions(), already running whenever
     adguard_interval is set).
+
+    enable_network_sweep, if True, starts
+    controller/network_sweep.py's own background thread and DB
+    connection (same reasoning as discovery_interval above) -- the real
+    fix for a confirmed gap found live 2026-09-08 (RoadMap.md's dated
+    entry): every discovery source above is purely reactive, so a
+    device that never generates traffic this box's own kernel happens
+    to observe is invisible to all of them, indefinitely. Unlike every
+    other background task here, its own interval isn't a `run()`
+    parameter at all -- it's admin-configurable from the dashboard
+    Settings page (`network_sweep_interval_minutes`,
+    `network_sweep_enabled`), re-read fresh on every check tick so a
+    settings change takes effect live, without a controller restart.
+    This parameter is only the process-level "start this subsystem at
+    all" switch (mirroring enable_rtnetlink's own on/off-only shape,
+    not active_scan_interval's configurable-interval shape).
 
     block_page_ip, if given, is threaded through to
     adguard_sync.build_rules() so hard-deny rules also carry a
@@ -431,6 +450,11 @@ def run(
             category_fetch_interval, on_error=_on_error, on_success=_on_success
         )
 
+    network_sweep_task = None
+    if enable_network_sweep:
+        _on_error, _on_success = _events("network_sweep", "active network sweep failed: %s")
+        network_sweep_task = network_sweep.run_loop(on_error=_on_error, on_success=_on_success)
+
     sdnotify.ready()
 
     def _reconnect(reason: str) -> None:
@@ -484,6 +508,8 @@ def run(
             active_scan_task.stop()
         if category_fetch_task is not None:
             category_fetch_task.stop()
+        if network_sweep_task is not None:
+            network_sweep_task.stop()
         try:
             client.shutdown("controller_requested")
         except WorkerConnectionError:
@@ -723,6 +749,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable the active ARP-nudge loop even when --db-path is set.",
     )
     parser.add_argument(
+        "--no-network-sweep", action="store_true",
+        help="Disable the active whole-subnet discovery sweep even when "
+        "--db-path is set (controller/network_sweep.py) -- a process-level "
+        "kill switch on top of the admin-facing network_sweep_enabled setting "
+        "in the dashboard. Its actual interval is admin-configurable from the "
+        "dashboard Settings page, not a CLI flag here, since it's meant to be "
+        "changed live without a redeploy.",
+    )
+    parser.add_argument(
         "--dashboard-url",
         help="Same value as the dashboard's own DASHBOARD_URL env var, e.g. "
         "http://192.168.1.50:8787 -- if set (and its host is a plain IPv4 "
@@ -748,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
     adguard_discovery_interval: float | None = None
     active_scan_interval: float | None = None
     category_fetch_interval: float | None = None
+    enable_network_sweep = False
     if args.db_path:
         if not args.gateway_ip or not args.gateway_mac:
             parser.error("--db-path requires --gateway-ip and --gateway-mac")
@@ -789,6 +825,10 @@ def main(argv: list[str] | None = None) -> int:
             # also never touches AdGuard at all, only the category's own
             # subscription_url and the shared DB.
             category_fetch_interval = args.category_fetch_interval
+        if not args.no_network_sweep:
+            # network_sweep.run_loop() opens its own connection
+            # internally too, same reasoning as discovery_interval above.
+            enable_network_sweep = True
     else:
         provider = placeholder_desired_state
 
@@ -813,6 +853,7 @@ def main(argv: list[str] | None = None) -> int:
         active_scan_stale_after=args.active_scan_stale_after,
         active_scan_limit=args.active_scan_limit,
         category_fetch_interval=category_fetch_interval,
+        enable_network_sweep=enable_network_sweep,
     )
     return 0
 

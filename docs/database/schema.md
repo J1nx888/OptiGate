@@ -96,6 +96,19 @@ NOTHING`) in `common/db.py`. Known keys actually written/read elsewhere:
   periodic cycle, see that module's own docstring) and
   `dashboard/block_page_server.py` (serves the device-info page for
   whichever hostname this currently resolves to).
+- `network_sweep_enabled` (`"1"` default) / `network_sweep_interval_minutes`
+  (`"60"` default) -- admin config for `controller/network_sweep.py`'s
+  active whole-subnet discovery sweep (nudges every host address in
+  `local_network` above so even a device that's never generated traffic
+  this box observed gets picked up). Editable from the Settings page
+  (`update_network_sweep`); re-read fresh on every check tick by the
+  controller, no restart needed for a change to take effect.
+  `network_sweep_last_run_at`/`_last_host_count` are that module's own
+  diagnostic status (when it last actually ran, how many addresses),
+  written on every real sweep purely for the Settings page's live
+  display -- not admin configuration, excluded from
+  `common/backup.py`'s `SETTINGS_ALLOWLIST` for that reason (same as
+  `cr_resolver_last_error` above).
 
 ### `users`
 One row per proxy login (one per kid/person), independent of the dashboard

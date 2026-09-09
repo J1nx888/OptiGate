@@ -111,6 +111,10 @@ controller/                   Python control-plane container (added 2026-08-30, 
                                 highest-precedence discovery source, no discrete per-cycle
                                 success concept (see §9)
   active_scan.py                rate-limited active ARP nudge for stale/onboarding bindings
+  network_sweep.py              active whole-subnet discovery sweep (nudges every host in
+                                local_network, not just already-known-stale ones -- reuses
+                                active_scan.nudge(); admin-configurable interval/on-off from
+                                the dashboard, re-read live, no restart needed)
   adguard_sync.py                build_rules()/build_splice_deny_rules()/
                                 build_category_deny_rules()/sync_category_subscriptions()/
                                 sync_safesearch() -- everything pushed to AdGuard's custom
@@ -302,6 +306,26 @@ take effect everywhere.
   Rate-limited (`--active-scan-limit` bindings per `--active-scan-interval`,
   only bindings older than `--active-scan-stale-after`) to avoid a scan
   storm on a large LAN.
+- **Active whole-subnet discovery sweep** (`controller/network_sweep.py`,
+  added 2026-09-09, project owner's direct request: "The entire
+  solution is designed to make sure no one can avoid it") -- closes a
+  real gap active_scan.py's own docstring flags but doesn't solve:
+  every discovery source above is reactive, so a device that never
+  generates traffic this box's kernel happens to observe (one that
+  joined the LAN and simply sat quietly) is invisible indefinitely, no
+  matter how long the system runs. Reuses `active_scan.nudge()` and the
+  SAME `local_network` setting `matching.ip_in_configured_lan()`
+  already reads, just applied to every host address in that range
+  instead of one already-known stale IP -- no new privileged code, no
+  new `arp-worker` IPC op, and any resulting resolution is picked up by
+  `discovery.py`'s own snapshot loop exactly like any other source.
+  Runs once at controller startup, then on an admin-configurable
+  interval (dashboard Settings page: `network_sweep_enabled` default
+  on, `network_sweep_interval_minutes` default 60) -- both re-read
+  fresh every ~30s check tick, so a settings change takes effect live,
+  without a controller restart. Capped at 4096 host addresses per
+  sweep so a misconfigured huge range degrades gracefully instead of
+  hanging or flooding the LAN.
 - **Auto-gating new devices** (`common/identity.py`'s `record_binding()`,
   added 2026-08-31, Phase 4's first milestone) -- a MAC genuinely never
   seen before now gets a brand-new, unassociated `devices` row

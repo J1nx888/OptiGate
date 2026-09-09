@@ -6743,20 +6743,82 @@ or their explicit real-time approval in a live conversation turn.**
     several times today), is genuinely, by design, invisible to this
     system -- not a misconfiguration, not a range mismatch, a true gap
     in what "discovery" currently means here (reactive-only, no active
-    inventory sweep). **Real fix, not attempted in this unattended
-    session** (it needs new privileged raw-socket code and only-safely-
-    verifiable-live testing, both explicitly out of scope for
-    unsupervised work): give `phase3/arp-worker` (the only component
-    with `CAP_NET_RAW`) a genuine active-sweep capability -- broadcast
-    real ARP requests across the configured LAN subnet, not just
-    `active_scan.py`'s narrower "nudge one already-known IP" UDP trick
-    -- run once at startup and on a slow periodic interval, feeding any
-    newly-resolved MAC/IP pair back through the exact same
-    `record_binding()` path real traffic already uses. This also needs
-    a genuinely configured subnet/CIDR setting to exist at all (see the
-    settings-table check earlier in this entry -- none exists today).
-    This is a real, scoped feature request for a future session, backed
-    by a confirmed architectural read, not a guess.
+    inventory sweep).
+
+    **DONE (implemented + tested 2026-09-09, project owner's direct
+    request: "The entire solution is designed to make sure no one can
+    avoid it. We need to figure out why some devices can").** Real fix,
+    built as a new active whole-subnet sweep -- not the privileged
+    raw-ARP approach originally sketched above (new `CAP_NET_RAW` Go
+    code in `phase3/arp-worker`, a new controller<->worker IPC command,
+    only safely verifiable live), but the exact same safe,
+    already-live-verified mechanism `controller/active_scan.py` already
+    uses to refresh ONE known-stale IP (a plain UDP socket, a datagram
+    to a closed port -- forces the kernel's own neighbor-resolution
+    layer to (re)resolve that address, confirmed live against a real
+    kernel before that module was ever written), just widened from "one
+    already-known IP" to "every host address in the configured LAN
+    range." No new privileged code, no new IPC protocol, and it
+    integrates with the existing pipeline for free: any resulting
+    resolution is picked up by `controller/discovery.py`'s own
+    already-running snapshot loop exactly like any other passively
+    observed entry, which is what auto-creates the `devices` row via
+    `common/identity.py`'s `record_binding()`. Chosen specifically
+    because it could be built and tested rigorously without needing to
+    send real ARP packets on the live household network.
+
+    New module: `controller/network_sweep.py`. Reuses
+    `active_scan.nudge()` directly rather than re-implementing the
+    UDP-nudge trick (one implementation, not two that could drift). Also
+    reuses the SAME `local_network` setting `common/matching.py`'s
+    `ip_in_configured_lan()` already reads (confirmed with the project
+    owner: `192.168.1.0/24`, this deployment's actual value already)
+    rather than adding a second, possibly-inconsistent subnet setting.
+    Runs once immediately at controller startup, then on an
+    admin-configurable interval -- **project owner's explicit spec**:
+    default 60 minutes, a Settings-page toggle to disable it entirely,
+    and a Settings-page numeric field to change the interval, both
+    re-read fresh on every check tick (not cached at startup) so a
+    change takes effect live, within `_CHECK_INTERVAL_SECONDS` (30s),
+    without a controller restart or redeploy. New settings:
+    `network_sweep_enabled` (default on), `network_sweep_interval_minutes`
+    (default 60), `network_sweep_last_run_at`/`_last_host_count`
+    (written by every real sweep, purely for the Settings page's own
+    live status line -- "last ran ... -- N addresses probed" /
+    "never run yet"). New dashboard Settings card ("Network discovery
+    sweep") with the enable toggle, interval field, and that live
+    status; new `POST /settings/network-sweep` route
+    (`update_network_sweep()`), validated server-side (a whole number
+    of minutes, 1 or more) independent of the form's own client-side
+    `min="1"`. New `--no-network-sweep` CLI flag on `controller`
+    (process-level kill switch, on top of the DB-level toggle) -- wired
+    into `run()` as `enable_network_sweep`, mirroring
+    `enable_rtnetlink`'s own on/off-only shape (the interval itself is
+    never a CLI flag, matching the "admin-configurable, no redeploy"
+    design). Sanity-capped at 4096 host addresses per sweep
+    (comfortably covers up to a /20) so a fat-fingered huge range
+    degrades gracefully instead of hanging or flooding the LAN.
+
+    19 new tests in `tests/test_controller_network_sweep.py` (CIDR
+    expansion including multi-CIDR and the sanity cap, nudge coverage,
+    never writes `device_bindings` directly, status-setting writes,
+    interval/enabled parsing including corrupted-value fallback, and
+    `run_loop()`'s own scheduling: sweeps immediately then repeats,
+    never sweeps while disabled, **picks up a live disable without a
+    restart**, stops promptly, reports errors without dying) plus 6 in
+    `tests/test_dashboard.py` for the Settings card and route. Full
+    suite green.
+
+    **Not yet live-verified** -- deliberately built using a mechanism
+    that's already been confirmed live once before (active_scan.py's
+    own UDP-nudge trick against a real kernel), specifically so it
+    could be built with real confidence without needing to test
+    against the live household network myself. The actual proof this
+    catches a genuinely silent device still needs a real test: stash a
+    device on the LAN, let it sit quietly, confirm it shows up in
+    `devices` within one sweep interval without ever generating traffic
+    on its own. Natural to fold into the same supervised session as
+    items 6/9's own pending live verification.
 12. **DONE (implemented + tested 2026-09-08, while the project owner
     was away): `nftables-manager` now has a graceful teardown on
     stop/SIGTERM, matching `arp-worker`.** New `(*nft.Manager)

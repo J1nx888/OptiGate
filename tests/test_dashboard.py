@@ -1540,6 +1540,72 @@ def test_settings_page_shows_the_default_optigate_hostname(client):
     assert b"optigate.home" in resp.data
 
 
+def test_settings_page_shows_network_sweep_card(client):
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Network discovery sweep" in resp.data
+    assert b"never run yet" in resp.data
+
+
+def test_settings_page_shows_last_sweep_status(client, db_conn):
+    import db
+    db.set_setting(db_conn, "network_sweep_last_run_at", "2026-09-09T03:00:00Z")
+    db.set_setting(db_conn, "network_sweep_last_host_count", "254")
+    db_conn.commit()
+
+    resp = client.get("/settings", headers=_auth_header())
+
+    assert b"2026-09-09T03:00:00Z" in resp.data
+    assert b"254 addresses probed" in resp.data
+
+
+def test_update_network_sweep_saves_enabled_and_interval(client, db_conn):
+    import db
+    resp = client.post(
+        "/settings/network-sweep",
+        data={"network_sweep_enabled": "1", "network_sweep_interval_minutes": "30"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "network_sweep_enabled") == "1"
+    assert db.get_setting(db_conn, "network_sweep_interval_minutes") == "30"
+
+
+def test_update_network_sweep_unchecked_box_disables(client, db_conn):
+    """An unchecked HTML checkbox submits no field at all -- must be
+    read as disabled, not crash on a missing form key."""
+    import db
+    resp = client.post(
+        "/settings/network-sweep",
+        data={"network_sweep_interval_minutes": "60"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "network_sweep_enabled") == "0"
+
+
+def test_update_network_sweep_rejects_non_numeric_interval(client, db_conn):
+    import db
+    resp = client.post(
+        "/settings/network-sweep",
+        data={"network_sweep_enabled": "1", "network_sweep_interval_minutes": "not-a-number"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "network_sweep_interval_minutes", "") == "", \
+        "a rejected save must not overwrite the existing setting"
+
+
+def test_update_network_sweep_rejects_zero_or_negative_interval(client, db_conn):
+    import db
+    resp = client.post(
+        "/settings/network-sweep",
+        data={"network_sweep_enabled": "1", "network_sweep_interval_minutes": "0"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "network_sweep_interval_minutes", "") == ""
+
+
 def test_update_optigate_hostname_saves_lowercased_value(client, db_conn):
     resp = client.post(
         "/settings/optigate-hostname", data={"optigate_hostname_prefix": "MyNetwork"}, headers=_auth_header()

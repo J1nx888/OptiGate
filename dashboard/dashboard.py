@@ -3717,6 +3717,12 @@ CATEGORY_DETAIL_BODY = """
 LIST_PAGE_SIZE_OPTIONS = [25, 50, 100, 250]
 DEFAULT_LIST_PAGE_SIZE = 50
 
+# Must match controller/network_sweep.py's own DEFAULT_INTERVAL_MINUTES
+# -- kept as a separate constant here rather than an import, since
+# dashboard's own image never has controller/*.py copied into it (see
+# settings_page()'s own comment on this exact point).
+DEFAULT_NETWORK_SWEEP_INTERVAL_MINUTES = 60
+
 
 def _parse_pagination(args, *, default_per_page: int, options: list[int]) -> tuple[int, int]:
     """Parses `?page=`/`?per_page=` into a validated (page, per_page) pair
@@ -6863,6 +6869,35 @@ SETTINGS_BODY = """
 </div>
 
 <div class="card">
+<h2>Network discovery sweep</h2>
+<p class="hint">
+  Every other way this project notices a device is passive -- it only
+  learns about one once that device happens to make some traffic this
+  box's own network stack overhears on its own. A device that joins
+  quietly and never triggers that can sit on the network invisibly,
+  indefinitely, with none of your rules ever applying to it. This
+  actively probes every address in the network range above on a
+  schedule, forcing even a silent device to reveal itself so it gets
+  picked up the same way any other device is.
+</p>
+<form class="add-form" method="post" action="{{ url_for('update_network_sweep') }}">
+  <label><input type="checkbox" name="network_sweep_enabled" value="1" {{ 'checked' if network_sweep_enabled }}> Enabled</label>
+  <label>Every <input type="number" name="network_sweep_interval_minutes" value="{{ network_sweep_interval_minutes }}" min="1" style="width:5rem;"> minutes</label>
+  <button class="add" type="submit">Save</button>
+</form>
+<p class="hint">
+  {% if not local_network %}
+  <strong>Nothing to sweep</strong> -- the network range above is empty, so there's no address list to probe. Set it first.
+  {% elif network_sweep_status.startswith('never') %}
+  <span class="badge blocked">{{ network_sweep_status }}</span> -- runs once immediately whenever the controller (interception profile) is running, then on the interval above.
+  {% else %}
+  <span class="badge allowed">{{ network_sweep_status }}</span>
+  {% endif %}
+  Also requires the <code>interception</code> profile to actually be running (this is a <code>controller</code>-side feature, same as the ARP worker and nftables-manager) -- takes no effect while it's off.
+</p>
+</div>
+
+<div class="card">
 <h2>Household time zone</h2>
 <p class="hint">The default time zone new <a href="{{ url_for('schedules') }}">schedules</a> are created with. Each schedule stores its own time zone once created, so changing this later never moves an existing schedule's meaning.</p>
 <form class="add-form" method="post" action="{{ url_for('update_household_time_zone') }}" id="householdTimeZoneForm">
@@ -7126,6 +7161,23 @@ def _optigate_rewrite_status(conn, adguard_url: str, adguard_username: str, adgu
     return "not active yet -- click Save below to push it"
 
 
+def _network_sweep_status(conn) -> str:
+    """Read-only status line for the Settings page's "Network discovery
+    sweep" card -- never writes anything, mirrors
+    _optigate_rewrite_status()'s own "make the real state visible, not
+    just a static settings echo" approach. controller/network_sweep.py
+    itself writes network_sweep_last_run_at/_last_host_count on every
+    real sweep (whether or not it's currently running here in the
+    dashboard container -- these two processes only share the DB, not
+    memory), so this can genuinely be stale or "never" if the
+    interception profile isn't running at all."""
+    last_run_at = db.get_setting(conn, "network_sweep_last_run_at", "")
+    if not last_run_at:
+        return "never run yet"
+    host_count = db.get_setting(conn, "network_sweep_last_host_count", "0")
+    return f"last ran {last_run_at} -- {host_count} address{'es' if host_count != '1' else ''} probed"
+
+
 def _stale_devices(conn, days: int) -> list:
     """Devices whose REAL last-seen time (device_bindings, populated by
     ARP/DHCP discovery, active scans, or AdGuard's own query log) is
@@ -7158,6 +7210,20 @@ def _stale_devices(conn, days: int) -> list:
 def settings_page():
     conn = get_db()
     local_network = db.get_setting(conn, "local_network", "")
+    network_sweep_enabled = db.get_setting(conn, "network_sweep_enabled", "1") == "1"
+    # DEFAULT_NETWORK_SWEEP_INTERVAL_MINUTES, not
+    # controller.network_sweep.DEFAULT_INTERVAL_MINUTES: dashboard's
+    # own image never has controller/*.py copied into it (each
+    # container flat-copies only its own directory + common/ -- same
+    # "same-named module, different image" split as
+    # common/category_fetch.py's own docstring already documents),
+    # so importing that module here would work locally but fail at
+    # runtime in the real deployment. This one constant is simple
+    # enough to just keep in sync by hand across the two files rather
+    # than adding a common/ module for a single shared integer.
+    network_sweep_interval_minutes = db.get_setting(
+        conn, "network_sweep_interval_minutes", str(DEFAULT_NETWORK_SWEEP_INTERVAL_MINUTES)
+    )
     admin_username = db.get_setting(conn, "admin_username", "")
     block_page_mode = db.get_setting(conn, "block_page_mode", "terminate")
     device_stale_days = db.get_setting(conn, "device_stale_days", "")
@@ -7179,6 +7245,9 @@ def settings_page():
     safesearch_enabled = db.get_setting(conn, "safesearch_enabled", "0") == "1"
     body = render_template_string(
         SETTINGS_BODY, local_network=local_network, admin_username=admin_username,
+        network_sweep_enabled=network_sweep_enabled,
+        network_sweep_interval_minutes=network_sweep_interval_minutes,
+        network_sweep_status=_network_sweep_status(conn),
         block_page_mode=block_page_mode, device_stale_days=device_stale_days,
         stale_devices=stale_devices, adguard_url=adguard_url,
         adguard_configured=bool(adguard_url and adguard_password),
@@ -7385,6 +7454,38 @@ def update_local_network():
             "by each person's proxy login.",
         )
     return flash_redirect("settings_page", "Saved.")
+
+
+@app.route("/settings/network-sweep", methods=["POST"])
+@require_admin
+def update_network_sweep():
+    """Controls controller/network_sweep.py's own background sweep --
+    see that module's docstring for the feature itself. This route only
+    ever writes two settings; the controller process re-reads both
+    fresh on every check tick (see that module's own run_loop()), so a
+    save here takes effect within _CHECK_INTERVAL_SECONDS, without a
+    controller restart. Validates the interval defensively even though
+    the form's own `min="1"` already blocks most bad input client-side
+    -- a hand-crafted POST (or a very old cached page) must not be able
+    to write a zero/negative/non-numeric value the controller would
+    then have to defend against itself."""
+    enabled = request.form.get("network_sweep_enabled") == "1"
+    raw_interval = request.form.get("network_sweep_interval_minutes", "").strip()
+    try:
+        interval_minutes = int(raw_interval)
+        if interval_minutes < 1:
+            raise ValueError
+    except ValueError:
+        return flash_redirect(
+            "settings_page", "Interval must be a whole number of minutes, 1 or more.", error=True
+        )
+    conn = get_db()
+    db.set_setting(conn, "network_sweep_enabled", "1" if enabled else "0")
+    db.set_setting(conn, "network_sweep_interval_minutes", str(interval_minutes))
+    conn.commit()
+    if not enabled:
+        return flash_redirect("settings_page", "Saved. Network discovery sweep is now off.")
+    return flash_redirect("settings_page", f"Saved. Sweeping every {interval_minutes} minute(s).")
 
 
 @app.route("/settings/block-page-mode", methods=["POST"])

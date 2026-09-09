@@ -62,6 +62,27 @@ def test_export_only_includes_allowlisted_settings(conn):
     assert "cr_resolver_last_error" not in data["settings"]
 
 
+def test_export_includes_network_sweep_config_but_not_its_status(conn):
+    """network_sweep_enabled/_interval_minutes are real admin
+    configuration -- included. network_sweep_last_run_at/
+    _last_host_count are controller/network_sweep.py's own diagnostic
+    status (for the Settings page's live display) -- excluded, same
+    reasoning as cr_resolver_last_error above: restoring a "last ran"
+    timestamp from a different box onto a fresh install would just be
+    misleading."""
+    db.set_setting(conn, "network_sweep_enabled", "0")
+    db.set_setting(conn, "network_sweep_interval_minutes", "30")
+    db.set_setting(conn, "network_sweep_last_run_at", "2026-09-09T03:00:00Z")
+    db.set_setting(conn, "network_sweep_last_host_count", "254")
+
+    data = backup.export_config(conn)
+
+    assert data["settings"].get("network_sweep_enabled") == "0"
+    assert data["settings"].get("network_sweep_interval_minutes") == "30"
+    assert "network_sweep_last_run_at" not in data["settings"]
+    assert "network_sweep_last_host_count" not in data["settings"]
+
+
 def test_export_includes_manual_category_domains_but_not_subscription(conn):
     category_id = _add_category(conn, subscription_url="https://example.com/list.txt")
     conn.execute(
