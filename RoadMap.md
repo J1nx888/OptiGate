@@ -7334,33 +7334,73 @@ the same way.
 behavior confirmed working correctly live** -- the one part of tonight's
 original plan that worked exactly as designed, no caveats.
 
-**Item 21: no proactive connection-flush when a device is reclassified
-to something more restrictive.** Found via a real IoT device
-(`20:a1:71:9d:58:dc`, an Amazon Echo) that showed "awaiting login" with
-12 failed attempts yet still responded to voice commands, while music
-playback failed. Verified the device's classification and every
-relevant nftables rule (`unauthenticated_v4` membership,
-`DOCKER-USER`/`FORWARD` chain state) were all correct. Explanation,
-confirmed live by the project owner power-cycling the device (which
-then correctly lost ALL access, including voice): `ct mark`, this
-project's own mechanism for letting an accepted connection's return
-traffic keep flowing, is set once per connection and deliberately
-persists for that connection's entire lifetime (see
-`knftables_adapter.go`'s own comment on why). That's correct and
-intentional for a device that's already authenticated staying connected
-through a later, unrelated policy recompute -- but it also means a
-connection accepted BEFORE a device was correctly classified (e.g.
-during tonight's stale-image window, or simply a long-lived connection
-like Echo's always-on voice channel) keeps working indefinitely,
-completely unaffected by the device's current, correct classification.
-Enforcement here is forward-looking only -- new connections are
-evaluated correctly, existing ones never are. Real fix needs
-`nftables-manager` to proactively flush a device's conntrack entries the
-moment its classification moves to something more restrictive
-(unauthenticated, quarantine) -- not built, needs its own design/
-implementation pass (likely `internal/nft`, using knftables or a raw
-netlink conntrack call, since this can't be done through `nft` rules
-alone).
+**Item 21: DONE (fixed 2026-09-09, next session): no proactive
+connection-flush when a device is reclassified to something more
+restrictive.** Found via a real IoT device (`20:a1:71:9d:58:dc`, an
+Amazon Echo) that showed "awaiting login" with 12 failed attempts yet
+still responded to voice commands, while music playback failed.
+Verified the device's classification and every relevant nftables rule
+(`unauthenticated_v4` membership, `DOCKER-USER`/`FORWARD` chain state)
+were all correct. Explanation, confirmed live by the project owner
+power-cycling the device (which then correctly lost ALL access,
+including voice): `ct mark`, this project's own mechanism for letting an
+accepted connection's return traffic keep flowing, is set once per
+connection and deliberately persists for that connection's entire
+lifetime (see `knftables_adapter.go`'s own comment on why). That's
+correct and intentional for a device that's already authenticated
+staying connected through a later, unrelated policy recompute -- but it
+also means a connection accepted BEFORE a device was correctly
+classified (e.g. during that session's stale-image window, or simply a
+long-lived connection like Echo's always-on voice channel) kept working
+indefinitely, completely unaffected by the device's current, correct
+classification. Enforcement was forward-looking only -- new connections
+were evaluated correctly, existing ones never were.
+
+**Fixed**: new `phase3/nftables-manager/internal/nft/conntrack.go` --
+`FlushConntrackForSource(ctx, ip)` shells out to conntrack-tools' own
+`conntrack -D -s <ip>` CLI (a DIFFERENT tool and kernel subsystem than
+`nft`/knftables, which has no equivalent "delete an already-tracked
+connection" primitive of its own; same "reuse the standard tool rather
+than hand-roll raw netlink protocol code" precedent as this project's
+Python side shelling out to `openssl`). Correctly treats conntrack-tools'
+own "0 flow entries have been deleted" nonzero exit as success, not a
+failure -- that's the expected, common outcome for a device that was
+never holding an already-accepted connection open in the first place,
+distinguished from a genuine failure only by conntrack's own stderr
+text (no separate exit code exists for the two cases). New
+`(*Manager).FlushConntrackForReclassifiedDevices(ctx, diffs)` inspects
+the SAME diff map `ApplyDiffs` already consumed each reconcile cycle and
+flushes conntrack for every IP newly added to `unauthenticated_v4`/
+`quarantine_v4` ONLY -- deliberately never for a device becoming LESS
+restricted (added to `bypass_v4`/`authenticated_v4`), which needs no
+flush and would only cause a pointless, disruptive reconnect. Wired into
+`cmd/pp-nftables-manager/main.go`'s `reconcileOnce()`, right after
+`ApplyDiffs` succeeds -- best-effort and non-fatal by design (each
+returned error is logged as a warning, never fails the reconcile cycle,
+matching the existing policy-conflict logging posture): a failed flush
+is strictly less severe than a failed `ApplyDiffs`, since the firewall
+rules governing the device's own NEW connections are already correctly
+applied either way. `conntrack-tools`' `conntrack` package added to
+`phase3/nftables-manager/Dockerfile`. 8 new tests in
+`internal/nft/conntrack_test.go`, using a PATH-injected fake `conntrack`
+shell script (this package has no CAP_NET_ADMIN/real kernel conntrack
+table available to test against, same reasoning `fault_test.go`'s own
+interface fakes already apply to knftables itself) -- covers the
+success/no-match/real-failure/missing-binary cases for
+`FlushConntrackForSource`, and confirms
+`FlushConntrackForReclassifiedDevices` flushes exactly the right IPs,
+ignores bypass/authenticated additions entirely, reports one error per
+failed IP while still attempting every one, and is a true no-op when
+neither restrictive set changed at all. Verified against the real
+edited source (scp'd to the Beelink, not a stale checkout) via the
+project's own `golang:1.25-bookworm` Docker-based build/test workflow --
+`go build ./...`, `go vet ./...`, `go test ./...` all clean, plus a
+`gofmt -l .` formatting check. Not yet deployed -- needs
+`docker compose build nftables-manager` and the interception profile
+restarted to take effect, and genuinely needs a live retest (the exact
+Echo power-cycle scenario, this time WITHOUT power-cycling, to confirm
+the flush alone now cuts it off) before being considered fully verified
+end-to-end.
 
 **Item 22: `bypass_login` and `ignored` are two different things, and a
 device running its own DNS-hijack-detecting security software needs the

@@ -22,8 +22,15 @@ FROM debian:bookworm-slim
 # reasoning: a plain file copy of a standard root bundle, not a
 # relaxation of TLS verification).
 COPY --from=python:3.12-slim /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+# conntrack-tools (added 2026-09-09, RoadMap.md item 21): provides the
+# `conntrack` CLI internal/nft/conntrack.go shells out to -- a
+# DIFFERENT tool than `nft` above, managing a different kernel
+# subsystem (the connection-tracking table, not the nftables ruleset
+# itself). nftables has no equivalent "delete an already-tracked
+# connection" primitive of its own; see that file's own doc comment for
+# why this exists at all.
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends ca-certificates nftables \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates nftables conntrack \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /pp-nftables-manager /usr/local/bin/pp-nftables-manager
 

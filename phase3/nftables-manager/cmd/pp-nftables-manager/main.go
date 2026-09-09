@@ -154,6 +154,22 @@ func reconcileOnce(ctx context.Context, mgr *nft.Manager, dbPath string) error {
 		return err
 	}
 	log.Printf("applied %d set diffs", len(diffs))
+
+	// Real gap found live 2026-09-09: the set diffs above are the whole
+	// story for a device's NEW connections (correctly blocked the moment
+	// it's added to unauthenticated_v4/quarantine_v4), but never revoked
+	// an already-open one -- see (*nft.Manager).
+	// FlushConntrackForReclassifiedDevices's own doc comment for the full
+	// story (an Amazon Echo kept answering voice commands well after
+	// being reclassified, until power-cycled). Best-effort and
+	// deliberately non-fatal: a flush failure here is strictly less
+	// severe than an ApplyDiffs failure above (the firewall rules
+	// already correctly deny this device's new traffic either way), so
+	// it's logged and the loop keeps going, the same posture already
+	// used for policy conflicts above.
+	for _, err := range mgr.FlushConntrackForReclassifiedDevices(ctx, diffs) {
+		log.Printf("warning: %v", err)
+	}
 	return nil
 }
 
