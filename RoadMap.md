@@ -7168,27 +7168,42 @@ test time (off, asleep, or a different AP/segment), not a further code
 gap -- needs the project owner to confirm the device was actually online
 during the test before this is investigated further.
 
-**Item 17: SSL-Bump doesn't work for either Crunchyroll or Asurascans --
-real cause found, not a domain-specific quirk.** AdGuard's own query log
-shows both domains' HTTPS DNS records carry `ech=` (Encrypted Client
-Hello) and advertise `alpn="h3,h2"` (HTTP/3 preferred). ECH encrypts the
-real SNI inside the TLS ClientHello, so Squid's SNI-based bump/splice
-decision (`proxy/sni_helper.py`) never sees "asurascans.com"/
-"crunchyroll.com" at all -- confirmed the actual CONNECT attempts DO
-reach Squid (found in `access.log`, logged under the raw destination IP
-since no real hostname was ever visible), each hanging with
-`NONE_NONE/000` (no result, client retries repeatedly) rather than a
-clean allow/deny. This is a real architectural gap this project has
-never had to handle before: ECH is Cloudflare's default for any
-Cloudflare-fronted site, and adoption is growing. Two real mitigations,
-neither built yet, need a real design conversation before choosing:
-(a) strip/reject DNS answers carrying `ech=` for bump-mode domains
-specifically (forces a visible-SNI fallback), and/or (b) block UDP/443
-(QUIC) for bump_v4 devices to force TCP/TLS fallback where Squid can at
-least attempt SNI inspection. Neither addresses ECH alone forcing a
-fallback to a REAL SNI Squid can act on -- (a) is the one that actually
-does; (b) only helps if QUIC was the separate reason a connection never
-reached Squid as TCP at all (also plausible, not separately confirmed).
+**Item 17: SSL-Bump doesn't work for Crunchyroll or Asurascans, but DOES
+work for Webtoons -- real, fully-confirmed cause, not a domain-specific
+quirk.** AdGuard's own query log shows Crunchyroll's and Asurascans'
+HTTPS DNS records carry `ech=` (Encrypted Client Hello) and advertise
+`alpn="h3,h2"` (HTTP/3 preferred) -- both are Cloudflare-fronted.
+**Confirmed the exact mechanism live, not just inferred**: Squid's own
+`access.log` shows `CONNECT cloudflare-ech.com:443` -- the literal,
+generic ECH "public name" placeholder Cloudflare uses across thousands
+of unrelated sites when ECH is active, standing in for the real
+(encrypted, invisible) SNI. Squid DOES read an SNI here -- just the
+wrong one. Squid's own built-in anti-spoofing check then compares the
+connection's real destination IP against what `cloudflare-ech.com`
+itself would resolve to -- since that's a shared placeholder, the real
+IP (Asurascans' actual Cloudflare edge IP) doesn't match, and Squid logs
+`SECURITY ALERT: Host header forgery detected` and kills the connection
+immediately (`NONE_NONE/409` in `access.log`) -- entirely inside Squid's
+own core TLS-bump machinery, before `proxy/sni_helper.py`'s own
+allow/deny logic ever runs. Item 9's "unconfigured domain -> allow" fix
+categorically cannot help here: the connection never reaches that code
+at all. **Webtoons.com, by contrast, is Akamai-fronted with NO `ech=`
+parameter at all** (confirmed in the same query log) -- Squid sees the
+real `www.webtoons.com` SNI directly, matches it cleanly against the
+configured `mode='bump'` domain, and it works exactly as designed. This
+is a real architectural gap this project has never had to handle
+before: ECH is Cloudflare's default for any Cloudflare-fronted site (not
+Akamai's), and adoption is growing. Two real mitigations, neither built
+yet, need a real design conversation before choosing: (a) strip/reject
+DNS answers carrying `ech=` for bump-mode domains specifically (forces a
+visible-SNI fallback -- this is the one that actually addresses the root
+cause), and/or (b) block UDP/443 (QUIC) for bump_v4 devices to force
+TCP/TLS fallback where Squid can at least attempt SNI inspection (only
+helps if QUIC was ALSO independently causing some connections to never
+reach Squid as TCP at all -- plausible, not separately confirmed this
+session). Whether Squid itself exposes any directive to relax the
+Host-header-forgery check for specific cases was not researched this
+session -- worth checking before assuming (a)/(b) are the only options.
 
 **Item 18 (confirms item 7 is still open, doesn't newly break
 anything): `optigate.home` shows only the box's own IP
@@ -7363,6 +7378,19 @@ mode-schedule picker (`mode_schedules`, already computed for
 `schedules()`, would need computing for `user_detail()` too) + duration,
 posting to the same existing `add_schedule_override()` route with
 `target=f"user:{user_id}"` pre-filled.
+
+**Session closed 2026-09-09**: `controller`/`nftables-manager`/
+`arp-worker` stopped (`docker compose stop`), Bark Home handed the
+network back. Verified `nftables-manager`'s graceful Teardown (item 12,
+running this session for the first time on the real rebuilt image) fired
+cleanly on stop -- log confirms `"shutting down: removing the optigate
+table and its rules"` -- box returned to a normal passthrough state, no
+manual `sudo nft delete table` needed this time (unlike the last
+session's teardown, before this fix existed). `dashboard`/`proxy`/
+`adguard` left running (base services, coexist fine with Bark Home).
+Nine real findings this session (items 16-24), one already fixed live
+(the AdGuard credential resync), several needing their own design
+passes before the next test window -- see each item above for details.
 
 ---
 
