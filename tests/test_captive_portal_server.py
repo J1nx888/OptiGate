@@ -479,6 +479,73 @@ def test_admin_bypass_sets_bypass_login_and_lands_the_device_in_authenticated(se
     assert classify_device(full_row) == PolicyClass.AUTHENTICATED
 
 
+def test_admin_ignore_sets_ignored_and_excludes_the_device_from_filtering(server, conn):
+    """RoadMap.md item 22: bypass alone isn't enough for a device
+    running its own DNS-hijack-detecting security software -- it needs
+    full Ignore, previously only settable from the dashboard's Devices
+    page. This gives an admin standing at the gated device the same
+    one-click option `bypass` already has."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+
+    status, body = _post_admin(server, "admin", "adminpw", "ignore")
+
+    assert status == 200
+    assert "excluded from filtering" in body
+    row = conn.execute("SELECT ignored FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["ignored"] == 1
+
+
+def test_admin_ignore_clears_a_prior_user_assignment(server, conn):
+    """Same mutual-exclusion semantics as dashboard.py's own
+    bulk_set_ignored_devices() -- ignored and a personal assignment
+    don't coexist at the UI level."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    device_id = conn.execute("SELECT device_id FROM device_bindings WHERE ipv4_address = ?", (IP_1,)).fetchone()["device_id"]
+    user_id = _add_user(conn, "kid1", "correcthorse")
+    conn.execute("UPDATE devices SET user_id = ? WHERE id = ?", (user_id, device_id))
+    conn.commit()
+    _set_admin_credentials(conn)
+
+    _post_admin(server, "admin", "adminpw", "ignore")
+
+    row = conn.execute("SELECT ignored, user_id FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["ignored"] == 1
+    assert row["user_id"] is None
+
+
+def test_admin_ignore_clears_a_prior_group_assignment(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    device_id = conn.execute("SELECT device_id FROM device_bindings WHERE ipv4_address = ?", (IP_1,)).fetchone()["device_id"]
+    group_id = _add_group(conn, "IoT")
+    conn.execute("UPDATE devices SET group_id = ? WHERE id = ?", (group_id, device_id))
+    conn.commit()
+    _set_admin_credentials(conn)
+
+    _post_admin(server, "admin", "adminpw", "ignore")
+
+    row = conn.execute("SELECT ignored, group_id FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["ignored"] == 1
+    assert row["group_id"] is None
+
+
+def test_login_page_shows_the_ignore_button(server):
+    _, body, _ = _get(server)
+    assert 'value="ignore"' in body
+
+
+def test_admin_ignore_with_wrong_admin_password_is_rejected(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+
+    status, body = _post_admin(server, "admin", "wrongpassword", "ignore")
+
+    assert status == 200
+    assert "incorrect admin" in body.lower()
+    row = conn.execute("SELECT ignored FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["ignored"] == 0
+
+
 def test_admin_assign_group_sets_group_and_authenticates_the_device(server, conn):
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _set_admin_credentials(conn)

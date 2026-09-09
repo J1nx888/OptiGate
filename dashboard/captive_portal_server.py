@@ -199,6 +199,7 @@ stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l8 3.5v5.2c0 4.7-3.
   <input type="text" name="admin_username" placeholder="Admin username" autocapitalize="none" autocorrect="off" required>
   <input type="password" name="admin_password" placeholder="Admin password" required>
   <button type="submit" name="action" value="bypass">Let this device online without logging in</button>
+  <button type="submit" name="action" value="ignore">Ignore this device (exclude it from filtering entirely)</button>
 {group_row}
 </form>
 </details>
@@ -489,6 +490,33 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             conn.commit()
             log.info("device %s bypassed via portal admin action", device["mac_address"])
             self._send_html(200, _render_admin_success("This device no longer needs to log in."))
+            return
+
+        if action == "ignore":
+            # RoadMap.md's dated entry (item 22): bypass_login and
+            # ignored are two different things -- bypass skips only the
+            # captive-portal login while still applying full DNS-tier
+            # filtering, but a device running its own DNS-hijack-
+            # detecting security software (found live: a work laptop
+            # running Cisco Umbrella/OpenDNS) needs to be excluded from
+            # DNS interception ENTIRELY, which only `ignored` does. That
+            # was only fixable from the dashboard's Devices page before
+            # this -- an admin standing at the gated device itself had
+            # no equivalent one-click option here, same gap `bypass`
+            # already closed for the "skip login" case. Same semantics
+            # as dashboard.py's own bulk_set_ignored_devices(): ignored
+            # and a user/group assignment are mutually exclusive at the
+            # UI level (devices' own CHECK constraint doesn't require
+            # it, but every other ignore path in this project clears
+            # both), so this clears any prior assignment too rather than
+            # leaving a stale one behind a now-ignored device.
+            conn.execute(
+                "UPDATE devices SET ignored = 1, user_id = NULL, group_id = NULL WHERE id = ?",
+                (device["id"],),
+            )
+            conn.commit()
+            log.info("device %s ignored via portal admin action", device["mac_address"])
+            self._send_html(200, _render_admin_success("This device is now excluded from filtering entirely."))
             return
 
         if action == "assign_group":

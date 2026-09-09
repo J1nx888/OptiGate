@@ -7156,17 +7156,18 @@ services before this.** Rebuilt and restarted all three mid-test once
 found; `arp-worker`'s image was unchanged (no source changes since
 09-08) so compose correctly left that one running.
 
-**Item 16: network sweep never running -> device `192.168.1.57`
-(`e6:fb:4e:5b:ef:a5`) invisible.** Direct consequence of the stale-image
-mistake above -- `network_sweep_last_run_at` was `NULL` despite
-`controller` being "up" for 20+ minutes, because the module importing it
-didn't exist in that image at all. After rebuilding, ran a full sweep
-(254 addresses) -- `192.168.1.57` still didn't appear in
-`device_bindings`. With current code confirmed running, this now points
-to the device not being reachable at L2 from this box's interface at
-test time (off, asleep, or a different AP/segment), not a further code
-gap -- needs the project owner to confirm the device was actually online
-during the test before this is investigated further.
+**Item 16: DONE -- network sweep never running -> device
+`192.168.1.57` (`e6:fb:4e:5b:ef:a5`) invisible.** Direct consequence of
+the stale-image mistake above -- `network_sweep_last_run_at` was `NULL`
+despite `controller` being "up" for 20+ minutes, because the module
+importing it didn't exist in that image at all. Rebuilding is the actual
+fix: confirmed the module now imports and runs correctly by executing a
+full sweep (254 addresses) that completed without error on the current
+code. `192.168.1.57` itself still didn't appear in `device_bindings`
+after that sweep, but with the sweep mechanism now directly confirmed
+working, that's just this specific device not being reachable at L2 at
+that moment (off, asleep, or on a different AP/segment) -- not a
+remaining code gap. Nothing further to fix here.
 
 **Item 17: SSL-Bump doesn't work for Crunchyroll or Asurascans, but DOES
 work for Webtoons -- real, fully-confirmed cause, not a domain-specific
@@ -7492,10 +7493,22 @@ to fully `ignored` instead (excludes it from DNS interception entirely)
 -- matching how the household's other two work devices (`DOJ_Laptop`,
 `Office Computer`) were already configured; not yet re-confirmed working
 by the project owner as of this note. Not a bug in this project's own
-logic -- `bypass_login` did exactly what its docstring says. Worth a
-line on the Settings/Devices UI somewhere clarifying that a device
-running its own DNS-security software needs full Ignore, not just
-bypass-login, if this comes up again.
+logic -- `bypass_login` did exactly what its docstring says.
+
+**Follow-up: DONE (built 2026-09-09, next session).** The gap this
+surfaced -- Ignore was only reachable from the dashboard's Devices page,
+never from the gated device itself -- is now closed the same way
+`bypass` already was: `dashboard/captive_portal_server.py`'s
+portal-side admin action panel gained a second button, "Ignore this
+device (exclude it from filtering entirely)", right next to "Let this
+device online without logging in." Same admin-credential check, same
+shared rate limiter, same semantics as the dashboard's own
+`bulk_set_ignored_devices()` -- sets `ignored = 1` and clears any prior
+user/group assignment, since the two are mutually exclusive at the UI
+level everywhere else in this project. An admin standing at a device
+like the OIG Computer laptop above can now pick Ignore on the spot
+instead of remembering to go do it from the dashboard afterward. 6 new
+tests in `tests/test_captive_portal_server.py`.
 
 **Item 23: DONE (built 2026-09-09, next session).** A direct "Add to
 ignore" action on the Devices list page, for both a single device
