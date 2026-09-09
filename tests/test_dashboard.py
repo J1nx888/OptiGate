@@ -1520,7 +1520,9 @@ def test_settings_page_renders(client):
 
 def test_update_local_network_saves_value(client, db_conn):
     resp = client.post(
-        "/settings/local-network", data={"local_network": "10.0.0.0/8"}, headers=_auth_header()
+        "/settings/network",
+        data={"local_network": "10.0.0.0/8", "network_sweep_interval_minutes": "60"},
+        headers=_auth_header(),
     )
     assert resp.status_code == 302
     import db
@@ -1528,7 +1530,11 @@ def test_update_local_network_saves_value(client, db_conn):
 
 
 def test_update_local_network_blank_disables_check(client, db_conn):
-    client.post("/settings/local-network", data={"local_network": ""}, headers=_auth_header())
+    client.post(
+        "/settings/network",
+        data={"local_network": "", "network_sweep_interval_minutes": "60"},
+        headers=_auth_header(),
+    )
     import db
     assert db.get_setting(db_conn, "local_network") == ""
     import matching
@@ -1561,8 +1567,8 @@ def test_settings_page_shows_last_sweep_status(client, db_conn):
 def test_update_network_sweep_saves_enabled_and_interval(client, db_conn):
     import db
     resp = client.post(
-        "/settings/network-sweep",
-        data={"network_sweep_enabled": "1", "network_sweep_interval_minutes": "30"},
+        "/settings/network",
+        data={"local_network": "", "network_sweep_enabled": "1", "network_sweep_interval_minutes": "30"},
         headers=_auth_header(),
     )
     assert resp.status_code == 302
@@ -1575,8 +1581,8 @@ def test_update_network_sweep_unchecked_box_disables(client, db_conn):
     read as disabled, not crash on a missing form key."""
     import db
     resp = client.post(
-        "/settings/network-sweep",
-        data={"network_sweep_interval_minutes": "60"},
+        "/settings/network",
+        data={"local_network": "", "network_sweep_interval_minutes": "60"},
         headers=_auth_header(),
     )
     assert resp.status_code == 302
@@ -1586,8 +1592,8 @@ def test_update_network_sweep_unchecked_box_disables(client, db_conn):
 def test_update_network_sweep_rejects_non_numeric_interval(client, db_conn):
     import db
     resp = client.post(
-        "/settings/network-sweep",
-        data={"network_sweep_enabled": "1", "network_sweep_interval_minutes": "not-a-number"},
+        "/settings/network",
+        data={"local_network": "", "network_sweep_enabled": "1", "network_sweep_interval_minutes": "not-a-number"},
         headers=_auth_header(),
     )
     assert resp.status_code == 302
@@ -1598,12 +1604,29 @@ def test_update_network_sweep_rejects_non_numeric_interval(client, db_conn):
 def test_update_network_sweep_rejects_zero_or_negative_interval(client, db_conn):
     import db
     resp = client.post(
-        "/settings/network-sweep",
-        data={"network_sweep_enabled": "1", "network_sweep_interval_minutes": "0"},
+        "/settings/network",
+        data={"local_network": "", "network_sweep_enabled": "1", "network_sweep_interval_minutes": "0"},
         headers=_auth_header(),
     )
     assert resp.status_code == 302
     assert db.get_setting(db_conn, "network_sweep_interval_minutes", "") == ""
+
+
+def test_update_network_settings_rejected_interval_leaves_local_network_unchanged_too(client, db_conn):
+    """Atomicity check for the merged Network section (RoadMap.md item
+    3): a bad interval must leave the WHOLE save rejected, not just the
+    interval -- a local_network change submitted in the same request
+    must not silently go through."""
+    import db
+    db.set_setting(db_conn, "local_network", "192.168.1.0/24")
+    db_conn.commit()
+    resp = client.post(
+        "/settings/network",
+        data={"local_network": "10.0.0.0/8", "network_sweep_interval_minutes": "not-a-number"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "local_network") == "192.168.1.0/24"
 
 
 def test_run_network_sweep_now_sets_the_request_timestamp(client, db_conn):
@@ -1689,7 +1712,7 @@ def test_settings_page_shows_live_interception_status_for_the_sweep(client, db_c
 
 def test_update_optigate_hostname_saves_lowercased_value(client, db_conn):
     resp = client.post(
-        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "MyNetwork"}, headers=_auth_header()
+        "/settings/household", data={"optigate_hostname_prefix": "MyNetwork"}, headers=_auth_header()
     )
     assert resp.status_code == 302
     import db
@@ -1697,7 +1720,7 @@ def test_update_optigate_hostname_saves_lowercased_value(client, db_conn):
 
 
 def test_update_optigate_hostname_blank_falls_back_to_default(client, db_conn):
-    client.post("/settings/optigate-hostname", data={"optigate_hostname_prefix": ""}, headers=_auth_header())
+    client.post("/settings/household", data={"optigate_hostname_prefix": ""}, headers=_auth_header())
     import db
     assert db.get_setting(db_conn, "optigate_hostname_prefix") == db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
 
@@ -1708,7 +1731,7 @@ def test_update_optigate_hostname_rejects_a_dot(client, db_conn):
     prefix containing its own dot could otherwise smuggle in a
     different, unintended suffix."""
     resp = client.post(
-        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "evil.example"}, headers=_auth_header()
+        "/settings/household", data={"optigate_hostname_prefix": "evil.example"}, headers=_auth_header()
     )
     assert "error=1" in resp.headers["Location"]
     import db
@@ -1717,14 +1740,14 @@ def test_update_optigate_hostname_rejects_a_dot(client, db_conn):
 
 def test_update_optigate_hostname_rejects_invalid_characters(client, db_conn):
     resp = client.post(
-        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "not valid!"}, headers=_auth_header()
+        "/settings/household", data={"optigate_hostname_prefix": "not valid!"}, headers=_auth_header()
     )
     assert "error=1" in resp.headers["Location"]
 
 
 def test_update_optigate_hostname_rejects_leading_or_trailing_hyphen(client, db_conn):
     resp = client.post(
-        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "-bad"}, headers=_auth_header()
+        "/settings/household", data={"optigate_hostname_prefix": "-bad"}, headers=_auth_header()
     )
     assert "error=1" in resp.headers["Location"]
 
@@ -1743,7 +1766,7 @@ def test_update_optigate_hostname_without_dashboard_url_explains_why(client, db_
     still succeed (the setting itself is real), but say plainly why the
     address isn't live yet, not claim success it can't back up."""
     resp = client.post(
-        "/settings/optigate-hostname", data={"optigate_hostname_prefix": "myhouse"}, headers=_auth_header()
+        "/settings/household", data={"optigate_hostname_prefix": "myhouse"}, headers=_auth_header()
     )
     assert resp.status_code == 302
     assert "error=1" in resp.headers["Location"]
@@ -1757,7 +1780,7 @@ def test_update_optigate_hostname_pushes_to_adguard_when_configured(client, db_c
 
     monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
     client.post(
-        "/settings/adguard",
+        "/settings/filtering",
         data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "hunter2"},
         headers=_auth_header(),
     )
@@ -1773,7 +1796,7 @@ def test_update_optigate_hostname_pushes_to_adguard_when_configured(client, db_c
     monkeypatch.setattr(dashboard.optigate_rewrite, "sync_optigate_rewrite", fake_sync)
 
     resp = client.post(
-        "/settings/optigate-hostname",
+        "/settings/household",
         data={"optigate_hostname_prefix": "myhouse"},
         headers=_auth_header(username="admin", password="hunter2"),
     )
@@ -1789,7 +1812,7 @@ def test_update_optigate_hostname_reports_an_adguard_error_without_crashing(clie
 
     monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
     client.post(
-        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+        "/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
     )
     client.post(
         "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
@@ -1801,7 +1824,7 @@ def test_update_optigate_hostname_reports_an_adguard_error_without_crashing(clie
     monkeypatch.setattr(dashboard.optigate_rewrite, "sync_optigate_rewrite", fake_sync)
 
     resp = client.post(
-        "/settings/optigate-hostname",
+        "/settings/household",
         data={"optigate_hostname_prefix": "myhouse"},
         headers=_auth_header(username="admin", password="hunter2"),
     )
@@ -1824,7 +1847,7 @@ def test_settings_page_shows_live_status_when_rewrite_confirmed(client, db_conn,
 
     monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
     client.post(
-        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+        "/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
     )
     client.post(
         "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
@@ -1845,7 +1868,7 @@ def test_settings_page_status_check_survives_adguard_being_unreachable(client, d
 
     monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
     client.post(
-        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+        "/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
     )
     client.post(
         "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
@@ -1874,7 +1897,7 @@ def test_settings_page_distinguishes_stale_credentials_from_adguard_being_down(c
 
     monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
     client.post(
-        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+        "/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
     )
     client.post(
         "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
@@ -1901,7 +1924,7 @@ def test_refresh_adguard_filters_also_retries_the_optigate_rewrite(client, db_co
 
     monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
     client.post(
-        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+        "/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
     )
     client.post(
         "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
@@ -1922,7 +1945,7 @@ def test_refresh_adguard_filters_also_retries_the_optigate_rewrite(client, db_co
 
 def test_update_block_page_mode_valid_value_saved(client, db_conn):
     resp = client.post(
-        "/settings/block-page-mode", data={"block_page_mode": "redirect"}, headers=_auth_header()
+        "/settings/filtering", data={"block_page_mode": "redirect"}, headers=_auth_header()
     )
     assert resp.status_code == 302
     import db
@@ -1931,7 +1954,7 @@ def test_update_block_page_mode_valid_value_saved(client, db_conn):
 
 def test_update_block_page_mode_invalid_value_rejected(client, db_conn):
     resp = client.post(
-        "/settings/block-page-mode", data={"block_page_mode": "not-a-mode"}, headers=_auth_header()
+        "/settings/filtering", data={"block_page_mode": "not-a-mode"}, headers=_auth_header()
     )
     assert "error=1" in resp.headers["Location"]
 
@@ -2219,13 +2242,15 @@ def test_settings_page_has_no_separate_adguard_username_or_password_input(client
 
 
 # ============================================================
-# /settings/adguard: connection ADDRESS only (username/password moved to
-# /settings/admin above) + "check for updates now"
+# /settings/filtering: AdGuard connection ADDRESS (username/password
+# moved to /settings/admin above), SafeSearch, and blocked-site
+# experience -- merged into one atomic Save 2026-09-09 (RoadMap.md item
+# 3). Plus "check for updates now" (its own separate one-off action).
 # ============================================================
 
 def test_update_adguard_settings_saves_only_the_url(client, db_conn):
     resp = client.post(
-        "/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
+        "/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header(),
     )
     assert resp.status_code == 302
     import db as db_mod
@@ -2252,7 +2277,7 @@ def test_settings_shows_adguard_ui_link_using_the_browsers_own_host(client, db_c
     # the browser actually used to reach this page (here, the Flask test
     # client's own default Host: localhost).
     client.post(
-        "/settings/adguard",
+        "/settings/filtering",
         data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "x"},
         headers=_auth_header(),
     )
@@ -2263,7 +2288,7 @@ def test_settings_shows_adguard_ui_link_using_the_browsers_own_host(client, db_c
 
 def test_adguard_ui_link_uses_a_different_configured_port(client, db_conn):
     client.post(
-        "/settings/adguard",
+        "/settings/filtering",
         data={"adguard_url": "http://127.0.0.1:4000", "adguard_username": "admin", "adguard_password": "x"},
         headers=_auth_header(),
     )
@@ -2274,7 +2299,7 @@ def test_adguard_ui_link_uses_a_different_configured_port(client, db_conn):
 def test_refresh_adguard_filters_calls_the_real_client_and_reports_the_count(client, db_conn, monkeypatch):
     import dashboard
     monkeypatch.setattr(dashboard.adguard_config_sync, "sync_adguard_credentials", lambda *a, **kw: None)
-    client.post("/settings/adguard", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header())
+    client.post("/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header())
     # Username/password now come from the dashboard's own admin login
     # (update_admin()), not a separate AdGuard-only form -- see this
     # module's own dated entry.
@@ -2300,7 +2325,7 @@ def test_refresh_adguard_filters_calls_the_real_client_and_reports_the_count(cli
 
 def test_refresh_adguard_filters_reports_adguard_errors_without_crashing(client, db_conn, monkeypatch):
     client.post(
-        "/settings/adguard",
+        "/settings/filtering",
         data={"adguard_url": "http://127.0.0.1:3000", "adguard_username": "admin", "adguard_password": "hunter2"},
         headers=_auth_header(),
     )
@@ -3567,7 +3592,13 @@ def test_user_detail_shows_currently_active_schedule(client, db_conn):
     )
     schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Bedtime'").fetchone()["id"]
     client.post(
-        "/schedules/access", data={"schedule_id": schedule_id, "user_ids": [str(user_id)]}, headers=_auth_header()
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            "start_time": "00:00", "end_time": "23:59", "time_zone": "UTC", "lockout_all": "on",
+            "user_ids": [str(user_id)],
+        },
+        headers=_auth_header(),
     )
 
     resp = client.get(f"/users/{user_id}", headers=_auth_header())
@@ -6032,6 +6063,126 @@ def test_update_schedule_saves_new_window(client, db_conn):
     assert row["time_zone"] == "America/Chicago"
 
 
+def test_schedule_detail_renders_exactly_one_save_button(client, db_conn):
+    # RoadMap.md item 3: the When / Blocked for / Categories areas used
+    # to be three separate <form>s, each with its own Save button.
+    client.post(
+        "/schedules/add",
+        data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'School hours'").fetchone()["id"]
+    resp = client.get(f"/schedules/{schedule_id}", headers=_auth_header())
+    body = resp.data.decode()
+    assert body.count('action="/schedules/update"') == 1
+    assert body.count(">Save schedule<") == 1
+
+
+def test_update_schedule_is_one_atomic_save_across_window_access_and_categories(client, db_conn):
+    # RoadMap.md item 3, "one Save button per settings-shaped page, not
+    # several": this used to be three independent forms/routes (When /
+    # Blocked for / Categories blocked), each saved separately -- merged
+    # into one atomic save. Confirms a single submit really does update
+    # all three areas together, not just the time-window fields.
+    client.post(
+        "/schedules/add",
+        data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'School hours'").fetchone()["id"]
+    client.post("/users/add", data={"username": "kid_atomic", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid_atomic'").fetchone()["id"]
+    client.post("/categories/add", data={"name": "Gaming Atomic"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gaming Atomic'").fetchone()["id"]
+
+    resp = client.post(
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon", "tue"], "start_time": "09:00", "end_time": "16:00",
+            "time_zone": "America/Chicago", "user_ids": [str(user_id)],
+            "categories_section_present": "1", "category_ids": [str(category_id)],
+        },
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    row = db_conn.execute("SELECT * FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
+    assert row["days_of_week"] == "mon,tue"
+    assert row["start_time"] == "09:00"
+    assert db_conn.execute(
+        "SELECT 1 FROM schedule_users WHERE schedule_id = ? AND user_id = ?", (schedule_id, user_id)
+    ).fetchone() is not None
+    assert db_conn.execute(
+        "SELECT 1 FROM schedule_categories WHERE schedule_id = ? AND category_id = ?", (schedule_id, category_id)
+    ).fetchone() is not None
+
+
+def test_update_schedule_rejects_whole_save_on_a_bad_time_zone_not_just_the_time_zone(client, db_conn):
+    # Atomicity check: a bad value anywhere in the merged form must leave
+    # the WHOLE schedule (including access/categories fields submitted in
+    # the same request) untouched -- never a partial save.
+    client.post(
+        "/schedules/add",
+        data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'School hours'").fetchone()["id"]
+    resp = client.post(
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["tue"], "start_time": "09:00", "end_time": "16:00",
+            "time_zone": "Not/AZone", "is_global": "on",
+        },
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    row = db_conn.execute("SELECT * FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
+    assert row["days_of_week"] == "mon"
+    assert row["start_time"] == "08:00"
+    assert row["is_global"] == 0
+
+
+def test_update_schedule_while_lockout_is_on_does_not_wipe_previously_saved_categories(client, db_conn):
+    # Real regression this merge could introduce: SCHEDULE_DETAIL_BODY
+    # hides the categories checkbox list entirely while lockout_all is
+    # checked, so a lockout schedule's own save never submits
+    # category_ids at all. Without the categories_section_present guard,
+    # that absence would look identical to "user unchecked everything"
+    # and silently delete whatever categories were configured --
+    # invisible until lockout was turned back off again.
+    client.post(
+        "/schedules/add",
+        data={"name": "Bedtime", "days": ["mon"], "start_time": "21:00", "end_time": "06:00", "time_zone": "UTC"},
+        headers=_auth_header(),
+    )
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Bedtime'").fetchone()["id"]
+    client.post("/categories/add", data={"name": "Streaming"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Streaming'").fetchone()["id"]
+    client.post(
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "21:00", "end_time": "06:00",
+            "time_zone": "UTC", "categories_section_present": "1", "category_ids": [str(category_id)],
+        },
+        headers=_auth_header(),
+    )
+
+    # Now flip on lockout_all -- the categories section (and its hidden
+    # categories_section_present flag) is no longer rendered, so a real
+    # browser submit of this same form would omit category_ids entirely.
+    client.post(
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "21:00", "end_time": "06:00",
+            "time_zone": "UTC", "lockout_all": "on",
+        },
+        headers=_auth_header(),
+    )
+
+    assert db_conn.execute(
+        "SELECT 1 FROM schedule_categories WHERE schedule_id = ? AND category_id = ?", (schedule_id, category_id)
+    ).fetchone() is not None
+
+
 def test_schedule_detail_shows_categories_section_unless_lockout(client, db_conn):
     client.post(
         "/schedules/add",
@@ -6063,8 +6214,11 @@ def test_update_schedule_categories_assigns_them(client, db_conn):
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gaming'").fetchone()["id"]
 
     resp = client.post(
-        "/schedules/categories",
-        data={"schedule_id": schedule_id, "category_ids": [str(category_id)]},
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "08:00", "end_time": "15:00",
+            "time_zone": "UTC", "categories_section_present": "1", "category_ids": [str(category_id)],
+        },
         headers=_auth_header(),
     )
     assert resp.status_code == 302
@@ -6092,7 +6246,11 @@ def test_schedule_detail_shows_every_category_as_a_checkbox_no_typing_needed(cli
         client.post("/categories/add", data={"name": name}, headers=_auth_header())
     checked_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Category 3'").fetchone()["id"]
     client.post(
-        "/schedules/categories", data={"schedule_id": schedule_id, "category_ids": [str(checked_id)]},
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "08:00", "end_time": "15:00",
+            "time_zone": "UTC", "categories_section_present": "1", "category_ids": [str(checked_id)],
+        },
         headers=_auth_header(),
     )
 
@@ -6125,7 +6283,12 @@ def test_update_schedule_access_sets_global_and_targets(client, db_conn):
     )
     schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Bedtime'").fetchone()["id"]
     resp = client.post(
-        "/schedules/access", data={"schedule_id": schedule_id, "is_global": "on"}, headers=_auth_header()
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "21:00", "end_time": "06:00",
+            "time_zone": "UTC", "is_global": "on",
+        },
+        headers=_auth_header(),
     )
     assert resp.status_code == 302
     assert db_conn.execute("SELECT is_global FROM schedules WHERE id = ?", (schedule_id,)).fetchone()["is_global"] == 1
@@ -6162,16 +6325,13 @@ def _add_mode_schedule(client, db_conn, name: str, *, is_global: bool = True) ->
         headers=_auth_header(),
     )
     schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = ?", (name,)).fetchone()["id"]
-    client.post(
-        "/schedules/update",
-        data={
-            "schedule_id": schedule_id, "days": ["mon"], "start_time": "00:00", "end_time": "23:59",
-            "time_zone": "UTC", "is_mode": "on",
-        },
-        headers=_auth_header(),
-    )
+    data = {
+        "schedule_id": schedule_id, "days": ["mon"], "start_time": "00:00", "end_time": "23:59",
+        "time_zone": "UTC", "is_mode": "on",
+    }
     if is_global:
-        client.post("/schedules/access", data={"schedule_id": schedule_id, "is_global": "on"}, headers=_auth_header())
+        data["is_global"] = "on"
+    client.post("/schedules/update", data=data, headers=_auth_header())
     return schedule_id
 
 
@@ -6280,7 +6440,7 @@ def test_update_household_time_zone_saves(client, db_conn):
     import db as db_mod
 
     resp = client.post(
-        "/settings/household-time-zone", data={"household_time_zone": "America/Chicago"}, headers=_auth_header()
+        "/settings/household", data={"household_time_zone": "America/Chicago"}, headers=_auth_header()
     )
     assert resp.status_code == 302
     assert db_mod.get_setting(db_conn, "household_time_zone") == "America/Chicago"
@@ -6290,7 +6450,7 @@ def test_update_household_time_zone_rejects_garbage(client, db_conn):
     import db as db_mod
 
     resp = client.post(
-        "/settings/household-time-zone", data={"household_time_zone": "Not/AZone"}, headers=_auth_header()
+        "/settings/household", data={"household_time_zone": "Not/AZone"}, headers=_auth_header()
     )
     assert "error=1" in resp.headers["Location"]
     assert db_mod.get_setting(db_conn, "household_time_zone", "UTC") == "UTC"
@@ -6315,7 +6475,7 @@ def test_settings_page_includes_the_auto_detect_script_when_never_configured(cli
 
 def test_settings_page_omits_the_auto_detect_script_once_explicitly_saved(client):
     client.post(
-        "/settings/household-time-zone", data={"household_time_zone": "America/Chicago"}, headers=_auth_header()
+        "/settings/household", data={"household_time_zone": "America/Chicago"}, headers=_auth_header()
     )
     resp = client.get("/settings", headers=_auth_header())
     assert b"Intl.DateTimeFormat" not in resp.data
@@ -6330,7 +6490,7 @@ def test_settings_page_shows_safesearch_toggle(client):
 def test_update_safesearch_checked_saves_on(client, db_conn):
     import db as db_mod
 
-    resp = client.post("/settings/safesearch", data={"safesearch_enabled": "1"}, headers=_auth_header())
+    resp = client.post("/settings/filtering", data={"safesearch_enabled": "1"}, headers=_auth_header())
     assert resp.status_code == 302
     assert db_mod.get_setting(db_conn, "safesearch_enabled") == "1"
 
@@ -6340,7 +6500,7 @@ def test_update_safesearch_unchecked_saves_off(client, db_conn):
 
     db_mod.set_setting(db_conn, "safesearch_enabled", "1")
     db_conn.commit()
-    resp = client.post("/settings/safesearch", data={}, headers=_auth_header())
+    resp = client.post("/settings/filtering", data={}, headers=_auth_header())
     assert resp.status_code == 302
     assert db_mod.get_setting(db_conn, "safesearch_enabled") == "0"
 

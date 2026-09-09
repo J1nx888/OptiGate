@@ -649,17 +649,24 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   categories card that's **omitted entirely** (not just disabled) when
   `lockout_all` is set, since a full lockout blocks everything
   regardless of any category assignment. Renders `SCHEDULE_DETAIL_BODY`.
-- `POST /schedules/update` -> `update_schedule()` -- same field set/
-  validation as `add_schedule()`, applied to an existing row.
-- `POST /schedules/access` -> `update_schedule_access()` -- same shape
-  as `update_category_access()`, minus the size-threshold check (a
-  schedule's own target set has no domain-count concept itself; that
-  check lives on the category side).
-- `POST /schedules/categories` -> `update_schedule_categories()` --
-  form fields `schedule_id`, `category_ids` (posted as a list) -- full
-  replace of `schedule_categories` for that schedule, same grant-and-
-  revoke-are-the-same-action shape as every other access-replace route
-  in this file. **Real UX bug fixed 2026-09-08**, found by live user
+- `POST /schedules/update` -> `update_schedule()` -- **merged into one
+  atomic Save 2026-09-09 (RoadMap.md item 3, "one Save button per
+  settings-shaped page, not several")**: used to be three separate
+  routes/forms (this one for the time window, `/schedules/access`, and
+  `/schedules/categories`, each saved independently) -- now one form
+  covering all three, one submit, one transaction. A bad value anywhere
+  (an invalid time zone, say) leaves the whole schedule unchanged, never
+  partially saved. Same field set/validation as `add_schedule()` for the
+  time window, plus: access fields (`is_global`, `user_ids`, `group_ids`,
+  `device_ids` -- full replace, same shape `update_category_access()`
+  uses, minus the size-threshold check since a schedule's own target set
+  has no domain-count concept) and `category_ids` (posted as a list,
+  full replace of `schedule_categories`) guarded by a
+  `categories_section_present` hidden field -- `SCHEDULE_DETAIL_BODY`
+  omits the categories checkboxes entirely while `lockout_all` is
+  checked, so without that guard a save made while lockout is on would
+  silently wipe out whatever categories were configured, discovered only
+  once lockout was turned back off. **Real UX bug fixed 2026-09-08**, found by live user
   testing: the picker used to be the shared type-to-reveal combobox
   (`data-combobox`), which only shows its full list on focus below
   `SHOW_ALL_THRESHOLD` (8) items -- past that, nothing renders until you
@@ -1148,37 +1155,74 @@ the project owner asked for, not only an operational-health trail.
   "genuinely never saved" from "explicitly saved as UTC", passed to the
   template as `household_time_zone_unset`, which gates a browser-side
   auto-detect `<script>` (see below).
-- `POST /settings/household-time-zone` -> `update_household_time_zone()`
-  (Phase 8) -- form field `household_time_zone`, validated against
-  `zoneinfo.available_timezones()`. Only used as the default a new
-  Schedule's own `time_zone` is created with (see
-  `docs/database/schema.md`'s `schedules` table) -- changing it never
-  moves an already-created schedule's meaning. **2026-09-07**: while
-  `household_time_zone_unset` is true, `SETTINGS_BODY` includes an inline
-  `<script>` that reads the admin's own browser `Intl.DateTimeFormat().
-  resolvedOptions().timeZone` and, if it's a valid option, both pre-selects
-  it and POSTs it to this same route in the background -- so a fresh
-  install's real default is wherever the admin's own device is, not UTC,
-  without needing them to pick it from a ~400-entry dropdown by hand
-  first. Never fires again once any real value is on record. `HOUSEHOLD_TIME_ZONE`
+- `POST /settings/household` -> `update_household_settings()` -- **merged
+  into one atomic Save 2026-09-09 (RoadMap.md item 3)**: the household
+  time zone and the `optigate.home` hostname prefix used to be two
+  separate routes/forms (`/settings/household-time-zone`,
+  `/settings/optigate-hostname`), each saved independently -- a bad
+  value in either now blocks saving BOTH, never a partial save. Form
+  fields: `household_time_zone` (Phase 8, validated against
+  `zoneinfo.available_timezones()` -- only used as the default a new
+  Schedule's own `time_zone` is created with, see
+  `docs/database/schema.md`'s `schedules` table; changing it never moves
+  an already-created schedule's meaning) and `optigate_hostname_prefix`
+  (added 2026-09-07, RoadMap.md's dated entry -- lowercased and
+  validated as a single DNS label, letters/digits/hyphens only, no dots,
+  no leading/trailing hyphen, rejected with an error flash otherwise;
+  blank input falls back to `db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX`
+  ("optigate") rather than saving an empty prefix -- the `.home` suffix
+  itself is hardcoded in `common/db.py`'s `optigate_hostname()`, never
+  stored or editable here, per the project owner's own words: "force the
+  use of .home so the administrator can only change the first part of
+  the URL"). **2026-09-07**: while `household_time_zone_unset` is true,
+  `SETTINGS_BODY` includes an inline `<script>` that reads the admin's
+  own browser `Intl.DateTimeFormat().resolvedOptions().timeZone` and, if
+  it's a valid option, both pre-selects it and POSTs it to this same
+  route in the background (also reading the hostname-prefix field's
+  current live value at post time, so this background save never
+  clobbers an unsaved edit sitting in that field) -- so a fresh install's
+  real default is wherever the admin's own device is, not UTC, without
+  needing them to pick it from a ~400-entry dropdown by hand first.
+  Never fires again once any real value is on record. `HOUSEHOLD_TIME_ZONE`
   in `.env` still works as an explicit override, seeded at boot only when
-  actually set.
-- `POST /settings/local-network` -> `update_local_network()` -- form field
-  `local_network` (space-separated CIDRs). No format validation beyond
-  `.strip()` -- an invalid CIDR just fails silently at match time in
-  `matching.ip_in_configured_lan()`. Saving an empty value flashes a
-  specific message explaining the LAN check is now disabled.
-- `POST /settings/block-page-mode` -> `update_block_page_mode()` -- form
-  field `block_page_mode`, must be `"redirect"` or `"terminate"` or it's
-  rejected with an error flash.
-- `POST /settings/network-sweep` -> `update_network_sweep()` -- form
-  fields `network_sweep_enabled` (checkbox, absent means off) and
+  actually set. **Rewritten 2026-09-08, real gap found live** (applies to
+  the hostname half): used to only ever save the setting and claim
+  "Saved. The address is now X.home." -- true only once
+  `controller/adguard_sync.py`'s periodic cycle happened to run, i.e.
+  only when the `interception` profile (off by default for most
+  installs) was enabled. Silently non-functional otherwise, with no
+  error. Now calls `_sync_optigate_rewrite_now()` synchronously (wraps
+  `common/optigate_rewrite.py`'s `sync_optigate_rewrite()`, moved there
+  from `controller/adguard_sync.py` for exactly this reason -- see that
+  module's own docstring) and reports real success/failure: "Saved and
+  pushed to AdGuard" vs. a specific reason (DASHBOARD_URL not a plain
+  IP, AdGuard credentials unset, or an `AdGuardError`) as an error flash.
+  `settings_page()` also shows a live, read-only status next to the
+  current address (`_optigate_rewrite_status()`, a plain
+  `adguard_client.get_rewrites()` check -- never writes) so a gap that
+  opens up LATER (AdGuard reset independently of this dashboard, say) is
+  visible on the page itself, not just at the moment of saving. `main()`
+  also fires one best-effort push at every dashboard startup (never
+  raises -- logged, not fatal), so a genuinely fresh install self-heals
+  without an admin needing to know this route exists at all.
+- `POST /settings/network` -> `update_network_settings()` -- **merged
+  into one atomic Save 2026-09-09 (RoadMap.md item 3)**: the local-
+  network CIDR and the discovery-sweep enable/interval used to be two
+  separate routes/forms (`/settings/local-network`,
+  `/settings/network-sweep`), each saved independently -- a bad interval
+  now blocks saving the CIDR change alongside it too, not just itself.
+  Form fields: `local_network` (space-separated CIDRs, no format
+  validation beyond `.strip()` -- an invalid CIDR just fails silently at
+  match time in `matching.ip_in_configured_lan()`; saving an empty value
+  flashes a specific message explaining the LAN check is now disabled)
+  and `network_sweep_enabled` (checkbox, absent means off) /
   `network_sweep_interval_minutes` (whole number, 1+, rejected with an
-  error flash otherwise -- the save is atomic, a rejected interval
-  leaves BOTH settings unchanged, not just the interval). Controls
-  `controller/network_sweep.py`'s active whole-subnet discovery sweep;
-  takes effect on that process's next ~30s check tick, no restart
-  needed.
+  error flash otherwise -- the whole save is atomic, a rejected interval
+  leaves every setting on this route unchanged, not just the interval).
+  Controls `controller/network_sweep.py`'s active whole-subnet discovery
+  sweep; takes effect on that process's next ~30s check tick, no restart
+  needed. Deliberately does NOT include "Run now" below -- that's a
+  one-off action, not a persisted setting.
 - `POST /settings/network-sweep/run-now` -> `run_network_sweep_now()` --
   no form fields. Writes `network_sweep_run_now_requested_at` (a fresh
   timestamp) for `controller/network_sweep.py`'s own background loop to
@@ -1206,13 +1250,28 @@ the project owner asked for, not only an operational-health trail.
   dashboard's own password change from saving. On success, the flash
   message tells the admin to run `docker compose restart adguard`
   (AdGuard only reads its config at startup, no live-reload).
-- `POST /settings/adguard` -> `update_adguard_settings()` -- form field
-  `adguard_url` ONLY. **Since 2026-09-07**: username/password moved
-  entirely to `/settings/admin` above -- this route used to also accept
-  `adguard_username`/`adguard_password`, which let the two logins drift
-  independently (the exact bug the unification above fixed). Seeded on
-  first run from `ADGUARD_URL`/`ADGUARD_USERNAME`/`ADGUARD_PASSWORD`
-  (added 2026-08-30).
+- `POST /settings/filtering` -> `update_filtering_settings()` -- **merged
+  into one atomic Save 2026-09-09 (RoadMap.md item 3)**: AdGuard's
+  connection address, SafeSearch/Restricted Mode, and the blocked-site
+  experience used to be three separate routes/forms (`/settings/adguard`,
+  `/settings/safesearch`, `/settings/block-page-mode`), each saved
+  independently -- now one submit, one transaction. Form fields:
+  `adguard_url` ONLY for the AdGuard connection (**since 2026-09-07**:
+  username/password moved entirely to `/settings/admin` above -- this
+  used to also accept `adguard_username`/`adguard_password`, which let
+  the two logins drift independently, the exact bug the unification
+  above fixed; seeded on first run from
+  `ADGUARD_URL`/`ADGUARD_USERNAME`/`ADGUARD_PASSWORD`, added 2026-08-30);
+  `safesearch_enabled` (G3, 2026-09-01, checkbox -- only writes
+  `settings.safesearch_enabled` (`"1"`/`"0"`), doesn't call AdGuard
+  directly, `controller/adguard_sync.py`'s `sync_safesearch()` picks up
+  the change on its own next cycle, same "dashboard writes intent,
+  controller reconciles reality" split as every other AdGuard-facing
+  setting on this page, defaults `"0"` off on first run); and
+  `block_page_mode`, must be `"redirect"` or `"terminate"` or the whole
+  save is rejected with an error flash. Deliberately does NOT include
+  "Check for filter updates now" below -- that's a one-off action
+  against AdGuard's live API right now, not a persisted setting.
 - `POST /settings/adguard/refresh` -> `refresh_adguard_filters()` --
   calls `adguard_client.refresh_filters()` with the stored connection
   settings. Flashes an error (not a 500) if the settings are incomplete
@@ -1258,43 +1317,6 @@ the project owner asked for, not only an operational-health trail.
   same as the earlier `ADGUARD_WEB_BIND` fix. Full unification (the
   dashboard writing that file directly, plus a coordinated AdGuard
   restart) is tracked as a future item, not built here.
-- `POST /settings/optigate-hostname` -> `update_optigate_hostname()`
-  (added 2026-09-07, RoadMap.md's dated entry -- the `optigate.home`
-  memorable-URL feature) -- form field `optigate_hostname_prefix`,
-  lowercased and validated as a single DNS label (letters/digits/
-  hyphens, no dots, no leading/trailing hyphen -- rejected with an error
-  flash otherwise). Blank input falls back to
-  `db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX` ("optigate") rather than saving
-  an empty prefix. The `.home` suffix itself is hardcoded in
-  `common/db.py`'s `optigate_hostname()`, never stored or editable here
-  -- the project owner's own words: "force the use of .home so the
-  administrator can only change the first part of the URL."
-  **Rewritten 2026-09-08, real gap found live**: used to only ever save
-  the setting and claim "Saved. The address is now X.home." -- true
-  only once `controller/adguard_sync.py`'s periodic cycle happened to
-  run, i.e. only when the `interception` profile (off by default for
-  most installs) was enabled. Silently non-functional otherwise, with
-  no error. Now calls `_sync_optigate_rewrite_now()` synchronously
-  (wraps `common/optigate_rewrite.py`'s `sync_optigate_rewrite()`,
-  moved there from `controller/adguard_sync.py` for exactly this reason
-  -- see that module's own docstring) and reports real success/failure:
-  "Saved and pushed to AdGuard" vs. a specific reason (DASHBOARD_URL not
-  a plain IP, AdGuard credentials unset, or an `AdGuardError`) as an
-  error flash. `settings_page()` also now shows a live, read-only status
-  next to the current address (`_optigate_rewrite_status()`, a plain
-  `adguard_client.get_rewrites()` check -- never writes) so a gap that
-  opens up LATER (AdGuard reset independently of this dashboard, say)
-  is visible on the page itself, not just at the moment of saving.
-  `main()` also fires one best-effort push at every dashboard startup
-  (never raises -- logged, not fatal), so a genuinely fresh install
-  self-heals without an admin needing to know this route exists at all.
-- `POST /settings/safesearch` -> `update_safesearch()` (G3, 2026-09-01) --
-  one checkbox field `safesearch_enabled`. Only writes
-  `settings.safesearch_enabled` (`"1"`/`"0"`) -- doesn't call AdGuard
-  directly; `controller/adguard_sync.py`'s `sync_safesearch()` picks up
-  the change on its own next cycle, same "dashboard writes intent,
-  controller reconciles reality" split as every other AdGuard-facing
-  setting on this page. Defaults `"0"` (off) on first run.
 - `POST /settings/ca-cert/regenerate` -> `regenerate_ca_cert()` (Phase
   13, 2026-09-06) -- form fields `ca_org`, `ca_common_name` (both
   optional, default to the same values `proxy/entrypoint.sh` uses on

@@ -88,8 +88,10 @@ NOTHING`) in `common/db.py`. Known keys actually written/read elsewhere:
 - `optigate_hostname_prefix` -- the customizable first label of the
   memorable troubleshooting address (default `"optigate"`; the `.home`
   suffix is hardcoded, never stored -- see `common/db.py`'s
-  `optigate_hostname()`). Editable from the Settings page
-  (`update_optigate_hostname`); read by `common/optigate_rewrite.py`'s
+  `optigate_hostname()`). Editable from the Settings page's "Household"
+  section (`update_household_settings`, merged with the household time
+  zone into one Save 2026-09-09 -- RoadMap.md item 3); read by
+  `common/optigate_rewrite.py`'s
   `sync_optigate_rewrite()` (pushes the matching AdGuard DNS rewrite --
   moved here from `controller/adguard_sync.py` 2026-09-08 specifically
   so `dashboard.py` can call it directly, not only `controller`'s own
@@ -100,9 +102,11 @@ NOTHING`) in `common/db.py`. Known keys actually written/read elsewhere:
   (`"60"` default) -- admin config for `controller/network_sweep.py`'s
   active whole-subnet discovery sweep (nudges every host address in
   `local_network` above so even a device that's never generated traffic
-  this box observed gets picked up). Editable from the Settings page
-  (`update_network_sweep`); re-read fresh on every check tick by the
-  controller, no restart needed for a change to take effect.
+  this box observed gets picked up). Editable from the Settings page's
+  "Network" section (`update_network_settings`, merged with the
+  local-network CIDR into one Save 2026-09-09 -- RoadMap.md item 3);
+  re-read fresh on every check tick by the controller, no restart needed
+  for a change to take effect.
   `network_sweep_last_run_at`/`_last_host_count` are that module's own
   diagnostic status (when it last actually ran, how many addresses),
   written on every real sweep purely for the Settings page's live

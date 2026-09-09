@@ -4463,10 +4463,10 @@ def _clear_overrides_for_target(
     """Deletes any existing schedule_overrides row(s) for the exact same
     target a new override is about to be created for -- only one override
     can be in effect per target at a time, same "grant and revoke are the
-    same action" shape as update_schedule_access()'s replace-the-whole-set
-    pattern. Also opportunistically clears out any already-expired row for
-    that target, since nothing else ever prunes those (see
-    schedule_overrides' own comment in common/db.py)."""
+    same action" shape as update_schedule()'s own replace-the-whole-
+    access-set pattern. Also opportunistically clears out any already-
+    expired row for that target, since nothing else ever prunes those
+    (see schedule_overrides' own comment in common/db.py)."""
     if user_id is not None:
         conn.execute("DELETE FROM schedule_overrides WHERE user_id = ?", (user_id,))
     elif group_id is not None:
@@ -4607,10 +4607,22 @@ SCHEDULE_DETAIL_BODY = """
 <p><a href="{{ url_for('schedules') }}">&larr; All schedules</a></p>
 <h1>{{ s.name }}</h1>
 
+<!-- Merged into one Save button 2026-09-09 (RoadMap.md item 3, "one Save
+     button per settings-shaped page, not several"): "When", "Blocked
+     for", and "Categories blocked" used to be three independent
+     forms/routes, saved one at a time. All three describe ONE
+     schedule -- unlike Settings' many genuinely-unrelated topics (see
+     SETTINGS_BODY's own comment on why those stayed separate), there's
+     no "isolate the blast radius" argument against merging these. One
+     form, one route (update_schedule()), one atomic save: a bad value
+     anywhere (an invalid time zone, say) leaves the whole schedule
+     completely unchanged, never partially saved. -->
+<form method="post" action="{{ url_for('update_schedule') }}">
+<input type="hidden" name="schedule_id" value="{{ s.id }}">
+
 <div class="card">
 <h2>When</h2>
-<form class="add-form" method="post" action="{{ url_for('update_schedule') }}" style="flex-wrap:wrap;">
-  <input type="hidden" name="schedule_id" value="{{ s.id }}">
+<div class="add-form" style="flex-wrap:wrap;">
 """ + DAY_CHECKBOXES + """
   <input type="time" name="start_time" value="{{ s.start_time }}" required>
   <span class="hint" style="margin:0;">to</span>
@@ -4622,28 +4634,22 @@ SCHEDULE_DETAIL_BODY = """
   </select>
   <label><input type="checkbox" name="lockout_all" {{ 'checked' if s.lockout_all }}> Full lockout (no internet at all)</label>
   <label><input type="checkbox" name="is_mode" {{ 'checked' if s.is_mode }}> Mode schedule</label>
-  <button class="add" type="submit">Save</button>
-</form>
+</div>
 <p class="hint">An end time earlier than the start time runs past midnight into the next day.</p>
 <p class="hint"><strong>Mode schedule</strong>: eligible to be manually forced on or off early from the <a href="{{ url_for('schedules') }}">Schedules</a> page's "Shift mode now".</p>
 </div>
 
 <div class="card">
 <h2>Blocked for</h2>
-<form method="post" action="{{ url_for('update_schedule_access') }}">
-  <input type="hidden" name="schedule_id" value="{{ s.id }}">
 """ + BLOCK_ACCESS_SELECTS + """
-  <button class="add" type="submit" style="margin-top:.8rem;">Save</button>
-</form>
 </div>
 
 {% if not s.lockout_all %}
 <div class="card">
 <h2>Categories blocked during this window</h2>
+<input type="hidden" name="categories_section_present" value="1">
 <p class="hint">Ignored while "Full lockout" is checked above -- a full lockout blocks everything, categories included.</p>
 <p class="hint">Every category is listed below -- check the ones to block while this schedule is active, uncheck the rest. Categories are a short, fixed list you set up once (unlike kids/groups/devices, which can grow large), so this shows everything at a glance instead of a search-to-find picker.</p>
-<form method="post" action="{{ url_for('update_schedule_categories') }}">
-  <input type="hidden" name="schedule_id" value="{{ s.id }}">
   {% if all_categories %}
   <div style="display:flex; flex-wrap:wrap; gap:.4rem 1.4rem; margin:.5rem 0;">
   {% for cat in all_categories %}
@@ -4653,10 +4659,13 @@ SCHEDULE_DETAIL_BODY = """
   {% else %}
   <p class="hint">No categories yet -- add one from the <a href="{{ url_for('categories') }}">Categories</a> page first.</p>
   {% endif %}
-  <button class="add" type="submit" style="margin-top:.8rem;">Save</button>
-</form>
 </div>
 {% endif %}
+
+<div class="card">
+<button class="add" type="submit" style="font-size:1.05em; padding:.6rem 1.6rem;">Save schedule</button>
+</div>
+</form>
 """
 
 
@@ -4708,6 +4717,25 @@ def schedule_detail(schedule_id: int):
 @app.route("/schedules/update", methods=["POST"])
 @require_admin
 def update_schedule():
+    """Single merged Save for the Schedule detail page (RoadMap.md item
+    3, "one Save button per settings-shaped page, not several"). Used
+    to be three independent forms/routes -- this one for the time
+    window, a separate update_schedule_access() for who it applies to,
+    a separate update_schedule_categories() for which categories it
+    blocks -- saved one at a time. Merged into one atomic save: a bad
+    value anywhere (an invalid time zone, say) leaves the WHOLE
+    schedule unchanged, never partially saved. All three areas describe
+    one schedule, unlike Settings' many genuinely-unrelated topics (see
+    SETTINGS_BODY's own comment on why those stayed separate) -- no
+    "isolate the blast radius" argument applies here.
+
+    categories_section_present distinguishes "the categories checkbox
+    list was on the page and got submitted with nothing checked" from
+    "the categories section wasn't even rendered" (SCHEDULE_DETAIL_BODY
+    hides it entirely while lockout_all is checked) -- without that
+    guard, saving a lockout_all schedule would silently wipe out
+    whatever categories were previously configured, only discovered
+    once lockout was turned back off again."""
     schedule_id = request.form.get("schedule_id", "")
     days = _parse_days(request.form.getlist("days"))
     start_time = request.form.get("start_time", "")
@@ -4715,6 +4743,12 @@ def update_schedule():
     time_zone = request.form.get("time_zone", "UTC")
     lockout_all = 1 if request.form.get("lockout_all") else 0
     is_mode = 1 if request.form.get("is_mode") else 0
+    is_global = 1 if request.form.get("is_global") else 0
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    group_ids = {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+    categories_section_present = bool(request.form.get("categories_section_present"))
+    category_ids = {int(x) for x in request.form.getlist("category_ids") if x.isdigit()}
 
     if not days:
         return flash_redirect("schedule_detail", "Pick at least one day.", error=True, schedule_id=schedule_id)
@@ -4726,27 +4760,9 @@ def update_schedule():
     conn = get_db()
     conn.execute(
         "UPDATE schedules SET days_of_week = ?, start_time = ?, end_time = ?, time_zone = ?, "
-        "lockout_all = ?, is_mode = ? WHERE id = ?",
-        (days, start_time, end_time, time_zone, lockout_all, is_mode, schedule_id),
+        "lockout_all = ?, is_mode = ?, is_global = ? WHERE id = ?",
+        (days, start_time, end_time, time_zone, lockout_all, is_mode, is_global, schedule_id),
     )
-    conn.commit()
-    return flash_redirect("schedule_detail", "Saved.", schedule_id=schedule_id)
-
-
-@app.route("/schedules/access", methods=["POST"])
-@require_admin
-def update_schedule_access():
-    """Replaces a schedule's entire target set -- same
-    grant-and-revoke-are-the-same-action shape as update_domain_access()/
-    update_category_access()."""
-    schedule_id = request.form.get("schedule_id", "")
-    is_global = 1 if request.form.get("is_global") else 0
-    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
-    group_ids = {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}
-    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
-
-    conn = get_db()
-    conn.execute("UPDATE schedules SET is_global = ? WHERE id = ?", (is_global, schedule_id))
     conn.execute("DELETE FROM schedule_users WHERE schedule_id = ?", (schedule_id,))
     for uid in user_ids:
         conn.execute("INSERT OR IGNORE INTO schedule_users (schedule_id, user_id) VALUES (?,?)", (schedule_id, uid))
@@ -4756,24 +4772,15 @@ def update_schedule_access():
     conn.execute("DELETE FROM schedule_devices WHERE schedule_id = ?", (schedule_id,))
     for did in device_ids:
         conn.execute("INSERT OR IGNORE INTO schedule_devices (schedule_id, device_id) VALUES (?,?)", (schedule_id, did))
+    if categories_section_present:
+        conn.execute("DELETE FROM schedule_categories WHERE schedule_id = ?", (schedule_id,))
+        for cid in category_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO schedule_categories (schedule_id, category_id) VALUES (?,?)",
+                (schedule_id, cid),
+            )
     conn.commit()
-    return flash_redirect("schedule_detail", "Access updated.", schedule_id=schedule_id)
-
-
-@app.route("/schedules/categories", methods=["POST"])
-@require_admin
-def update_schedule_categories():
-    schedule_id = request.form.get("schedule_id", "")
-    category_ids = {int(x) for x in request.form.getlist("category_ids") if x.isdigit()}
-    conn = get_db()
-    conn.execute("DELETE FROM schedule_categories WHERE schedule_id = ?", (schedule_id,))
-    for cid in category_ids:
-        conn.execute(
-            "INSERT OR IGNORE INTO schedule_categories (schedule_id, category_id) VALUES (?,?)",
-            (schedule_id, cid),
-        )
-    conn.commit()
-    return flash_redirect("schedule_detail", "Categories updated.", schedule_id=schedule_id)
+    return flash_redirect("schedule_detail", "Saved.", schedule_id=schedule_id)
 
 
 @app.route("/schedules/override", methods=["POST"])
@@ -6754,15 +6761,28 @@ SETTINGS_BODY = """
      (each its own border, each grown on incrementally over many
      sessions) are grouped into 5 named sections below -- one .card per
      section, containing one .settings-subsection per original topic.
-     Deliberately NOT merged into one form per section, let alone one
-     per page: several of these are already-independent ACTIONS with
-     different consequences (a one-off "run now"/"check now"/"clean up
-     now" vs. a persisted setting save), and forcing genuinely unrelated
-     fields to share one submit would mean a mistake in one (a bad CIDR,
-     say) blocks saving something else entirely unrelated (SafeSearch,
-     say) in the same request. The win here is visual/structural
-     cohesion -- fewer borders, clear section headings, related things
-     actually grouped together -- not fewer underlying actions. -->
+
+     RoadMap.md item 3 ("one Save button per settings-shaped page, not
+     several") went further the same day: every genuinely PERSISTED
+     setting within Filtering & AdGuard, Network, and Household is now
+     one merged form/one Save button per section (update_filtering_
+     settings(), update_network_settings(), update_household_settings())
+     -- a bad value anywhere in a section now blocks saving the whole
+     section, atomically, rather than silently leaving the rest saved.
+     Security and Devices & data each already had only one persisted-
+     setting form to begin with, so nothing needed merging there.
+
+     Deliberately NOT merged into that same submit anywhere: one-off
+     ACTIONS with their own, different consequences from a persisted
+     setting -- "check for filter updates now", "Run now" (the network
+     sweep), CA cert regenerate/upload, backup restore, stale-device
+     cleanup. Each stays its own separate button/form/route. Folding one
+     of these into an unrelated field-save would mean clicking Save on a
+     checkbox also silently re-triggers a live AdGuard check, restores a
+     backup, or regenerates a certificate -- or the reverse, a
+     genuinely destructive action hiding behind what looks like an
+     ordinary settings save. -->
+
 
 <div class="card">
 <h2>Security</h2>
@@ -6836,8 +6856,21 @@ SETTINGS_BODY = """
   <strong>Logs in with the same username/password as this dashboard's own admin login</strong> (above) -- there's only one credential to remember now.
 </p>
 {% endif %}
-<details {{ 'open' if not adguard_url }}>
-<summary>Connection address</summary>
+</div>
+
+<!-- Merged into one Save button 2026-09-09 (RoadMap.md item 3): AdGuard's
+     connection address, SafeSearch/Restricted Mode, and the blocked-site
+     experience used to be three independent forms/routes -- merged into
+     one atomic save (see update_filtering_settings()). Deliberately does
+     NOT include "Check for filter updates now" above -- that's a one-off
+     action against AdGuard's live API right now, not a persisted setting,
+     and folding an action into an unrelated field-save would mean
+     clicking Save on a checkbox also silently re-triggers that check (or
+     vice versa). -->
+<form method="post" action="{{ url_for('update_filtering_settings') }}">
+
+<div class="settings-subsection">
+<h3>AdGuard connection address</h3>
 <p class="hint">
   Only the address (host/port) is set here -- AdGuard's login itself is
   always the dashboard's own admin username/password (see "Security"
@@ -6846,11 +6879,9 @@ SETTINGS_BODY = """
   <code>adguard</code> container is needed for it to take effect --
   AdGuard only reads its config at startup, it has no live-reload).
 </p>
-<form class="add-form" method="post" action="{{ url_for('update_adguard_settings') }}">
+<div class="add-form">
   <input type="text" name="adguard_url" value="{{ adguard_url }}" placeholder="http://127.0.0.1:3000" style="flex:1; min-width:280px;">
-  <button class="add" type="submit">Save</button>
-</form>
-</details>
+</div>
 </div>
 
 <div class="settings-subsection">
@@ -6863,10 +6894,7 @@ SETTINGS_BODY = """
   version of this). Takes effect on the controller's next sync cycle,
   not instantly.
 </p>
-<form class="add-form" method="post" action="{{ url_for('update_safesearch') }}">
-  <label><input type="checkbox" name="safesearch_enabled" value="1" {{ 'checked' if safesearch_enabled }}> Force SafeSearch &amp; Restricted Mode</label>
-  <button class="add" type="submit">Save</button>
-</form>
+<label><input type="checkbox" name="safesearch_enabled" value="1" {{ 'checked' if safesearch_enabled }}> Force SafeSearch &amp; Restricted Mode</label>
 {% if not adguard_configured %}
 <p class="hint"><strong>Not configured yet</strong> -- set AdGuard's connection details above first.</p>
 {% endif %}
@@ -6874,13 +6902,10 @@ SETTINGS_BODY = """
 
 <div class="settings-subsection">
 <h3>Blocked-site experience</h3>
-<form class="add-form" method="post" action="{{ url_for('update_block_page_mode') }}">
-  <select name="block_page_mode">
-    <option value="terminate" {{ 'selected' if block_page_mode=='terminate' }}>Just fail the connection (default -- safe for devices that haven't installed the certificate yet)</option>
-    <option value="redirect" {{ 'selected' if block_page_mode=='redirect' }}>Show a friendly page (requires the CA certificate already trusted on the device)</option>
-  </select>
-  <button class="add" type="submit">Save</button>
-</form>
+<select name="block_page_mode">
+  <option value="terminate" {{ 'selected' if block_page_mode=='terminate' }}>Just fail the connection (default -- safe for devices that haven't installed the certificate yet)</option>
+  <option value="redirect" {{ 'selected' if block_page_mode=='redirect' }}>Show a friendly page (requires the CA certificate already trusted on the device)</option>
+</select>
 <p class="hint">
   <strong>Only switch to "Show a friendly page" after confirming the CA certificate is installed and trusted on every device this applies to.</strong>
   Showing a page requires decrypting that connection with the proxy's own certificate -- exactly like Crunchyroll already does. If a device hasn't trusted that certificate yet, it'll see a security warning ("connection not private") instead of a clean block message, which is more alarming than the plain connection failure it replaces. A simple way to check: if Crunchyroll itself loads correctly on a device, that device's certificate trust is set up correctly and this mode will work fine for it too. This is one setting for every device on the network -- there's no per-device override.
@@ -6889,17 +6914,29 @@ SETTINGS_BODY = """
   Bump-mode domains (Crunchyroll, or anything else you've set to bump mode) always show a page when blocked regardless of this setting, since they're already decrypted either way. This setting only affects splice-mode sites. To get an actual custom page here rather than Squid's generic one, also set <code>DASHBOARD_URL</code> in <code>.env</code> to this machine's address (e.g. <code>http://192.168.1.50:8787</code>) and restart the proxy container.
 </p>
 </div>
+
+<div class="settings-subsection">
+<button class="add" type="submit">Save</button>
+</div>
+</form>
 </div>
 
 <div class="card">
 <h2>Network</h2>
 
+<!-- Merged into one Save button 2026-09-09 (RoadMap.md item 3): the
+     local-network CIDR and the discovery-sweep enable/interval used to
+     be two independent forms/routes -- merged into one atomic save (see
+     update_network_settings()). Deliberately does NOT include "Run
+     now" below -- that's a one-off action (queues an immediate sweep
+     right now), not a persisted setting; see run_network_sweep_now(). -->
+<form method="post" action="{{ url_for('update_network_settings') }}">
+
 <div class="settings-subsection">
 <h3>Local network</h3>
-<form class="add-form" method="post" action="{{ url_for('update_local_network') }}">
+<div class="add-form">
   <input type="text" name="local_network" value="{{ local_network }}" style="flex:1; min-width:280px;">
-  <button class="add" type="submit">Save</button>
-</form>
+</div>
 <p class="hint">Space-separated CIDRs, e.g. <code>192.168.1.0/24 192.168.0.0/24</code>. Requests from outside these ranges are denied regardless of user/site rules. <strong>Leave blank to disable this check</strong> and rely only on per-person proxy logins &mdash; do that if the proxy runs under Docker Desktop or bridge networking, where it sees an internal gateway address instead of the real client IP and this check would otherwise block everyone.</p>
 </div>
 
@@ -6915,12 +6952,17 @@ SETTINGS_BODY = """
   schedule, forcing even a silent device to reveal itself so it gets
   picked up the same way any other device is.
 </p>
-<form class="add-form" method="post" action="{{ url_for('update_network_sweep') }}">
-  <label><input type="checkbox" name="network_sweep_enabled" value="1" {{ 'checked' if network_sweep_enabled }}> Enabled</label>
-  <label>Every <input type="number" name="network_sweep_interval_minutes" value="{{ network_sweep_interval_minutes }}" min="1" style="width:5rem;"> minutes</label>
-  <button class="add" type="submit">Save</button>
+<label><input type="checkbox" name="network_sweep_enabled" value="1" {{ 'checked' if network_sweep_enabled }}> Enabled</label>
+<label>Every <input type="number" name="network_sweep_interval_minutes" value="{{ network_sweep_interval_minutes }}" min="1" style="width:5rem;"> minutes</label>
+</div>
+
+<div class="settings-subsection">
+<button class="add" type="submit">Save</button>
+</div>
 </form>
-<form class="inline" method="post" action="{{ url_for('run_network_sweep_now') }}" style="margin-top:.5rem;">
+
+<div class="settings-subsection">
+<form class="inline" method="post" action="{{ url_for('run_network_sweep_now') }}">
   <button class="btn small" type="submit" {{ 'disabled' if not local_network }}>Run now</button>
 </form>
 <p class="hint">
@@ -6945,17 +6987,25 @@ SETTINGS_BODY = """
 <div class="card">
 <h2>Household</h2>
 
+<!-- Merged into one Save button 2026-09-09 (RoadMap.md item 3): the
+     default time zone and the memorable troubleshooting hostname used
+     to be two independent forms/routes -- merged into one atomic save
+     (see update_household_settings()). The auto-detect script below
+     posts to this same merged endpoint, supplying the current hostname
+     prefix unchanged, so it behaves exactly like a normal Save rather
+     than needing its own separate endpoint. -->
+<form method="post" action="{{ url_for('update_household_settings') }}" id="householdSettingsForm">
+
 <div class="settings-subsection">
 <h3>Household time zone</h3>
 <p class="hint">The default time zone new <a href="{{ url_for('schedules') }}">schedules</a> are created with. Each schedule stores its own time zone once created, so changing this later never moves an existing schedule's meaning.</p>
-<form class="add-form" method="post" action="{{ url_for('update_household_time_zone') }}" id="householdTimeZoneForm">
+<div class="add-form">
   <select name="household_time_zone" id="householdTimeZoneSelect">
     {% for tz in available_time_zones %}
     <option value="{{ tz }}" {{ 'selected' if tz == household_time_zone }}>{{ tz }}</option>
     {% endfor %}
   </select>
-  <button class="add" type="submit">Save</button>
-</form>
+</div>
 <p class="hint" id="tzAutoDetectNote"></p>
 {% if household_time_zone_unset %}
 <script>
@@ -6968,12 +7018,14 @@ SETTINGS_BODY = """
   // flag, household_time_zone_unset): detects the browser's own IANA
   // zone and, if it's one of the options this <select> actually offers,
   // both shows it selected AND saves it as the real default immediately
-  // (a plain background POST to the same route the Save button uses) --
-  // "default to wherever the admin's own device is" only means
-  // something if it happens before they'd otherwise have to pick UTC by
-  // hand first. Never fires again once a real value is on record,
-  // including whatever this save itself just set -- the admin's own
-  // later choice from the dropdown always wins from here on.
+  // (a plain background POST to the same route the Save button uses,
+  // including the hostname prefix's current value unchanged so this
+  // background save doesn't touch that field) -- "default to wherever
+  // the admin's own device is" only means something if it happens
+  // before they'd otherwise have to pick UTC by hand first. Never fires
+  // again once a real value is on record, including whatever this save
+  // itself just set -- the admin's own later choice from the dropdown
+  // always wins from here on.
   var detected;
   try { detected = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return; }
   var select = document.getElementById("householdTimeZoneSelect");
@@ -6984,7 +7036,9 @@ SETTINGS_BODY = """
   select.value = detected;
   var body = new URLSearchParams();
   body.set("household_time_zone", detected);
-  fetch(document.getElementById("householdTimeZoneForm").action, { method: "POST", body: body })
+  var prefixField = document.getElementById("optigateHostnamePrefixInput");
+  body.set("optigate_hostname_prefix", prefixField ? prefixField.value : "");
+  fetch(document.getElementById("householdSettingsForm").action, { method: "POST", body: body })
     .then(function () {
       if (note) note.textContent = "Detected your device's time zone (" + detected + ") and set it as the default.";
     })
@@ -7004,11 +7058,10 @@ SETTINGS_BODY = """
   finding those yourself. The <code>.home</code> suffix is fixed; only
   the first part is yours to change.
 </p>
-<form class="add-form" method="post" action="{{ url_for('update_optigate_hostname') }}">
-  <input type="text" name="optigate_hostname_prefix" value="{{ optigate_hostname_prefix }}" style="max-width:12rem;">
+<div class="add-form">
+  <input type="text" name="optigate_hostname_prefix" id="optigateHostnamePrefixInput" value="{{ optigate_hostname_prefix }}" style="max-width:12rem;">
   <span class="hint" style="margin:0;">.home</span>
-  <button class="add" type="submit">Save</button>
-</form>
+</div>
 <p class="hint">
   Currently <code>{{ optigate_hostname_prefix }}.home</code> --
   {% if optigate_rewrite_status.startswith('live') %}<span class="badge allowed">{{ optigate_rewrite_status }}</span>
@@ -7031,6 +7084,11 @@ SETTINGS_BODY = """
   this dashboard container starts) -- no need to wait on anything else.
 </p>
 </div>
+
+<div class="settings-subsection">
+<button class="add" type="submit">Save</button>
+</div>
+</form>
 </div>
 
 <div class="card">
@@ -7381,13 +7439,26 @@ def _sync_optigate_rewrite_now(conn) -> str | None:
     return None
 
 
-@app.route("/settings/optigate-hostname", methods=["POST"])
+@app.route("/settings/household", methods=["POST"])
 @require_admin
-def update_optigate_hostname():
-    value = request.form.get("optigate_hostname_prefix", "").strip().lower()
-    if not value:
-        value = db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
-    if not _OPTIGATE_PREFIX_RE.match(value):
+def update_household_settings():
+    """Merged Save for the "Household" section (RoadMap.md item 3, "one
+    Save button per settings-shaped page, not several"). The default
+    time zone and the memorable troubleshooting hostname used to be two
+    independent forms/routes (update_household_time_zone(),
+    update_optigate_hostname()) -- merged into one atomic save: a bad
+    time zone no longer saves the hostname alone, or vice versa. The
+    time-zone auto-detect script (SETTINGS_BODY) posts here too,
+    reading the hostname field's own live value at post time so its
+    background save never clobbers an unsaved edit sitting in that
+    field."""
+    tz = request.form.get("household_time_zone", "UTC").strip()
+    if tz not in zoneinfo.available_timezones():
+        return flash_redirect("settings_page", "That doesn't look like a real time zone.", error=True)
+    hostname_value = request.form.get("optigate_hostname_prefix", "").strip().lower()
+    if not hostname_value:
+        hostname_value = db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
+    if not _OPTIGATE_PREFIX_RE.match(hostname_value):
         return flash_redirect(
             "settings_page",
             "Invalid address -- letters, numbers, and hyphens only (no dots; "
@@ -7395,58 +7466,51 @@ def update_optigate_hostname():
             error=True,
         )
     conn = get_db()
-    db.set_setting(conn, "optigate_hostname_prefix", value)
+    db.set_setting(conn, "household_time_zone", tz)
+    db.set_setting(conn, "optigate_hostname_prefix", hostname_value)
     conn.commit()
     problem = _sync_optigate_rewrite_now(conn)
     if problem is None:
-        return flash_redirect("settings_page", f"Saved and pushed to AdGuard -- {value}.home is live now.")
+        return flash_redirect("settings_page", f"Saved and pushed to AdGuard -- {hostname_value}.home is live now.")
     return flash_redirect(
         "settings_page",
-        f"Saved -- {value}.home will take effect once you fix this: {problem}.",
+        f"Saved -- {hostname_value}.home will take effect once you fix this: {problem}.",
         error=True,
     )
 
 
-@app.route("/settings/safesearch", methods=["POST"])
+@app.route("/settings/filtering", methods=["POST"])
 @require_admin
-def update_safesearch():
-    """G3: the master SafeSearch/Restricted-Mode on/off. Only writes the
-    setting -- controller/adguard_sync.py's sync_safesearch() picks it up
-    and reconciles AdGuard's real config on its own next cycle, same
+def update_filtering_settings():
+    """Merged Save for the "Filtering & AdGuard" section (RoadMap.md
+    item 3): AdGuard's connection address, SafeSearch/Restricted Mode,
+    and the blocked-site experience used to be three independent
+    forms/routes (update_adguard_settings(), update_safesearch(),
+    update_block_page_mode()) -- merged into one atomic save. Only the
+    connection ADDRESS is set here for AdGuard -- since 2026-09-07
+    (RoadMap.md's dated entry), the username/password half moved
+    entirely to update_admin() (the dashboard's own admin-login form),
+    which keeps AdGuard's real credential in sync automatically instead
+    of letting the two drift independently the way this used to allow.
+    G3's SafeSearch/Restricted-Mode setting: only writes the setting --
+    controller/adguard_sync.py's sync_safesearch() picks it up and
+    reconciles AdGuard's real config on its own next cycle, same
     "dashboard writes intent, controller applies it" pattern as every
-    other AdGuard-facing setting on this page."""
-    enabled = "1" if request.form.get("safesearch_enabled") else "0"
-    conn = get_db()
-    db.set_setting(conn, "safesearch_enabled", enabled)
-    conn.commit()
-    return flash_redirect("settings_page", "Saved.")
-
-
-@app.route("/settings/household-time-zone", methods=["POST"])
-@require_admin
-def update_household_time_zone():
-    tz = request.form.get("household_time_zone", "UTC").strip()
-    if tz not in zoneinfo.available_timezones():
-        return flash_redirect("settings_page", "That doesn't look like a real time zone.", error=True)
-    conn = get_db()
-    db.set_setting(conn, "household_time_zone", tz)
-    conn.commit()
-    return flash_redirect("settings_page", "Saved.")
-
-
-@app.route("/settings/adguard", methods=["POST"])
-@require_admin
-def update_adguard_settings():
-    """Only the connection ADDRESS -- since 2026-09-07 (RoadMap.md's
-    dated entry), the username/password half of this moved entirely to
-    update_admin() (the dashboard's own admin-login form), which keeps
-    AdGuard's real credential in sync automatically instead of letting
-    the two drift independently the way this route used to allow."""
+    other AdGuard-facing setting on this page. Deliberately does NOT
+    include "Check for filter updates now" (refresh_adguard_filters())
+    -- that's a one-off action against AdGuard's live API right now,
+    not a persisted setting."""
     url = request.form.get("adguard_url", "").strip()
+    safesearch_enabled = "1" if request.form.get("safesearch_enabled") else "0"
+    block_page_mode = request.form.get("block_page_mode", "redirect")
+    if block_page_mode not in ("redirect", "terminate"):
+        return flash_redirect("settings_page", "Invalid blocked-site experience option.", error=True)
     conn = get_db()
     db.set_setting(conn, "adguard_url", url)
+    db.set_setting(conn, "safesearch_enabled", safesearch_enabled)
+    db.set_setting(conn, "block_page_mode", block_page_mode)
     conn.commit()
-    return flash_redirect("settings_page", "Saved.")
+    return flash_redirect("settings_page", "Saved. Blocked-site experience takes effect on the next new connection, no restart needed.")
 
 
 @app.route("/settings/adguard/refresh", methods=["POST"])
@@ -7518,36 +7582,29 @@ def cleanup_stale_devices():
     return flash_redirect("settings_page", f"Removed {len(stale)} device{'s' if len(stale) != 1 else ''}.")
 
 
-@app.route("/settings/local-network", methods=["POST"])
+@app.route("/settings/network", methods=["POST"])
 @require_admin
-def update_local_network():
-    value = request.form.get("local_network", "").strip()
-    conn = get_db()
-    db.set_setting(conn, "local_network", value)
-    conn.commit()
-    if not value:
-        return flash_redirect(
-            "settings_page",
-            "Saved. LAN restriction disabled -- access is now controlled only "
-            "by each person's proxy login.",
-        )
-    return flash_redirect("settings_page", "Saved.")
-
-
-@app.route("/settings/network-sweep", methods=["POST"])
-@require_admin
-def update_network_sweep():
-    """Controls controller/network_sweep.py's own background sweep --
-    see that module's docstring for the feature itself. This route only
-    ever writes two settings; the controller process re-reads both
-    fresh on every check tick (see that module's own run_loop()), so a
-    save here takes effect within _CHECK_INTERVAL_SECONDS, without a
-    controller restart. Validates the interval defensively even though
-    the form's own `min="1"` already blocks most bad input client-side
-    -- a hand-crafted POST (or a very old cached page) must not be able
-    to write a zero/negative/non-numeric value the controller would
-    then have to defend against itself."""
-    enabled = request.form.get("network_sweep_enabled") == "1"
+def update_network_settings():
+    """Merged Save for the "Network" section (RoadMap.md item 3): the
+    local-network CIDR and the discovery-sweep enable/interval used to
+    be two independent forms/routes (update_local_network(),
+    update_network_sweep()) -- merged into one atomic save: a bad
+    interval no longer blocks saving the CIDR change alongside it, or
+    vice versa -- either both save or neither does. Controls
+    controller/network_sweep.py's own background sweep -- see that
+    module's docstring for the feature itself. The controller process
+    re-reads both sweep settings fresh on every check tick (see that
+    module's own run_loop()), so a save here takes effect within
+    _CHECK_INTERVAL_SECONDS, without a controller restart. Validates the
+    interval defensively even though the form's own `min="1"` already
+    blocks most bad input client-side -- a hand-crafted POST (or a very
+    old cached page) must not be able to write a zero/negative/
+    non-numeric value the controller would then have to defend against
+    itself. Deliberately does NOT include "Run now"
+    (run_network_sweep_now()) -- that's a one-off action, not a
+    persisted setting."""
+    local_network_value = request.form.get("local_network", "").strip()
+    sweep_enabled = request.form.get("network_sweep_enabled") == "1"
     raw_interval = request.form.get("network_sweep_interval_minutes", "").strip()
     try:
         interval_minutes = int(raw_interval)
@@ -7558,10 +7615,17 @@ def update_network_sweep():
             "settings_page", "Interval must be a whole number of minutes, 1 or more.", error=True
         )
     conn = get_db()
-    db.set_setting(conn, "network_sweep_enabled", "1" if enabled else "0")
+    db.set_setting(conn, "local_network", local_network_value)
+    db.set_setting(conn, "network_sweep_enabled", "1" if sweep_enabled else "0")
     db.set_setting(conn, "network_sweep_interval_minutes", str(interval_minutes))
     conn.commit()
-    if not enabled:
+    if not local_network_value:
+        return flash_redirect(
+            "settings_page",
+            "Saved. LAN restriction disabled -- access is now controlled only "
+            "by each person's proxy login.",
+        )
+    if not sweep_enabled:
         return flash_redirect("settings_page", "Saved. Network discovery sweep is now off.")
     return flash_redirect("settings_page", f"Saved. Sweeping every {interval_minutes} minute(s).")
 
@@ -7605,18 +7669,6 @@ def run_network_sweep_now():
         "settings_page",
         "Requested -- will run within about 30 seconds.",
     )
-
-
-@app.route("/settings/block-page-mode", methods=["POST"])
-@require_admin
-def update_block_page_mode():
-    value = request.form.get("block_page_mode", "redirect")
-    if value not in ("redirect", "terminate"):
-        return flash_redirect("settings_page", "Invalid option.", error=True)
-    conn = get_db()
-    db.set_setting(conn, "block_page_mode", value)
-    conn.commit()
-    return flash_redirect("settings_page", "Saved. Takes effect on the next new connection, no restart needed.")
 
 
 @app.route("/settings/admin", methods=["POST"])

@@ -811,18 +811,31 @@ Route groups (see the numbered `# ====` section banners in the file):
   those containers itself; see §9's own bullet on this. See
   `docs/dashboard/routes.md`'s own "Health" section for the full route
   reference.
-- **Settings** (`/settings`, `/settings/local-network`,
-  `/settings/block-page-mode`, `/settings/admin`, `/settings/adguard`,
-  `/settings/adguard/refresh`, `/settings/safesearch` (G3),
-  `/settings/household-time-zone` (Phase 8),
-  `/settings/device-stale-days`): editable `local_network`,
-  `block_page_mode`, admin credentials, AdGuard connection settings,
-  SafeSearch/Restricted-Mode intent, the default schedule time zone, and
-  the stale-device cleanup threshold -- all live edits to the `settings`
-  table, no container restart needed. Several of these (AdGuard filter
-  refresh, SafeSearch) write *intent* only; a `controller/` background
-  loop is what actually reconciles it against AdGuard on its own next
-  cycle -- see `adguard_sync.py` in §1's controller/ listing.
+- **Settings** (`/settings`, `/settings/network`, `/settings/filtering`,
+  `/settings/household`, `/settings/admin`, `/settings/adguard/refresh`,
+  `/settings/device-stale-days`): editable `local_network` and the
+  network discovery sweep, `block_page_mode`/AdGuard connection
+  settings/SafeSearch intent, the default schedule time zone and the
+  `optigate.home` hostname, admin credentials, and the stale-device
+  cleanup threshold -- all live edits to the `settings` table, no
+  container restart needed. **Merged into these three grouped routes
+  2026-09-09 (RoadMap.md item 3, "one Save button per settings-shaped
+  page, not several")** -- each used to be 2-3 separate routes/forms
+  saved independently (`/settings/local-network` +
+  `/settings/network-sweep`; `/settings/adguard` +
+  `/settings/safesearch` + `/settings/block-page-mode`;
+  `/settings/household-time-zone` + `/settings/optigate-hostname`); now
+  each group is one atomic save, so a bad value in one field no longer
+  silently leaves an unrelated field in that same group unsaved. One-off
+  actions with different consequences than a persisted setting (AdGuard
+  filter refresh, the network sweep's "Run now", CA cert regeneration/
+  upload, backup restore, stale-device cleanup) deliberately stayed as
+  their own separate buttons/routes -- see `docs/dashboard/routes.md`'s
+  "Settings" section for the full reasoning and route reference. Several
+  of these (AdGuard filter refresh, SafeSearch) write *intent* only; a
+  `controller/` background loop is what actually reconciles it against
+  AdGuard on its own next cycle -- see `adguard_sync.py` in §1's
+  controller/ listing.
 - `/ca-cert`: unauthenticated `send_file()` of `OG_CA_CERT_PATH`
   (`/config/ssl_cert/ca_cert.pem`) for device onboarding.
 - `/blocked`: unauthenticated, the target of `deny_info` for `redirect`-mode

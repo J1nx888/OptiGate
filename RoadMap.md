@@ -6322,17 +6322,74 @@ or their explicit real-time approval in a live conversation turn.**
    `test_devices_page_does_not_treat_a_group_ignored_device_as_pending`.
    Same deploy status as #1 above (fixed, tested, not yet pushed to the
    live box).
-3. **UI consolidation: one Save button per settings-shaped page, not
-   several.** Named examples: the Schedules page has two separate save
-   actions; the Settings page has an individual save button per
-   individual setting. Project owner's own framing: "it is obvious
-   this has been pieced together slowly, but now we need everything to
-   feel like a single integrated product." This is a real, cross-
-   cutting design pass (which fields batch together, whether every
-   save becomes one form submission or an AJAX-style multi-field save,
-   how per-field validation/error messages work once fields share one
-   submit) -- needs its own design conversation before implementation,
-   not a quick mechanical merge.
+3. **DONE (design conversation held, then implemented + tested
+   2026-09-09): UI consolidation, one Save button per settings-shaped
+   page, not several.** Named examples: the Schedules page has two
+   separate save actions; the Settings page has an individual save
+   button per individual setting. Project owner's own framing: "it is
+   obvious this has been pieced together slowly, but now we need
+   everything to feel like a single integrated product."
+
+   The design conversation (held before implementing, as this entry
+   asked for) split into two real decisions:
+   - **Settings page**: the 2026-09-08 redesign (12 cards -> 5 cohesive
+     sections, see the dated entry above) had already made a judgment
+     call to keep every persisted setting's own Save button separate
+     within each section, reasoning that unrelated fields sharing one
+     submit means a mistake in one (a bad CIDR) blocks saving something
+     else entirely unrelated (SafeSearch) in the same request. That call
+     was made without checking back with the project owner first --
+     surfaced explicitly here, and the project owner's answer was
+     **"force one button per section"** rather than keep them separate.
+   - **Schedule detail page**: the project owner separately confirmed
+     merging its 3 forms (When / Blocked for / Categories blocked) into
+     one Save, since all three describe ONE schedule -- unlike Settings'
+     genuinely-unrelated topics, there's no "isolate the blast radius"
+     argument against merging these.
+
+   **Schedule detail** (`dashboard/dashboard.py`'s `SCHEDULE_DETAIL_BODY`
+   / `update_schedule()`): the three previous routes/forms
+   (`/schedules/update`, `/schedules/access`, `/schedules/categories`,
+   each saved independently) are now one route, one form, one atomic
+   transaction -- a bad time zone leaves the whole schedule (including
+   any access/category changes submitted in the same request) unchanged,
+   never a partial save. A new `categories_section_present` hidden field
+   distinguishes "the categories checkboxes were on the page and
+   submitted with nothing checked" from "the categories section wasn't
+   even rendered" (hidden entirely while `lockout_all` is checked) --
+   without that guard, saving a lockout schedule would have silently
+   wiped out whatever categories were configured, discovered only once
+   lockout was turned back off.
+
+   **Settings page** (three merges, each its own route): AdGuard's
+   connection address + SafeSearch + blocked-site experience merged into
+   `/settings/filtering` (`update_filtering_settings()`); the
+   local-network CIDR + network-sweep enable/interval merged into
+   `/settings/network` (`update_network_settings()`); the household time
+   zone + `optigate.home` hostname prefix merged into `/settings/household`
+   (`update_household_settings()`). Each merge is atomic -- a rejected
+   value in one field of a section leaves every field in that section
+   unchanged, not just the bad one. Deliberately did NOT fold in one-off
+   ACTIONS with different consequences from a persisted setting -- "check
+   for filter updates now," "Run now" (the network sweep), CA cert
+   regenerate/upload, backup restore, stale-device cleanup -- each stays
+   its own separate button/route; the Security and "Devices & data"
+   sections already had only one persisted-setting form each, so nothing
+   needed merging there. The household time-zone auto-detect script
+   (fires once on a never-configured install) now posts to the merged
+   endpoint, reading the hostname field's own live value at post time so
+   its background save can't clobber an unsaved edit sitting in that
+   field.
+
+   17 new/changed tests in `tests/test_dashboard.py` (schedule: one
+   atomic save across all three areas, a bad time zone rejects the whole
+   save including access/category changes in the same request, saving
+   while lockout is on doesn't wipe previously-configured categories, the
+   page renders exactly one Save button; settings: a rejected network
+   interval leaves the local-network change unrolled back too; every
+   existing route-specific test updated to the new merged routes). Full
+   local suite green. Not yet deployed live -- pending project owner
+   review/approval to build and restart the `dashboard` container.
 4. **RESOLVED (investigated + fixed 2026-09-08, while the project owner
    was away): `optigate.home` shows only a username/password prompt,
    not the device-info troubleshooting page.** Confirmed the project

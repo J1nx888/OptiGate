@@ -12,7 +12,8 @@ re-apply it. Both assumptions turned out wrong in the same session --
 a routine wipe-and-redeploy left AdGuard freshly bootstrapped with no
 rewrite at all, and the `interception` profile is OFF by default (an
 opt-in, advanced feature most installs never enable), so
-`update_optigate_hostname()`'s "Saved. The address is now X.home."
+`update_household_settings()`'s (formerly `update_optigate_hostname()`'s)
+"Saved. The address is now X.home."
 message was flatly untrue for anyone not running that profile --
 silently non-functional with no error, exactly the "other people
 deploying this won't know what's wrong" failure mode the project owner
