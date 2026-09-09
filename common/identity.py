@@ -4,10 +4,13 @@ bindings and the network/identity event log that feeds them.
 
 See db.py's device_bindings/network_events schema comments and
 docs/design/phase3-technical-design.md section 7 for the design this
-implements. Nothing in the proxy/dashboard enforcement path reads any
-of this yet -- the one consumer today is controller/desired_state.py,
-which itself isn't wired into a running interception layer yet (see
-RoadMap.md's Milestone 3/4 status).
+implements. This module's own claim used to end here saying "nothing in
+the proxy/dashboard enforcement path reads any of this yet" -- corrected
+2026-09-09, since that stopped being true a long time ago:
+common/device_identity.py's resolve_device()/resolve_user_for_device()
+(used by every proxy helper and the dashboard's own Report page) both
+read device_bindings directly, and controller/desired_state.py has been
+a real, running consumer since the interception profile shipped.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import json
 import sqlite3
 
 import db
+import system_events
 
 
 def record_binding(
@@ -193,6 +197,23 @@ def _record_binding_locked(
             source=source,
             observed_at=seen_at,
             payload=None,
+        )
+        # Fixed 2026-09-09, real gap found live investigating "why
+        # doesn't the network sweep show anything on the Events page":
+        # this auto-create was already recorded in network_events (see
+        # above), but that table has no dashboard page of its own --
+        # only this project's own DB-level tooling ever reads it. A
+        # brand-new device appearing for the first time is exactly the
+        # kind of rare, admin-relevant moment system_events.py's own
+        # 'info' severity exists for (see its docstring) -- and
+        # deliberately NOT tied to source == 'sweep' specifically: any
+        # discovery path (passive rtnetlink, the periodic snapshot, or
+        # the active sweep) finding a genuinely new device is equally
+        # worth surfacing, so this fires the same way regardless of
+        # which one actually triggered the kernel to notice it.
+        system_events.log_event(
+            conn, "device_discovery", "info",
+            f"New device discovered: {mac_address} ({ipv4_address}), via {source}.",
         )
     elif device_id is None:
         _record_event(

@@ -70,6 +70,7 @@ import time
 
 import active_scan
 import db
+import system_events
 from periodic import PeriodicTask
 
 log = logging.getLogger("controller.network_sweep")
@@ -218,6 +219,26 @@ def run_loop(on_error=None, on_success=None) -> PeriodicTask:
         log.info(
             "network sweep: nudged %d address(es)%s", swept, " (manual run-now request)" if manual else ""
         )
+        if manual:
+            # Fixed 2026-09-09, real gap found live: clicking "Run now"
+            # visibly did something (the Settings page's own status line
+            # updates), but nothing showed up on the Events page at all
+            # -- container stdout (log.info above) was the only place
+            # this was visible, same blind spot system_events.py's own
+            # docstring describes for the pre-2026-09-01 world. A
+            # scheduled/automatic sweep completing does NOT get this --
+            # only an explicit admin action, matching the 'info'
+            # severity's own narrow scope (see common/db.py's schema
+            # comment). Reports what it actually DID (how many addresses
+            # it probed, and the range) -- not what it "found": any
+            # newly-discovered device is a separate, later event, logged
+            # by common/identity.py's record_binding() once
+            # discovery.py's own snapshot loop actually observes it.
+            local_network = db.get_setting(conn, "local_network", "")
+            system_events.log_event(
+                conn, "network_sweep", "info",
+                f"Manual sweep complete: probed {swept} address(es) in {local_network or '(nothing configured)'}.",
+            )
 
     pt = PeriodicTask(
         _CHECK_INTERVAL_SECONDS, task, on_error=on_error, on_success=on_success,

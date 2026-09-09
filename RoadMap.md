@@ -6953,6 +6953,76 @@ or their explicit real-time approval in a live conversation turn.**
     revisit the `sni_trusted` allowlist idea above, but there's no
     current evidence it's causing one.
 
+### Item 15: "Run now" completing with no visible feedback on the Events page (2026-09-09)
+
+**DONE (found + fixed live 2026-09-09, project owner testing the new
+network sweep feature directly):** clicking "Run now" visibly did
+something (the Settings page's own status line updated), but nothing
+showed up on the Events page at all -- no way to confirm what it
+actually did without checking the Settings page's status line or the
+database directly.
+
+Root cause: the Events page is *deliberately* not a firehose (project
+owner's own 2026-09-01 scope decision, `common/system_events.py`'s own
+docstring) -- only `error`/`recovery` severities exist, and a
+successful sweep is neither. That scope decision was correct and
+stays correct; a manual admin action completing is a genuinely
+different case from a routine automatic cycle succeeding, though, and
+deserved its own narrow exception rather than either silence or
+reopening the firehose question.
+
+Fixed: added a third severity, `'info'`, deliberately scoped to
+exactly two callers, both rare and admin-relevant, neither a routine
+periodic success:
+1. `controller/network_sweep.py`'s manual "Run now" trigger completing
+   -- logs "Manual sweep complete: probed N address(es) in
+   <range>." An *automatic* scheduled sweep completing does NOT log
+   anything, same as before -- only the explicit one-off action does.
+2. `common/identity.py`'s `record_binding()` recording a genuinely
+   brand-new device for the first time (`device_auto_created`) -- this
+   was already recorded in `network_events`, but that table has no
+   dashboard page of its own. Fires regardless of *which* discovery
+   source found it (passive rtnetlink, the periodic snapshot, or the
+   new active sweep) -- deliberately not tied to the sweep specifically,
+   since any of them finding a genuinely new device is equally
+   noteworthy. This is the closest honest answer to "what did it
+   find": the sweep itself can't know synchronously (nudging is
+   near-instant; the kernel actually resolving ARP and
+   `discovery.py`'s own snapshot noticing it both take a little real
+   time), so "found a new device" is reported by whichever mechanism
+   actually records it, when it actually happens -- not falsely
+   attributed to the sweep completing in the same instant.
+
+Required a real schema migration, not just an `ALTER TABLE ADD COLUMN`:
+`system_events.severity`'s `CHECK` constraint can't be widened in
+place in SQLite. `common/db.py`'s `_migrate()` now rebuilds the table
+(rename, recreate with the new constraint, copy every row across by
+id, drop the renamed original) when it detects the live schema's own
+stored SQL text doesn't yet mention `'info'` -- idempotent, and
+verified to actually preserve existing rows (not just "the table still
+exists after"). This differs from `interception_runtime.nft_mode`'s
+own earlier precedent of skipping a `CHECK` constraint entirely rather
+than deal with this exact SQLite limitation -- that was a valid
+simplification for a brand-new column with nothing to conflict with;
+`'info'` needed the constraint to actually accept it on an
+already-existing, already-constrained production database, which
+application-level discipline alone can't route around.
+
+Also fixed two stale doc comments found in passing while in these
+files: `common/identity.py`'s own module docstring still claimed
+"nothing in the proxy/dashboard enforcement path reads any of this
+yet" -- long untrue, corrected.
+
+9 new tests: 3 in `tests/test_system_events.py` (accepts `'info'`, the
+migration itself preserves data against a hand-written pre-`'info'`
+table, migration idempotency), 2 in `tests/test_identity_bindings.py`
+(new-device auto-create logs it, an ordinary subsequent binding does
+not), 2 in `tests/test_controller_network_sweep.py` (manual run logs
+it with the right message, automatic run does not), 1 in
+`tests/test_dashboard.py` (Events page renders the new severity with
+its own badge, doesn't crash on it), plus the Settings-page/route
+coverage this shares with item 11's own original network-sweep tests.
+
 ### Soak test stopped (2026-09-08)
 
 Project owner said they were done sending feedback for this window and

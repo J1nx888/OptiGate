@@ -505,11 +505,22 @@ CREATE INDEX IF NOT EXISTS idx_network_events_device ON network_events(device_id
 -- scope decision), only real failures and recoveries are recorded here
 -- -- not every routine successful cycle, which would make this table
 -- pure noise within hours. See common/system_events.py.
+--   'info' (added 2026-09-09, real gap found live: clicking "Run now" on
+--     the network discovery sweep reported nothing here at all, even
+--     though it visibly did something) -- deliberately narrow, NOT a
+--     general-purpose severity for routine success: only for (a) an
+--     admin's own one-off manual action actually completing (e.g.
+--     network_sweep.py's manual "Run now" trigger), and (b) discovery
+--     genuinely recording a brand-new device for the first time
+--     (common/identity.py's record_binding(), its own auto-create
+--     branch) -- both are rare, meaningful, admin-relevant events, not
+--     a routine automatic cycle succeeding, so this doesn't reopen the
+--     "not a firehose" scope decision above.
 CREATE TABLE IF NOT EXISTS system_events (
     id       INTEGER PRIMARY KEY,
     ts       TEXT NOT NULL,
     source   TEXT NOT NULL,   -- which loop/component, e.g. 'adguard_sync', 'category_fetch'
-    severity TEXT NOT NULL CHECK (severity IN ('error', 'recovery')),
+    severity TEXT NOT NULL CHECK (severity IN ('error', 'recovery', 'info')),
     message  TEXT NOT NULL,
     detail   TEXT             -- optional longer context, e.g. the exception's own str()
 );
@@ -638,6 +649,48 @@ def _migrate(conn: sqlite3.Connection) -> None:
     group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
     if group_columns and "ignored" not in group_columns:
         conn.execute("ALTER TABLE groups ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0")
+
+    # system_events.severity's CHECK constraint (added 2026-09-09, see
+    # that column's own schema comment for the 'info' severity's
+    # narrow scope) can't be widened with a plain ALTER TABLE the way
+    # every migration above is -- SQLite has no ALTER TABLE ... DROP/
+    # MODIFY CONSTRAINT, and (unlike interception_runtime.nft_mode's
+    # own migration just above, which deliberately skipped adding a
+    # CHECK at all rather than deal with this) 'info' genuinely needs
+    # to be accepted by SQLite itself: the app-level _VALID_SEVERITIES
+    # check in common/system_events.py runs BEFORE the INSERT, but the
+    # OLD constraint would still reject that INSERT outright on an
+    # un-migrated existing database, a hard failure app-level discipline
+    # can't route around. Rebuilds the table (rename, recreate with the
+    # new constraint, copy every row across, drop the renamed original)
+    # -- the standard SQLite pattern for widening a CHECK, and the only
+    # one available. Detected via sqlite_master's own stored CREATE
+    # TABLE text rather than a separate "have we migrated" flag: cheap,
+    # and inherently idempotent (a fresh database created from the
+    # schema above already has 'info' in its text, so this rebuild
+    # correctly never runs for it, only for a database created before
+    # this migration existed).
+    events_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'system_events'"
+    ).fetchone()
+    if events_sql_row and "'info'" not in events_sql_row["sql"]:
+        conn.executescript(
+            """
+            ALTER TABLE system_events RENAME TO system_events_pre_info_migration;
+            CREATE TABLE system_events (
+                id       INTEGER PRIMARY KEY,
+                ts       TEXT NOT NULL,
+                source   TEXT NOT NULL,
+                severity TEXT NOT NULL CHECK (severity IN ('error', 'recovery', 'info')),
+                message  TEXT NOT NULL,
+                detail   TEXT
+            );
+            INSERT INTO system_events (id, ts, source, severity, message, detail)
+                SELECT id, ts, source, severity, message, detail FROM system_events_pre_info_migration;
+            DROP TABLE system_events_pre_info_migration;
+            CREATE INDEX IF NOT EXISTS idx_system_events_ts ON system_events(ts DESC);
+            """
+        )
 
 
 # ==========================================================

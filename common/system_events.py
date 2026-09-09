@@ -28,6 +28,22 @@ persisted "was this already failing" state, so a container restart
 implicitly and correctly ends whatever failure streak it was mid-way
 through (a fresh process starting up and immediately succeeding is not,
 itself, a notable "recovery" worth a row).
+
+**`'info'` severity, added 2026-09-09** (real gap found live: clicking
+"Run now" on the network discovery sweep visibly did something, but
+nothing showed up here at all): deliberately narrow, not a general
+"log routine success" escape hatch that would reopen the firehose
+question above. Only two callers use it, both genuinely rare,
+admin-relevant, one-off events, not a periodic cycle succeeding:
+`controller/network_sweep.py`'s manual "Run now" trigger completing
+(an explicit admin action, not the automatic hourly schedule), and
+`common/identity.py`'s `record_binding()` recording a genuinely
+brand-new device for the first time (not a routine binding refresh).
+Requires a real schema migration (`common/db.py`'s `_migrate()`) since
+SQLite's `CHECK` constraints can't be altered in place -- see that
+migration's own comment for why this differs from
+`interception_runtime.nft_mode`'s own precedent of skipping the CHECK
+constraint entirely.
 """
 from __future__ import annotations
 
@@ -36,7 +52,7 @@ from typing import Callable
 
 import db
 
-_VALID_SEVERITIES = ("error", "recovery")
+_VALID_SEVERITIES = ("error", "recovery", "info")
 
 # Added 2026-09-02, closing a real gap found by code review: this
 # table's own original design (see this module's docstring above) was

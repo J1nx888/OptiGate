@@ -6667,10 +6667,14 @@ EVENTS_BODY = """
   <code>docker compose logs</code> when something's wrong. Deliberately
   NOT a firehose: a routine successful cycle is never logged here, only
   an actual failure (one row per occurrence, so consecutive timestamps
-  show how long something's been broken) and the specific moment it
-  recovers. This is a smaller, more focused source than the Report
-  page's own activity log, which is about kids' browsing, not this
-  box's own operational health.
+  show how long something's been broken), the specific moment it
+  recovers, and (added 2026-09-09) a small number of genuinely rare,
+  admin-relevant <strong>info</strong> events -- an admin's own manual
+  action actually completing (e.g. the network discovery sweep's "Run
+  now"), or a brand-new device being seen for the very first time.
+  This is a smaller, more focused source than the Report page's own
+  activity log, which is about kids' browsing, not this box's own
+  operational health.
 </p>
 {% if events %}<input type="search" data-filter-table="eventsTable" placeholder="Search events&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
 <div class="table-scroll">
@@ -6680,7 +6684,9 @@ EVENTS_BODY = """
   <tr>
     <td>{{ e.ts }}</td>
     <td><code>{{ e.source }}</code></td>
-    <td><span class="badge {{ 'blocked' if e.severity == 'error' else 'allowed' }}">{{ e.severity }}</span></td>
+    <td>
+      <span class="badge {{ 'blocked' if e.severity == 'error' else 'pending' if e.severity == 'info' else 'allowed' }}">{{ e.severity }}</span>
+    </td>
     <td>{{ e.message }}</td>
   </tr>
   {% else %}

@@ -378,10 +378,18 @@ def test_successful_kid_login_logs_no_system_event(server, conn):
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")
 
+    # Baseline taken AFTER setup, not before: record_binding() above is a
+    # genuinely brand-new MAC, which (2026-09-09, system_events.py's own
+    # narrow 'info' severity) now correctly logs a "new device
+    # discovered" event of its own -- that's the setup step's business,
+    # not the login's. This test's real claim is narrower: the LOGIN
+    # itself must add nothing further.
+    before = conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"]
+
     _post(server, "kid1", "correcthorse")
 
-    count = conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"]
-    assert count == 0, "system_events is deliberately not a firehose -- a normal successful login isn't an event"
+    after = conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"]
+    assert after == before, "system_events is deliberately not a firehose -- a normal successful login isn't an event"
 
 
 def test_one_attempt_below_the_limit_still_succeeds_with_the_right_password(server, conn):

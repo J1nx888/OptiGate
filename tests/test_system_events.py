@@ -9,6 +9,86 @@ import pytest
 import system_events
 
 
+def test_log_event_accepts_info_severity(conn):
+    """Added 2026-09-09: a real, narrow-scope third severity (see
+    common/db.py's schema comment and system_events.py's own module
+    docstring for exactly which two callers use it and why) -- not a
+    general "log routine success" escape hatch."""
+    system_events.log_event(conn, "network_sweep", "info", "Manual sweep complete: probed 254 address(es).")
+    row = conn.execute("SELECT * FROM system_events").fetchone()
+    assert row["severity"] == "info"
+
+
+def test_migrate_widens_an_existing_pre_info_table_without_losing_data(tmp_path, monkeypatch):
+    """Regression test for the real migration in db._migrate(): SQLite
+    can't ALTER a CHECK constraint in place, so this rebuilds the whole
+    table -- must preserve every existing row (including its original
+    id) and must actually accept 'info' afterward, on a database that
+    predates that severity ever existing."""
+    import sqlite3
+    import db
+
+    db_file = tmp_path / "pre_info.db"
+    monkeypatch.setattr(db, "DB_PATH", db_file)
+    raw_conn = sqlite3.connect(db_file)
+    raw_conn.row_factory = sqlite3.Row
+    # The OLD schema, exactly as it existed before 'info' was added --
+    # deliberately hand-written here, not copied from db.SCHEMA (which
+    # already has 'info'), so this test actually exercises migrating
+    # FROM the old shape, not just re-running the current one.
+    raw_conn.executescript(
+        """
+        CREATE TABLE system_events (
+            id       INTEGER PRIMARY KEY,
+            ts       TEXT NOT NULL,
+            source   TEXT NOT NULL,
+            severity TEXT NOT NULL CHECK (severity IN ('error', 'recovery')),
+            message  TEXT NOT NULL,
+            detail   TEXT
+        );
+        INSERT INTO system_events (id, ts, source, severity, message, detail)
+            VALUES (1, '2026-01-01T00:00:00Z', 'adguard_sync', 'error', 'old failure', 'old detail');
+        INSERT INTO system_events (id, ts, source, severity, message, detail)
+            VALUES (2, '2026-01-01T00:05:00Z', 'adguard_sync', 'recovery', 'old recovery', NULL);
+        """
+    )
+    raw_conn.commit()
+    raw_conn.close()
+
+    conn = db.get_conn()
+    db.init_db(conn)  # runs _migrate() as part of its own normal startup path
+
+    rows = conn.execute("SELECT * FROM system_events ORDER BY id").fetchall()
+    assert len(rows) == 2, "the pre-existing rows must survive the rebuild"
+    assert rows[0]["id"] == 1
+    assert rows[0]["message"] == "old failure"
+    assert rows[0]["detail"] == "old detail"
+    assert rows[1]["id"] == 2
+    assert rows[1]["message"] == "old recovery"
+
+    # The real proof the constraint was actually widened, not just that
+    # the table still exists: an 'info' insert that would have raised
+    # sqlite3.IntegrityError against the old CHECK now succeeds.
+    system_events.log_event(conn, "network_sweep", "info", "new info row")
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM system_events WHERE severity = 'info'"
+    ).fetchone()["c"] == 1
+    conn.close()
+
+
+def test_migrate_is_idempotent_for_an_already_migrated_table(conn):
+    """Calling _migrate() again (e.g. every container startup) against
+    a database that already has 'info' must be a safe no-op, not a
+    second rebuild attempt."""
+    import db
+
+    db._migrate(conn)  # the `conn` fixture's own init_db() already ran this once
+    db._migrate(conn)  # a second time, explicitly, for good measure
+
+    system_events.log_event(conn, "network_sweep", "info", "still works")
+    assert conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"] == 1
+
+
 def test_log_event_inserts_a_row(conn):
     system_events.log_event(conn, "adguard_sync", "error", "adguard sync failed: boom")
     row = conn.execute("SELECT * FROM system_events").fetchone()

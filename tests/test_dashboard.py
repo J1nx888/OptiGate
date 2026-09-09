@@ -2796,6 +2796,20 @@ def test_events_page_shows_recovery_severity_distinctly(client, db_conn):
     assert b"recovery" in resp.data
 
 
+def test_events_page_shows_info_severity_with_its_own_badge(client, db_conn):
+    """Added 2026-09-09 alongside the 'info' severity itself -- must
+    render with a distinct badge, not crash on a severity value that
+    predates this page's original two-value ternary."""
+    import system_events
+
+    system_events.log_event(db_conn, "network_sweep", "info", "Manual sweep complete: probed 2 address(es).")
+    resp = client.get("/events", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"info" in resp.data
+    assert b'class="badge pending"' in resp.data
+    assert b"Manual sweep complete" in resp.data
+
+
 def test_events_page_orders_newest_first(client, db_conn):
     import system_events
 

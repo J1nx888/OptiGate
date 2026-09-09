@@ -269,6 +269,52 @@ def test_run_loop_run_now_bypasses_disabled_and_interval(conn, monkeypatch):
     assert len(_FakeSocket.instances) == 2, "exactly one sweep (2 hosts in a /30) for the one run-now request"
 
 
+def test_run_loop_run_now_logs_a_system_events_info_row(conn, monkeypatch):
+    """Fixed 2026-09-09, real gap found live: clicking "Run now" visibly
+    did something, but nothing showed up on the Events page at all."""
+    _reset_fake_socket(monkeypatch)
+    db.set_setting(conn, "local_network", "192.168.1.0/30")
+    conn.commit()
+    monkeypatch.setattr(network_sweep, "_CHECK_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(network_sweep, "_interval_seconds", lambda conn: 9999)
+
+    task = network_sweep.run_loop()
+    try:
+        db.set_setting(conn, "network_sweep_run_now_requested_at", db.now_iso())
+        conn.commit()
+        time.sleep(0.06)
+    finally:
+        task.stop()
+
+    rows = conn.execute("SELECT * FROM system_events").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["severity"] == "info"
+    assert rows[0]["source"] == "network_sweep"
+    assert "2" in rows[0]["message"]
+    assert "192.168.1.0/30" in rows[0]["message"]
+
+
+def test_run_loop_automatic_sweep_does_not_log_a_system_event(conn, monkeypatch):
+    """The 'info' severity is deliberately scoped to an explicit admin
+    action, not the automatic schedule -- an automatic sweep completing
+    must stay just as silent on the Events page as it always has been,
+    matching the "not a firehose" principle this table was built on."""
+    _reset_fake_socket(monkeypatch)
+    db.set_setting(conn, "local_network", "192.168.1.0/30")
+    conn.commit()
+    monkeypatch.setattr(network_sweep, "_CHECK_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(network_sweep, "_interval_seconds", lambda conn: 0.01)
+
+    task = network_sweep.run_loop()
+    try:
+        time.sleep(0.1)
+    finally:
+        task.stop()
+
+    assert len(_FakeSocket.instances) > 0, "sanity check: the automatic sweep actually ran"
+    assert conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"] == 0
+
+
 def test_run_loop_run_now_fires_only_once_per_request(conn, monkeypatch):
     _reset_fake_socket(monkeypatch)
     db.set_setting(conn, "local_network", "192.168.1.0/30")

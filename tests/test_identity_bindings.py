@@ -66,6 +66,37 @@ def test_new_mac_auto_creates_a_pending_devices_row_and_event(conn):
     assert events[0]["mac_address"] == MAC_A
 
 
+def test_new_mac_auto_create_also_logs_a_system_events_info_row(conn):
+    """Fixed 2026-09-09, real gap found live: device_auto_created was
+    already recorded in network_events (see the test above), but that
+    table has no dashboard page of its own -- an admin had no way to
+    see "a new device just showed up" without querying the DB directly.
+    Deliberately checks this fires regardless of `source` (not just for
+    the network sweep) -- any discovery path finding a genuinely new
+    device is equally worth surfacing."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink", seen_at="2026-08-29T00:00:00Z")
+
+    rows = conn.execute("SELECT * FROM system_events").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["severity"] == "info"
+    assert rows[0]["source"] == "device_discovery"
+    assert MAC_A in rows[0]["message"]
+    assert IP_1 in rows[0]["message"]
+
+
+def test_a_second_binding_for_an_existing_device_does_not_log_a_system_event(conn):
+    """Only the genuinely-new-device case is an 'info'-worthy event --
+    every subsequent ordinary binding (a DHCP renewal, a second IP) must
+    stay silent, matching system_events.py's own "not a firehose"
+    scope."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink", seen_at="2026-08-29T00:00:00Z")
+    identity.record_binding(conn, MAC_A, IP_2, source="rtnetlink", seen_at="2026-08-29T00:05:00Z")
+
+    assert conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"] == 1, (
+        "only the first, genuinely-new binding should have logged anything"
+    )
+
+
 def test_new_mac_on_a_second_ever_binding_still_does_not_auto_associate(conn):
     """The auto-create only ever fires on a MAC's first-ever binding --
     a second, brand-new binding for an ALREADY-known MAC (e.g. two IPs

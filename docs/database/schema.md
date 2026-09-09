@@ -562,6 +562,17 @@ day's brute-force audit -- see `common/system_events.py`'s own
 `_MAX_STORED_EVENTS` comment for the security reasoning (this table
 gained its first attacker-controlled writer that day).
 
+**Third severity, `info`, added 2026-09-09**: `severity`'s `CHECK`
+constraint is now `IN ('error', 'recovery', 'info')` -- required a real
+migration (`common/db.py`'s `_migrate()` rebuilds the whole table,
+since SQLite can't widen a `CHECK` constraint in place) rather than a
+plain `ALTER TABLE ADD COLUMN`. Deliberately narrow, not a general
+"log routine success" severity: only `controller/network_sweep.py`'s
+manual "Run now" trigger completing, and `common/identity.py`'s
+`record_binding()` recording a genuinely brand-new device for the
+first time, ever write it -- both rare, admin-relevant, one-off events,
+not a periodic cycle succeeding.
+
 | Column     | Type    | Constraints |
 |---|---|---|
 | `id`       | INTEGER | PRIMARY KEY |
