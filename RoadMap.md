@@ -7133,6 +7133,137 @@ Home.
 
 ---
 
+## Live supervised interception test (2026-09-09), Bark Home paused
+
+First real supervised test of the `interception` profile since item 15's
+fixes, with Matthew's device actively used and Bark Home paused for the
+window. Five real findings, one of which turned out to invalidate a good
+chunk of what was initially "verified" during the test itself.
+
+**Foundational mistake, found mid-test: `controller`, `nftables-manager`,
+and `arp-worker` were started via `docker compose --profile interception
+up -d` WITHOUT rebuilding them first.** Docker Compose reused the
+existing images from 2026-09-08T19:22 (the last time interception was
+used) since they already existed -- `up -d` alone never rebuilds a
+changed image, only `docker compose build` (or `up -d --build`) does.
+Confirmed directly: `docker exec optigate-controller python3 -c "import
+network_sweep"` raised `ModuleNotFoundError` -- an entire feature (item
+11) was simply absent from the running process. **Lesson for future
+sessions: always `docker compose build <service>` for every
+interception-profile service before `up -d`, exactly like this project
+already does for `dashboard`/`proxy` -- never assumed for the Go/arp
+services before this.** Rebuilt and restarted all three mid-test once
+found; `arp-worker`'s image was unchanged (no source changes since
+09-08) so compose correctly left that one running.
+
+**Item 16: network sweep never running -> device `192.168.1.57`
+(`e6:fb:4e:5b:ef:a5`) invisible.** Direct consequence of the stale-image
+mistake above -- `network_sweep_last_run_at` was `NULL` despite
+`controller` being "up" for 20+ minutes, because the module importing it
+didn't exist in that image at all. After rebuilding, ran a full sweep
+(254 addresses) -- `192.168.1.57` still didn't appear in
+`device_bindings`. With current code confirmed running, this now points
+to the device not being reachable at L2 from this box's interface at
+test time (off, asleep, or a different AP/segment), not a further code
+gap -- needs the project owner to confirm the device was actually online
+during the test before this is investigated further.
+
+**Item 17: SSL-Bump doesn't work for either Crunchyroll or Asurascans --
+real cause found, not a domain-specific quirk.** AdGuard's own query log
+shows both domains' HTTPS DNS records carry `ech=` (Encrypted Client
+Hello) and advertise `alpn="h3,h2"` (HTTP/3 preferred). ECH encrypts the
+real SNI inside the TLS ClientHello, so Squid's SNI-based bump/splice
+decision (`proxy/sni_helper.py`) never sees "asurascans.com"/
+"crunchyroll.com" at all -- confirmed the actual CONNECT attempts DO
+reach Squid (found in `access.log`, logged under the raw destination IP
+since no real hostname was ever visible), each hanging with
+`NONE_NONE/000` (no result, client retries repeatedly) rather than a
+clean allow/deny. This is a real architectural gap this project has
+never had to handle before: ECH is Cloudflare's default for any
+Cloudflare-fronted site, and adoption is growing. Two real mitigations,
+neither built yet, need a real design conversation before choosing:
+(a) strip/reject DNS answers carrying `ech=` for bump-mode domains
+specifically (forces a visible-SNI fallback), and/or (b) block UDP/443
+(QUIC) for bump_v4 devices to force TCP/TLS fallback where Squid can at
+least attempt SNI inspection. Neither addresses ECH alone forcing a
+fallback to a REAL SNI Squid can act on -- (a) is the one that actually
+does; (b) only helps if QUIC was the separate reason a connection never
+reached Squid as TCP at all (also plausible, not separately confirmed).
+
+**Item 18 (confirms item 7 is still open, doesn't newly break
+anything): `optigate.home` shows only the box's own IP
+(`192.168.1.250`) on Matthew's (bump-enabled) tablet**, not his device
+info. Root cause: bump_v4's port-80 redirect to Squid is unconditional
+regardless of destination (item 7's own finding), so Matthew's request
+for `optigate.home` gets proxied through Squid first; item 9's fix now
+lets Squid allow the unconfigured `optigate.home` "domain" by default
+and proxy it back to the box's own `block_page_server` listener --
+`block_page_server` then sees SQUID as the client, not the tablet. Item
+9 changed the failure mode (outright denial -> proxied-through, IP
+lost) but didn't close item 7's still-open, still-undesigned fix (an
+nftables-level exception for the box's own IP, or a Squid-side
+unconditional splice for the synthetic hostname).
+
+**Item 19: AdGuard/dashboard credential lockout -- two distinct real
+bugs, not one.** (1) The dashboard container genuinely cannot read or
+write `/opt/adguardhome/conf/AdGuardHome.yaml` under its normal runtime
+user -- confirmed via the actual live route's own error message
+(`[Errno 13] Permission denied`), not assumed. This means
+`sync_adguard_credentials()` (dashboard/adguard_config_sync.py) has
+likely been silently failing on every real admin-password change for a
+while, not just tonight -- the "one credential to remember" invariant
+this project believed it had (2026-09-07's unification work) has
+probably not actually held since whatever changed this container's
+runtime permissions. Needs investigating why (a UID/GID mismatch
+between the `dashboard` and `adguard` containers' shared volume mount is
+the leading theory, not confirmed). Worked around live by running the
+sync as root via `docker exec -u 0` -- not a real fix, just how the
+project owner got back in. (2) Separately, and now flagged for a real
+fix next round, per the project owner's own words ("lets fix that bug in
+the next round"): `SETTINGS_BODY`'s "Log out" link
+(`dashboard.py`, ~line 350) works by sending deliberately-wrong
+`logout`/`logout` Basic-Auth credentials to force the browser to drop
+its cached login -- but several browsers then CACHE `logout` as the
+*username* for the origin and keep resubmitting it on every later
+attempt, even once a correct password is pasted into a fresh-looking
+prompt whose username field silently stayed pre-filled with `logout`.
+Confirmed directly in `dashboard`'s own log: every failed attempt during
+recovery showed `username: 'logout'`, never `admin`, regardless of which
+(correct) password was tried. The user's actual working password was
+never wrong at any point tonight -- this UI mechanism was quietly
+defeating every login attempt after the first "Log out" click. Real fix
+needs a different logout mechanism entirely (HTTP Basic Auth has no
+clean server-side logout -- likely candidates: a plain instructional
+page telling the admin to close the browser/clear site data, or moving
+off Basic Auth to a real session-cookie login where a server-side logout
+is actually possible) -- a real design decision, not a one-line patch.
+
+**Two lockout passwords set live during recovery** (both later replaced
+by the project owner's own choice, per instruction after each): the
+first (`SJbFjJdRG0BSZROZ`) mixed `0` and `O` adjacently and was almost
+certainly mistyped, not a real second bug; the second
+(`MkkdnredZCtpFTXD`, letters only, no ambiguous characters) was correct
+and verified server-side both times -- the real blocker was the
+logout-username-caching bug above, found only after the second
+"it's still not working" report.
+
+**Item 20, found in passing, not yet investigated:** during the test,
+many `clients2.google.com`/`www.youtube.com`/analytics-domain CONNECT
+attempts from Matthew's device got an immediate `409` rejection from
+Squid (`access.log`, `NONE_NONE/409`, `text/html` body) -- the same
+Google-connection-coalescing behavior item 14 investigated and
+downgraded to "logged for awareness, no action needed" based on OLDER
+data showing `TCP_TUNNEL/200` (success). This session's evidence shows
+active failures, not just a logged warning -- contradicts item 14's own
+conclusion. Not investigated further tonight (not blocking anything
+in-test); worth a real look next time interception runs.
+
+**Netflix (item 9's fix) and the general "unconfigured domain -> allow"
+behavior confirmed working correctly live** -- the one part of tonight's
+plan that worked exactly as designed, no caveats.
+
+---
+
 ## Cross-cutting: security-by-design
 
 Security is designed in from the start on every phase above, not
