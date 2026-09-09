@@ -49,7 +49,9 @@ silently guessed at.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
+from typing import Callable, TypeVar
 
 import bcrypt
 import yaml
@@ -57,6 +59,44 @@ import yaml
 log = logging.getLogger("dashboard.adguard_config_sync")
 
 DEFAULT_CONF_PATH = Path("/opt/adguardhome/conf/AdGuardHome.yaml")
+
+# Real gap found live 2026-09-09: adguard/entrypoint.sh's own
+# _grant_dashboard_access only ran once, right after AdGuard's startup
+# settled -- a real admin password change silently failed to reach
+# AdGuard because something reset the file's ownership back to
+# root:root/0600 well into the container's uptime, with no restart in
+# between. Fixed at the source with a background repair loop in that
+# script (re-applies the grant every 5s for the container's whole
+# lifetime, not just once at startup) -- but that still leaves a narrow
+# window, up to one poll interval wide, where a write attempted right
+# after AdGuard resets the file and right before the next repair tick
+# would still fail. _with_permission_retry below covers that residual
+# window on this side, so the two fixes together make the failure
+# effectively unreachable rather than just less likely.
+_PERMISSION_RETRY_ATTEMPTS = 3
+_PERMISSION_RETRY_DELAY_SECONDS = 2.0
+
+_T = TypeVar("_T")
+
+
+def _with_permission_retry(action: Callable[[], _T]) -> _T:
+    """Calls `action()`, retrying briefly on PermissionError only -- see
+    the module-level comment above for why this narrow race exists even
+    with adguard/entrypoint.sh's own repair loop in place. Any other
+    exception -- including FileNotFoundError, a DIFFERENT OSError
+    subclass, not a PermissionError one -- propagates immediately,
+    unretried: a missing file is a real, non-transient problem retrying
+    on a timer would never fix."""
+    last_exc: PermissionError | None = None
+    for attempt in range(_PERMISSION_RETRY_ATTEMPTS):
+        try:
+            return action()
+        except PermissionError as exc:
+            last_exc = exc
+            if attempt < _PERMISSION_RETRY_ATTEMPTS - 1:
+                time.sleep(_PERMISSION_RETRY_DELAY_SECONDS)
+    assert last_exc is not None  # loop always either returns or sets this
+    raise last_exc
 
 
 class AdGuardConfigSyncError(RuntimeError):
@@ -78,7 +118,7 @@ def sync_adguard_credentials(username: str, password: str, conf_path: Path = DEF
     to restart the `adguard` container.
     """
     try:
-        raw = conf_path.read_text(encoding="utf-8")
+        raw = _with_permission_retry(lambda: conf_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise AdGuardConfigSyncError(
             f"{conf_path} doesn't exist yet -- adguard hasn't booted/configured itself, "
@@ -101,6 +141,10 @@ def sync_adguard_credentials(username: str, password: str, conf_path: Path = DEF
     users[0] = {**users[0], "name": username, "password": password_hash}
 
     try:
-        conf_path.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8")
+        _with_permission_retry(
+            lambda: conf_path.write_text(
+                yaml.safe_dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8"
+            )
+        )
     except OSError as exc:
         raise AdGuardConfigSyncError(f"couldn't write {conf_path}: {exc}") from exc

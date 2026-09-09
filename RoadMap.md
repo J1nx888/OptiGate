@@ -7220,20 +7220,43 @@ nftables-level exception for the box's own IP, or a Squid-side
 unconditional splice for the synthetic hostname).
 
 **Item 19: AdGuard/dashboard credential lockout -- two distinct real
-bugs, not one.** (1) The dashboard container genuinely cannot read or
-write `/opt/adguardhome/conf/AdGuardHome.yaml` under its normal runtime
-user -- confirmed via the actual live route's own error message
-(`[Errno 13] Permission denied`), not assumed. This means
-`sync_adguard_credentials()` (dashboard/adguard_config_sync.py) has
-likely been silently failing on every real admin-password change for a
-while, not just tonight -- the "one credential to remember" invariant
-this project believed it had (2026-09-07's unification work) has
-probably not actually held since whatever changed this container's
-runtime permissions. Needs investigating why (a UID/GID mismatch
-between the `dashboard` and `adguard` containers' shared volume mount is
-the leading theory, not confirmed). Worked around live by running the
-sync as root via `docker exec -u 0` -- not a real fix, just how the
-project owner got back in. (2) Separately, and now flagged for a real
+bugs, not one.** (1) **DONE (root-caused and fixed 2026-09-09, next
+session):** the dashboard container genuinely could not read or write
+`/opt/adguardhome/conf/AdGuardHome.yaml` under its normal runtime user
+-- confirmed via the actual live route's own error message (`[Errno 13]
+Permission denied`), not assumed. Real root cause found in
+`adguard/entrypoint.sh`: a 2026-09-07 fix (`_grant_dashboard_access`,
+`chown root:13`/`chmod 660`) already existed for exactly this, but only
+ever ran ONCE, right after AdGuard's own startup settled -- its own
+comment flagged as "unconfirmed" whether AdGuard resets the file's
+ownership again later, mid-uptime, with no restart in between. Tonight
+confirmed it does. Fixed by adding `_repair_loop()`, a background loop
+inside the `adguard` container re-applying the grant every 5 seconds for
+the container's entire lifetime (not just once at startup) -- cheap and
+idempotent, wired into all three of `entrypoint.sh`'s own launch
+branches (already-configured, first-boot, and the bind-address-restart
+path), each now tracking a `REPAIR_PID` alongside the main `AdGuardHome`
+process and killing both on shutdown. Belt-and-suspenders fix on the
+dashboard side too: `dashboard/adguard_config_sync.py`'s new
+`_with_permission_retry()` retries a `PermissionError` (only that
+exception -- never `FileNotFoundError`, a real non-transient problem) up
+to 3 times, 2s apart, around both the read and the write, closing the
+narrow residual window where a save could still land in the gap between
+two repair-loop ticks. 4 new tests in
+`tests/test_adguard_config_sync.py` (a transient permission error
+recovers within the retry budget on both read and write, a persistent
+one still raises `AdGuardConfigSyncError` after exhausting retries, and
+a genuinely missing file fails immediately with no retry delay at all).
+Not yet deployed live -- needs `docker compose build adguard dashboard`
+and a restart of both containers to take effect; the `entrypoint.sh`
+half specifically needs `adguard` itself restarted, not just rebuilt,
+since the fix lives in its own startup script. **Also means the "one
+credential to remember" invariant this project believed it had
+(2026-09-07's unification work) has probably not actually held for any
+password change since whatever first triggered AdGuard's own mid-uptime
+config rewrite -- worth telling the project owner to double check
+AdGuard's password if a change was ever made and never explicitly
+re-verified.** (2) Separately, and now flagged for a real
 fix next round, per the project owner's own words ("lets fix that bug in
 the next round"): `SETTINGS_BODY`'s "Log out" link
 (`dashboard.py`, ~line 350) works by sending deliberately-wrong

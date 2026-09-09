@@ -35,13 +35,32 @@ WORK=/opt/adguardhome/work
 # backgrounds the process and polls its own `/control/status` first
 # (same technique the first-boot flow already uses to know when to send
 # its own setup API calls), so this always runs once AdGuard's own
-# post-launch file-touching is done -- if it's ever rewritten again
-# later during a long uptime (unconfirmed whether that happens), the
-# next restart repairs it, same "config only takes effect on restart
-# anyway" limitation this project already accepts for this feature.
+# post-launch file-touching is done.
 _grant_dashboard_access() {
   chown root:13 "$CONF" 2>/dev/null || true
   chmod 660 "$CONF" 2>/dev/null || true
+}
+
+# Real gap found live 2026-09-09, during a supervised interception test:
+# this comment used to say the "rewritten again later during a long
+# uptime" case above was unconfirmed -- it isn't anymore. A real admin
+# password change (dashboard/adguard_config_sync.py writing a fresh
+# bcrypt hash into $CONF) silently failed to ever reach AdGuard: by the
+# time the write was attempted, $CONF had already been reset back to
+# root:root/0600 well after container startup had settled, with no
+# restart in between (the exact trigger inside AdGuard that re-persists
+# its own config mid-uptime was not pinned down -- only that it
+# happens). A single post-launch grant is not enough. This loop keeps
+# re-applying it for the container's entire lifetime -- cheap and
+# idempotent (chown/chmod on one small file every few seconds) -- so any
+# later reset is corrected within one poll interval instead of
+# persisting until the next container restart, which could otherwise be
+# days away on this project's `restart: unless-stopped` policy.
+_repair_loop() {
+  while :; do
+    sleep 5
+    _grant_dashboard_access
+  done
 }
 
 _wait_for_control_api() {
@@ -64,7 +83,11 @@ if [ -f "$CONF" ]; then
   trap 'kill -TERM "$PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
   _wait_for_control_api || echo "AdGuard Home did not come up within 30s -- continuing to wait on it anyway" >&2
   _grant_dashboard_access
+  _repair_loop &
+  REPAIR_PID=$!
+  trap 'kill -TERM "$PID" "$REPAIR_PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
   wait "$PID"
+  kill -TERM "$REPAIR_PID" 2>/dev/null
   exit $?
 fi
 
@@ -255,11 +278,19 @@ if [ "$WEB_BIND" != "0.0.0.0" ]; then
   trap 'kill -TERM "$PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
   _wait_for_control_api || echo "AdGuard Home did not come back up within 30s after the bind-address restart -- continuing to wait on it anyway" >&2
   _grant_dashboard_access
+  _repair_loop &
+  REPAIR_PID=$!
+  trap 'kill -TERM "$PID" "$REPAIR_PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
   wait "$PID"
+  kill -TERM "$REPAIR_PID" 2>/dev/null
   exit $?
 fi
 
 _wait_for_control_api || echo "AdGuard Home did not respond to its own control API within 30s -- continuing to wait on it anyway" >&2
 _grant_dashboard_access
+_repair_loop &
+REPAIR_PID=$!
+trap 'kill -TERM "$PID" "$REPAIR_PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
 echo "AdGuard Home configured (DNS on :${ADGUARD_DNS_PORT:-5354}, admin UI on 0.0.0.0:3000)." >&2
 wait "$PID"
+kill -TERM "$REPAIR_PID" 2>/dev/null

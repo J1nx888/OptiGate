@@ -7,6 +7,8 @@ bcrypt validator).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import bcrypt
 import pytest
 import yaml
@@ -106,6 +108,82 @@ def test_sync_raises_when_yaml_is_not_a_mapping(tmp_path):
     conf.write_text(yaml.safe_dump(["not", "a", "mapping"]), encoding="utf-8")
     with pytest.raises(sync.AdGuardConfigSyncError):
         sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+
+def test_sync_retries_a_transient_permission_error_on_read(tmp_path, monkeypatch):
+    """Real gap found live 2026-09-09: adguard/entrypoint.sh's own repair
+    loop re-grants the dashboard access every few seconds, but a write
+    attempted in the narrow window right after AdGuard resets the
+    file's permissions and right before the next repair tick would
+    otherwise still fail outright. sync_adguard_credentials() must
+    survive a PermissionError that clears up within a couple of
+    retries, not fail on the very first attempt."""
+    monkeypatch.setattr(sync, "_PERMISSION_RETRY_DELAY_SECONDS", 0)
+    conf = _write_conf(tmp_path / "AdGuardHome.yaml")
+
+    real_read_text = Path.read_text
+    calls = {"n": 0}
+
+    def flaky_read_text(self, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3 and self == conf:
+            raise PermissionError("simulated transient permission error")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+    assert calls["n"] == 3
+    data = yaml.safe_load(conf.read_text())
+    assert data["users"][0]["name"] == "newadmin"
+
+
+def test_sync_gives_up_after_repeated_permission_errors_on_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "_PERMISSION_RETRY_DELAY_SECONDS", 0)
+    conf = _write_conf(tmp_path / "AdGuardHome.yaml")
+
+    def always_denied(self, *a, **kw):
+        raise PermissionError("simulated permanent permission error")
+
+    monkeypatch.setattr(Path, "read_text", always_denied)
+
+    with pytest.raises(sync.AdGuardConfigSyncError, match="couldn't read"):
+        sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+
+def test_sync_retries_a_transient_permission_error_on_write(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "_PERMISSION_RETRY_DELAY_SECONDS", 0)
+    conf = _write_conf(tmp_path / "AdGuardHome.yaml")
+
+    real_write_text = Path.write_text
+    calls = {"n": 0}
+
+    def flaky_write_text(self, *a, **kw):
+        if self == conf:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise PermissionError("simulated transient permission error")
+        return real_write_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write_text)
+
+    sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=conf)
+
+    assert calls["n"] == 2
+    data = yaml.safe_load(conf.read_text())
+    assert data["users"][0]["name"] == "newadmin"
+
+
+def test_sync_does_not_retry_a_missing_file(tmp_path, monkeypatch):
+    """FileNotFoundError is a different OSError subclass than
+    PermissionError -- retrying on a timer would never fix a genuinely
+    missing file, so this must fail immediately, not after 3 attempts'
+    worth of delay."""
+    monkeypatch.setattr(sync, "_PERMISSION_RETRY_DELAY_SECONDS", 999)  # would time out the test if ever slept
+
+    with pytest.raises(sync.AdGuardConfigSyncError, match="doesn't exist yet"):
+        sync.sync_adguard_credentials("newadmin", "newpass123", conf_path=tmp_path / "does-not-exist.yaml")
 
 
 def test_each_call_generates_a_fresh_salt(tmp_path):
