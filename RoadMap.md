@@ -6593,6 +6593,77 @@ or their explicit real-time approval in a live conversation turn.**
    live (needs the same supervised interception retest as items 6/9's
    own fixes) -- if it turns out NOT fully fixed once tested, the two
    fix paths above are still the fallback plan.
+
+   **DONE (fixed 2026-09-09, next session): chose fix path (a), the
+   nftables-side self-IP exception, over the Squid-side ACL.** Not just
+   "less code" -- (b) could never have closed item 20 below either way,
+   since that case's SNI is the actual hard-denied domain (e.g.
+   `www.youtube.com`), not the literal string `optigate.home` a
+   hostname-keyed ACL would match against. Excluding the box's own
+   destination IP from the redirect instead means traffic addressed to
+   the gateway itself never reaches Squid at all, regardless of what SNI
+   it carries -- one fix, both gaps closed, matching how a real router
+   already treats packets addressed to its own interface.
+   `phase3/nftables-manager/internal/nft/knftables_adapter.go`'s
+   `baselineRules()` now inserts `"ip saddr @bump_v4 ip daddr <selfIP>
+   tcp dport 80/443 return"` immediately before the two existing
+   `bump_v4` redirect rules (order matters -- a redirect is a
+   terminating verdict, so the exception is useless placed after it;
+   confirmed by a dedicated ordering test, not just presence). Scoped to
+   `bump_v4` only, deliberately not touching
+   `authenticated_v4`/`unauthenticated_v4`/`quarantine_v4` -- none of
+   those have this specific problem, and touching
+   `unauthenticated_v4`'s own captive-portal redirect would be an
+   untested behavior change nobody asked for. New `Manager.selfIP`
+   field (mirrors `dnsRedirectPort`'s own precedent exactly -- zero
+   value means the old, unchanged behavior, so every existing test's
+   plain `Manager{}` needed no changes) and a new
+   `SelfIPFromDashboardURL()` helper, deliberately reusing this
+   project's EXISTING `DASHBOARD_URL` setting (already required by
+   `controller`) to learn the box's own LAN IP rather than inventing a
+   second, separately-configured value that could silently drift from
+   it -- the Go-side equivalent of `common/optigate_rewrite.py`'s own
+   `parse_block_page_ip()`. New `-dashboard-url` flag on
+   `pp-nftables-manager` wired to the same `DASHBOARD_URL` env var
+   `docker-compose.yml`'s `controller` service already reads.
+
+   **One real limitation, not a gap in this fix**: the port-443 case
+   (item 20's actual scenario) now just gets a plain connection refusal
+   -- nothing listens there, by `block_page_server.py`'s own deliberate,
+   documented design (no cert this project's own CA can present that an
+   arbitrary domain's device already trusts). That's now *identical* to
+   how every non-bump device already experiences a hard-denied HTTPS
+   domain today, replacing Squid's confusing forgery-alert kill with the
+   same behavior every other device type already has -- a real
+   improvement, but it does NOT make HTTPS hard-denies newly visible on
+   the Report page (still nothing there to call `log_access()`). That
+   invisibility is a pre-existing, universal limitation across every
+   device, not something new this fix introduces or was scoped to solve
+   -- worth its own future RoadMap item if HTTPS hard-denies showing up
+   in Report ever becomes a priority. Port 80 (item 18's actual
+   complaint) IS fully fixed: the request now reaches
+   `block_page_server.py`'s real listener directly, correctly logged
+   and showing the actual requesting device instead of the box's own
+   IP.
+
+   9 new tests in `phase3/nftables-manager/internal/nft/fault_test.go`
+   (no exception installed when `selfIP` is unset, both bump_v4 ports
+   get the right exception when it is, the exception never leaks onto
+   another source set, the exception rule's slice position comes before
+   the redirect it guards, and `SelfIPFromDashboardURL`'s own
+   extraction across a plain URL/no-port/https/empty/hostname/malformed/
+   IPv6 cases). Verified against the real edited source (scp'd to the
+   Beelink, not a stale checkout) via the project's own
+   `golang:1.25-bookworm` Docker-based build/test workflow -- `go build
+   ./...`, `go vet ./...`, `go test ./...` all clean, plus a `gofmt -l
+   .` formatting check. Not yet deployed -- needs `docker compose build
+   nftables-manager` and the interception profile restarted to take
+   effect, and genuinely needs a live retest (the next supervised
+   window: confirm `optigate.home` shows the actual device, and that
+   Crunchyroll/YouTube-style hard-denies on a bump-enabled device no
+   longer show `SECURITY ALERT: Host header forgery detected` in
+   Squid's `access.log`) before being considered fully verified
+   end-to-end -- same pending-verification status as items 17/21.
 8. **The "this page is blocked" message doesn't display for any
    blocked page.** User's own hypothesis, worth taking seriously: this
    could be an SSL/TLS limitation, not a bug in the block-page code
@@ -7292,6 +7363,12 @@ lost) but didn't close item 7's still-open, still-undesigned fix (an
 nftables-level exception for the box's own IP, or a Squid-side
 unconditional splice for the synthetic hostname).
 
+**Closed by item 7's DONE fix below (2026-09-09, next session)**: the
+self-IP exception means `optigate.home` traffic no longer reaches Squid
+at all, landing directly on `block_page_server`'s own listener with the
+real device's IP -- not yet live-retested (needs the next supervised
+window), same status as item 7 itself.
+
 **Item 19: AdGuard/dashboard credential lockout -- two distinct real
 bugs, not one.** (1) **DONE (root-caused and fixed 2026-09-09, next
 session):** the dashboard container genuinely could not read or write
@@ -7402,6 +7479,19 @@ and the other Google-domain hits are very likely a related-but-separate
 instance of the SAME Squid forgery check (Google's own IP-coalescing
 behavior triggering it independently of any rewrite), not yet confirmed
 the same way.
+
+**Closed by item 7's DONE fix below (2026-09-09, next session), with
+one caveat**: the same self-IP exception stops Squid from ever seeing
+this connection, replacing the confusing forgery-alert kill with a
+plain connection refusal -- (a) is fixed (no more generic broken-
+connection-flavored failure specific to bump-enabled devices). (b) is
+NOT fixed by this change: a refused connection still has nothing to
+call `log_access()`, so it's still invisible to the Report page --
+that part turns out to be a pre-existing, universal limitation for
+HTTPS hard-denies on EVERY device type, not something specific to this
+bump-enabled interaction, so it's out of scope for item 7's fix and
+would need its own future RoadMap item if it becomes a priority. Not
+yet live-retested, same status as item 7 itself.
 
 **Netflix (item 9's fix) and the general "unconfigured domain -> allow"
 behavior confirmed working correctly live** -- the one part of tonight's

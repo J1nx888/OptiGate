@@ -51,9 +51,17 @@ func main() {
 			"previous hardcoded 5353 conflicting with avahi-daemon (mDNS), a common default service on "+
 			"many Linux distributions -- keep this in sync with ADGUARD_DNS_PORT, whatever it's set to.",
 	)
+	dashboardURL := flag.String(
+		"dashboard-url", "",
+		"This project's own DASHBOARD_URL setting (e.g. http://192.168.1.250:8787), reused here purely "+
+			"to learn the box's own LAN IP -- see nft.SelfIPFromDashboardURL. Added 2026-09-09 (RoadMap.md "+
+			"items 7/18/20) so bump_v4's Squid redirect can exclude traffic addressed to the box itself. "+
+			"Left unset means no self-IP exception is installed, matching this project's pre-fix behavior "+
+			"exactly -- not a fatal error, since not every install runs the interception profile at all.",
+	)
 	flag.Parse()
 
-	mgr, err := nft.New(*dnsRedirectPort)
+	mgr, err := nft.New(*dnsRedirectPort, nft.SelfIPFromDashboardURL(*dashboardURL))
 	if err != nil {
 		log.Fatalf("open nftables interface (needs CAP_NET_ADMIN): %v", err)
 	}

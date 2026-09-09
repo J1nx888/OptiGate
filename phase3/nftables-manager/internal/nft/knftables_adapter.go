@@ -17,6 +17,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 
 	"sigs.k8s.io/knftables"
 
@@ -50,6 +52,18 @@ type Manager struct {
 	// number, is the actual fix -- see docker-compose.yml's
 	// ADGUARD_DNS_PORT and this binary's own -dns-redirect-port flag.
 	dnsRedirectPort int
+
+	// selfIP is this box's own LAN IP (e.g. "192.168.1.250"), used by
+	// baselineRules() below to exclude traffic addressed to the box
+	// itself from bump_v4's Squid redirect -- see that field's own
+	// comment for the full fix this closes (RoadMap.md items 7/18/20).
+	// Empty string (every existing test's plain Manager{...} struct
+	// literal, and any caller that doesn't know its own LAN IP) means
+	// baselineRules() just omits the exception rules entirely -- same
+	// "not configured, not an error" treatment
+	// common/optigate_rewrite.py's parse_block_page_ip() already gives
+	// the identical fact on the Python side.
+	selfIP string
 }
 
 // DefaultDNSRedirectPort is used whenever a Manager's dnsRedirectPort is
@@ -75,8 +89,11 @@ var allManagedSets = append(append([]policy.SetName{}, policy.AllSetNames...), p
 // "optigate" table, plus a second interface scoped to Docker's
 // own "ip filter" table (see ensureDockerUserException). Requires
 // CAP_NET_ADMIN. dnsRedirectPort of 0 means DefaultDNSRedirectPort --
-// see that field's own comment.
-func New(dnsRedirectPort int) (*Manager, error) {
+// see that field's own comment. selfIP of "" means baselineRules()
+// installs no self-IP exception -- see that field's own comment; use
+// SelfIPFromDashboardURL to derive it from this project's existing
+// DASHBOARD_URL setting rather than inventing a second one.
+func New(dnsRedirectPort int, selfIP string) (*Manager, error) {
 	nft, err := knftables.New(knftables.InetFamily, "optigate")
 	if err != nil {
 		return nil, fmt.Errorf("open knftables interface: %w", err)
@@ -85,7 +102,36 @@ func New(dnsRedirectPort int) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open knftables interface for docker's ip filter table: %w", err)
 	}
-	return &Manager{nft: nft, dockerUserNft: dockerUserNft, dnsRedirectPort: dnsRedirectPort}, nil
+	return &Manager{nft: nft, dockerUserNft: dockerUserNft, dnsRedirectPort: dnsRedirectPort, selfIP: selfIP}, nil
+}
+
+// SelfIPFromDashboardURL extracts a literal IPv4 host from a
+// DASHBOARD_URL-shaped value (e.g. "http://192.168.1.250:8787" ->
+// "192.168.1.250") -- the Go-side equivalent of
+// common/optigate_rewrite.py's parse_block_page_ip(), which already
+// does this identical extraction for the Python side. DASHBOARD_URL is
+// this project's one existing source of truth for "this box's own LAN
+// IP" (docker-compose.yml's controller service already requires it) --
+// deliberately reused here rather than introducing a second,
+// separately-configured self-IP setting that could silently drift from
+// it if only one were ever updated. Returns "" for anything that isn't
+// a plain IPv4 host (a real hostname, an unset/malformed URL, or an
+// IPv6 literal) -- same "not configured, not an error" treatment the
+// Python original gives it: baselineRules() just skips the self-IP
+// exception rules entirely rather than failing.
+func SelfIPFromDashboardURL(dashboardURL string) string {
+	if dashboardURL == "" {
+		return ""
+	}
+	u, err := url.Parse(dashboardURL)
+	if err != nil {
+		return ""
+	}
+	ip := net.ParseIP(u.Hostname())
+	if ip == nil || ip.To4() == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 // EnsureBaseline creates the table, the five named sets (allManagedSets), and the
@@ -369,13 +415,67 @@ var baselineRules = (&Manager{}).baselineRules()
 // same box's chosen port (e.g. because :5354 also collided with
 // something) is reflected everywhere this ruleset gets used, not just
 // baked in once at compile time.
+//
+// **Self-IP exception, added for RoadMap.md items 7/18/20 (2026-09-09,
+// next session):** bump_v4's own two redirect rules below match on
+// source IP and destination PORT only, with no destination-IP
+// exception for the box's own address -- confirmed live to cause two
+// real problems, not just a hypothetical one. Item 18: a bump-enabled
+// device's request for the `optigate.home` troubleshooting page never
+// reached dashboard/block_page_server.py's real port-80 listener at
+// all, it hit Squid first, which has no special-case awareness that
+// `optigate.home` is a synthetic system hostname -- so it showed the
+// box's own IP instead of the requesting device's. Item 20: worse than
+// cosmetic -- when AdGuard correctly DNS-rewrites a hard-denied domain
+// to the box's own IP for the friendly block page, the same
+// unconditional redirect sweeps a bump-enabled device's HTTPS attempt
+// to that rewritten address into Squid too, which then sees a
+// connection whose real destination is the box's own IP but whose SNI
+// says (say) "www.youtube.com", correctly flags its own built-in
+// Host-header-forgery check, and kills the connection outright --
+// invisible to the Report page, since that Squid-internal check fires
+// before proxy/authz_helper.py or proxy/sni_helper.py (the only places
+// that ever write to access_log) get a chance to run at all.
+//
+// Chose this fix over a Squid-side special case (the other candidate
+// RoadMap.md's dated entry considered) because it's the one change
+// that actually closes BOTH gaps at once: Squid's own docs/mailing
+// list (core developer Amos Jeffries, confirmed directly, not assumed)
+// say its Host-header-forgery check has no config directive to relax
+// for specific cases, and even if it did, a rule keyed to the literal
+// `optigate.home` hostname could never help item 20's case -- the SNI
+// Squid sees there is the actual denied domain, not `optigate.home`.
+// Excluding the box's own destination IP from the redirect instead
+// means traffic addressed to the gateway itself never reaches Squid in
+// the first place, regardless of what SNI it carries -- matching how a
+// real router already treats packets addressed to its own interface.
+// `return` (not `accept`) so the packet falls through to this base
+// chain's own policy verdict exactly as if bump_v4 had never matched
+// it at all, rather than this project asserting a verdict of its own.
+//
+// Deliberately does NOT touch authenticated_v4/unauthenticated_v4/
+// quarantine_v4 -- none of those have this specific problem (only
+// bump_v4 redirects port 80/443 to Squid at all), and touching
+// unauthenticated_v4's own captive-portal redirect would be a separate,
+// untested behavior change nobody asked for. selfIP of "" (no
+// DASHBOARD_URL configured, or it's not a plain IPv4 host -- see
+// SelfIPFromDashboardURL) means these two exception rules are omitted
+// entirely, leaving bump_v4's redirect exactly as it was before this
+// fix -- every existing test's plain Manager{} still gets that
+// unchanged baseline.
 func (m *Manager) baselineRules() []string {
 	port := m.dnsRedirectPort
 	if port == 0 {
 		port = DefaultDNSRedirectPort
 	}
-	return []string{
-		"ip saddr @bypass_v4 ct mark set 0x1 return",
+	rules := []string{"ip saddr @bypass_v4 ct mark set 0x1 return"}
+	if m.selfIP != "" {
+		rules = append(rules,
+			fmt.Sprintf("ip saddr @bump_v4 ip daddr %s tcp dport 80 return", m.selfIP),
+			fmt.Sprintf("ip saddr @bump_v4 ip daddr %s tcp dport 443 return", m.selfIP),
+		)
+	}
+	return append(rules,
 		"ip saddr @bump_v4 tcp dport 80 redirect to :3129",
 		"ip saddr @bump_v4 tcp dport 443 redirect to :3130",
 		fmt.Sprintf("ip saddr @authenticated_v4 udp dport 53 redirect to :%d", port),
@@ -386,7 +486,7 @@ func (m *Manager) baselineRules() []string {
 		fmt.Sprintf("ip saddr @unauthenticated_v4 tcp dport 853 redirect to :%d", port),
 		"ip saddr @unauthenticated_v4 tcp dport 80 redirect to :3131",
 		"ip saddr @quarantine_v4 counter drop",
-	}
+	)
 }
 
 // ReadActual reads the live membership of all five sets (allManagedSets)

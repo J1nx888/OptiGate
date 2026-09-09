@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/knftables"
@@ -325,6 +326,113 @@ func TestBaselineRules_MarkForwardableTraffic(t *testing.T) {
 		if !found {
 			t.Errorf("expected baselineRules to contain %q (forwarding ct mark), it did not -- full ruleset: %v", w, baselineRules)
 		}
+	}
+}
+
+// TestBaselineRules_OmitsSelfIPExceptionWhenNotConfigured confirms a
+// Manager with no selfIP (every existing test's plain Manager{}, and the
+// package-level `baselineRules` var itself) gets exactly the pre-fix
+// ruleset -- RoadMap.md items 7/18/20's self-IP exception must never
+// apply itself silently just because a Manager exists.
+func TestBaselineRules_OmitsSelfIPExceptionWhenNotConfigured(t *testing.T) {
+	m := &Manager{}
+	for _, r := range m.baselineRules() {
+		if strings.Contains(r, "ip daddr") {
+			t.Errorf("expected no destination-IP-scoped rule with selfIP unset, found %q", r)
+		}
+	}
+}
+
+// TestBaselineRules_InstallsSelfIPExceptionForBumpV4Only confirms the
+// fix itself: with selfIP configured, both bump_v4 redirect ports (80
+// and 443) get a matching "ip daddr <selfIP> ... return" exception, and
+// -- just as important -- no OTHER source set (authenticated_v4,
+// unauthenticated_v4, quarantine_v4) gets any destination-IP-scoped
+// rule at all, since none of them share bump_v4's specific
+// Squid-redirect problem this fix exists for.
+func TestBaselineRules_InstallsSelfIPExceptionForBumpV4Only(t *testing.T) {
+	m := &Manager{selfIP: "192.168.1.250"}
+	rules := m.baselineRules()
+
+	want := []string{
+		"ip saddr @bump_v4 ip daddr 192.168.1.250 tcp dport 80 return",
+		"ip saddr @bump_v4 ip daddr 192.168.1.250 tcp dport 443 return",
+	}
+	for _, w := range want {
+		found := false
+		for _, r := range rules {
+			if r == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected baselineRules to contain %q, it did not -- full ruleset: %v", w, rules)
+		}
+	}
+	for _, r := range rules {
+		if strings.Contains(r, "ip daddr") && !strings.Contains(r, "@bump_v4") {
+			t.Errorf("self-IP exception leaked onto a non-bump_v4 rule: %q", r)
+		}
+	}
+}
+
+// TestBaselineRules_SelfIPExceptionComesBeforeTheRedirectItGuards is a
+// regression test for the one detail that actually makes the fix work:
+// nftables evaluates a base chain's rules in order and a redirect is a
+// terminating verdict, so the "return" exception is USELESS if it
+// doesn't appear before "redirect to :3129"/":3130" in the slice --
+// EnsureBaseline adds rules to the kernel in exactly this order (see
+// its own doc comment), so slice order here IS kernel rule order.
+func TestBaselineRules_SelfIPExceptionComesBeforeTheRedirectItGuards(t *testing.T) {
+	m := &Manager{selfIP: "192.168.1.250"}
+	rules := m.baselineRules()
+
+	exceptionIdx, redirect80Idx, redirect443Idx := -1, -1, -1
+	for i, r := range rules {
+		switch r {
+		case "ip saddr @bump_v4 ip daddr 192.168.1.250 tcp dport 80 return":
+			exceptionIdx = i
+		case "ip saddr @bump_v4 tcp dport 80 redirect to :3129":
+			redirect80Idx = i
+		case "ip saddr @bump_v4 tcp dport 443 redirect to :3130":
+			redirect443Idx = i
+		}
+	}
+	if exceptionIdx == -1 || redirect80Idx == -1 || redirect443Idx == -1 {
+		t.Fatalf("one of the expected rules was missing entirely -- full ruleset: %v", rules)
+	}
+	if exceptionIdx >= redirect80Idx || exceptionIdx >= redirect443Idx {
+		t.Errorf("self-IP exception (index %d) must come before both bump_v4 redirects "+
+			"(80 at %d, 443 at %d) or it can never fire", exceptionIdx, redirect80Idx, redirect443Idx)
+	}
+}
+
+// TestSelfIPFromDashboardURL covers the extraction this fix relies on
+// to avoid inventing a second, separately-configured setting (see that
+// function's own doc comment) -- mirrors
+// common/optigate_rewrite.py's own parse_block_page_ip() test coverage
+// on the Python side.
+func TestSelfIPFromDashboardURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain http URL with port", "http://192.168.1.250:8787", "192.168.1.250"},
+		{"plain http URL with no port", "http://192.168.1.250", "192.168.1.250"},
+		{"https URL", "https://192.168.1.250:8787", "192.168.1.250"},
+		{"empty string", "", ""},
+		{"a real hostname, not an IP", "http://dashboard.example.com:8787", ""},
+		{"malformed URL", "://not a url", ""},
+		{"IPv6 literal", "http://[::1]:8787", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SelfIPFromDashboardURL(tc.in); got != tc.want {
+				t.Errorf("SelfIPFromDashboardURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

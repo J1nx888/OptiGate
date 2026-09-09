@@ -244,6 +244,13 @@ services:
       # Must match adguard's own ADGUARD_DNS_PORT above -- see that
       # variable's own comment.
       - -dns-redirect-port=${ADGUARD_DNS_PORT:-5354}
+      # RoadMap.md items 7/18/20 (2026-09-09): reuses the SAME
+      # DASHBOARD_URL the controller service below already requires,
+      # purely to learn the box's own LAN IP (nft.SelfIPFromDashboardURL)
+      # so bump_v4's Squid redirect can exclude traffic addressed to the
+      # box itself -- deliberately not a second, separately-configured
+      # setting that could drift from it.
+      - -dashboard-url=${DASHBOARD_URL:-}
 
   controller:
     build:
