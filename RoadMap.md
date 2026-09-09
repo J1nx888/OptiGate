@@ -6522,6 +6522,20 @@ or their explicit real-time approval in a live conversation turn.**
    but touches privileged Go code; (b) is a smaller, more contained
    change but adds a special case to Squid's decision chain. Worth
    deciding deliberately, not defaulting to whichever is less code.
+
+   **LIKELY ALSO FIXED as a side effect of item 9's fix (2026-09-08,
+   not independently live-verified):** `optigate.home` has no `domains`
+   row at all -- exactly the "unconfigured domain" case item 9's fix to
+   `authz_helper.py`'s `decide()` now allows by default instead of
+   denying as `unknown_domain`. For the plain-HTTP case this item
+   actually reports, that means Squid should now correctly forward the
+   request to its real original destination (`SO_ORIGINAL_DST`, which
+   for `optigate.home` IS this box's own IP:80) instead of denying it
+   outright -- landing on `block_page_server.py`'s real listener, same
+   as the direct curl test already confirmed works. Not re-verified
+   live (needs the same supervised interception retest as items 6/9's
+   own fixes) -- if it turns out NOT fully fixed once tested, the two
+   fix paths above are still the fallback plan.
 8. **The "this page is blocked" message doesn't display for any
    blocked page.** User's own hypothesis, worth taking seriously: this
    could be an SSL/TLS limitation, not a bug in the block-page code
@@ -6560,29 +6574,72 @@ or their explicit real-time approval in a live conversation turn.**
    already describes), not something to flip unilaterally while
    unsupervised, and it interacts with item 6 in ways worth confirming
    live rather than assuming.
-9. **LIKELY NOT A BUG (investigated 2026-09-08, while the project owner
-   was away): netflix.com is blocked, but no category is configured to
-   block it.** Checked the live production DB directly: `domains` has
-   zero rows matching netflix anywhere, and all three assignment
-   tables (`user_domains`, `group_domains`, `device_domains`) reference
+9. **CORRECTED, then genuinely fixed (2026-09-08): netflix.com was
+   blocked with no category configured to block it.** My first pass at
+   this (below, kept for the record) was wrong, and the project owner
+   correctly pushed back on it: I claimed the whole system is
+   allow-list -- everything blocked by default unless explicitly
+   assigned. **That's not true for the tier most devices actually
+   use.** `controller/adguard_sync.py`'s own docstring says outright:
+   an unconfigured domain is "deliberately still default-allow at the
+   DNS tier" for splice-mode devices -- category subscriptions (Adult,
+   Gambling, Drugs, etc.) are exactly the "block specific bad sites,
+   allow everything else" mechanism the project owner described, and
+   that part of the design has always worked as intended.
+
+   The REAL reason Netflix got blocked: it happened on a device with
+   **SSL-Bump turned on**. A non-bump device's HTTPS (and HTTP) traffic
+   never touches Squid at all (`knftables_adapter.go`'s baseline
+   rules ct-mark it straight through) -- only AdGuard's DNS-tier
+   default-allow/category policy ever applies to it. But a bump-enabled
+   device has ALL its port 80/443 traffic redirected into Squid,
+   regardless of destination, and Squid's own rules
+   (`proxy/authz_helper.py`, `proxy/sni_helper.py`) were stricter than
+   the DNS tier: they denied ANY domain that wasn't explicitly
+   `mode='bump'` and assigned, including domains the DNS tier would
+   have happily resolved. So turning bump on didn't just enable
+   decryption for the bump-configured domains -- it silently switched
+   that ONE device's entire traffic to a stricter default-deny policy,
+   for every site it visits, not just the ones bump was meant for. This
+   was never intended and the project owner asked for it to be fixed.
+
+   **Fixed**: `proxy/sni_helper.py`'s `handle_splice()` and
+   `proxy/authz_helper.py`'s `decide()` now treat an unconfigured
+   domain as allowed (matching the DNS tier's own default), a
+   `mode='trusted'` domain as always allowed and unlogged (matching
+   `handle_trusted()`'s existing convention), and a `mode='splice'`
+   domain as allowed only if the device/user is actually authorized for
+   it -- exactly what the same domain would get over spliced HTTPS on
+   any device. Only `mode='bump'` domains still go through Squid's full
+   show/path-level refinement. `handle_block_page()`'s own
+   "unconfigured domain" logging (added for GH #1's visibility fix) is
+   now dead code -- removed, since `handle_splice()` logs an ALLOWED
+   `unconfigured_domain` entry for every such attempt instead, which is
+   strictly better visibility (every attempt shows up, not just denied
+   ones under the 'terminate' default). New reason code
+   `unconfigured_domain` added to `dashboard.py`'s report-page label
+   map (item 5); `unknown_domain`/`not_bump_mode` kept in that map,
+   relabeled as pre-fix historical values, since old `access_log` rows
+   still carry them. Updated/added tests in
+   `tests/test_helpers_protocol.py` for both helpers' new behavior.
+   **Not yet live-verified** -- this touches Squid's actual decision
+   logic, which really needs a supervised retest (Matthew's bump-enabled
+   device visiting an unconfigured site) once interception resumes,
+   the same caution as item 6.
+
+   ---
+
+   *(Original, incorrect first pass, kept for the record rather than
+   deleted -- see the correction above for what's actually true):*
+   Checked the live production DB directly: `domains` has zero rows
+   matching netflix anywhere, and all three assignment tables
+   (`user_domains`, `group_domains`, `device_domains`) reference
    domains only by `domain_id` -- with no `domains` row for netflix to
    even point at, there is categorically no way any user, group, or
-   device has netflix.com assigned. This project's whole enforcement
-   model is **allow-list, not deny-list**: a domain isn't blocked
-   because some rule specifically targets it, it's blocked by default
-   unless it's global or explicitly assigned to that user/group/device.
-   So "no category is configured to block it" was true, but doesn't
-   imply it should be allowed -- the actual reason is almost certainly
-   "netflix.com was never added/assigned to anyone at all," the same
-   default-deny that applies to any unrecognized domain. **This is very
-   likely the exact case item 5 (Report page not explaining WHY
-   something was blocked) is about** -- if that feature already
-   existed, the Report page would have said "not an assigned domain"
-   directly and this wouldn't have looked like a discrepancy at all.
-   Not marking this fully closed (an admin should still add
-   netflix.com deliberately, with a real `mode`, once they decide the
-   household should have it), but the "why is this happening" question
-   itself is answered with real evidence, not a guess.
+   device has netflix.com assigned. I concluded this project's whole
+   enforcement model is allow-list, not deny-list -- **that
+   over-generalized from the bump-mode-only Squid behavior to the whole
+   system, which was wrong.**
 10. **DONE (root cause found + a real gap fixed 2026-09-08, while the
     project owner was away): AdGuard username/password is not synced
     properly.** Found the exact mechanism by reading

@@ -243,6 +243,28 @@ def test_sni_handle_splice_wrong_mode_domain_denied(conn):
     assert sni_helper.handle_splice(conn, "192.168.1.5", "crunchyroll.com") is False
 
 
+def test_sni_handle_splice_unconfigured_domain_allowed_and_logged(conn):
+    """Fixed 2026-09-08, real gap found live: a domain with no `domains`
+    row at all used to be denied (falling through to handle_block_page)
+    even though controller/adguard_sync.py's own docstring says an
+    unconfigured domain is "deliberately still default-allow at the DNS
+    tier." A non-bump device never even reaches Squid for this domain at
+    all, so Squid re-denying it here for a bump-enabled device meant
+    turning bump on silently switched that device's ENTIRE traffic to a
+    stricter policy than the rest of the household gets. Confirmed live:
+    this is exactly what blocked Netflix (never configured anywhere) on
+    a bump-enabled device -- nothing to do with Netflix specifically."""
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    assert sni_helper.handle_splice(conn, "192.168.1.5", "unknown-site.example") is True
+    row = conn.execute("SELECT * FROM access_log").fetchone()
+    assert row is not None
+    assert row["username"] == "kid1"
+    assert row["domain"] == "unknown-site.example"
+    assert row["allowed"] == 1
+    assert row["reason"] == "unconfigured_domain"
+
+
 def test_sni_handle_block_page_terminate_default(conn):
     assert sni_helper.handle_block_page(conn, "1.2.3.4", "anything.com") is False
 
@@ -253,34 +275,26 @@ def test_sni_handle_block_page_redirect_when_configured(conn):
     assert sni_helper.handle_block_page(conn, "1.2.3.4", "anything.com") is True
 
 
-def test_sni_handle_block_page_terminate_logs_unconfigured_domain(conn):
-    """GH #1: a genuinely unconfigured domain must be visible on the Report
-    page even under the safe default (terminate) mode, since nothing else
-    in the SNI-layer chain -- or downstream -- ever logs it otherwise."""
-    user = _add_user(conn, "kid1", "pw")
-    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+def test_sni_handle_block_page_unrecognized_mode_value_denies(conn):
+    """Code-review fix, still relevant after 2026-09-08's logging cleanup:
+    the deny condition matches any mode value other than the literal
+    'redirect', not just the literal string 'terminate', so a
+    corrupted/unexpected setting value still denies rather than silently
+    defaulting to the more permissive (bump-for-a-real-page) behavior."""
+    db.set_setting(conn, "block_page_mode", "some-unexpected-value")
+    conn.commit()
     assert sni_helper.handle_block_page(conn, "192.168.1.5", "unknown-site.example") is False
-    row = conn.execute("SELECT * FROM access_log").fetchone()
-    assert row is not None
-    assert row["username"] == "kid1"
-    assert row["domain"] == "unknown-site.example"
-    assert row["path"] is None
-    assert row["allowed"] == 0
-    assert row["reason"] == "unknown_domain"
-
-
-def test_sni_handle_block_page_terminate_unresolved_identity_uses_placeholder(conn):
-    sni_helper.handle_block_page(conn, "192.168.1.5", "unknown-site.example")
-    row = conn.execute("SELECT * FROM access_log").fetchone()
-    assert row is not None
-    assert row["username"] == "(unauthenticated)"
-    assert row["user_id"] is None
 
 
 def test_sni_handle_block_page_terminate_does_not_double_log_configured_domain(conn):
     """A configured splice-mode domain the user isn't permitted is already
     logged by handle_splice before this rule is ever reached -- logging it
-    again here would just be a worse duplicate."""
+    again here would just be a worse duplicate. Fixed 2026-09-08:
+    handle_block_page no longer logs anything at all (that
+    responsibility moved entirely to handle_splice, including for
+    unconfigured domains -- see
+    test_sni_handle_splice_unconfigured_domain_allowed_and_logged), so
+    this now also covers "handle_block_page never logs, period"."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"example\.com", mode="splice", is_global=0)
@@ -288,35 +302,10 @@ def test_sni_handle_block_page_terminate_does_not_double_log_configured_domain(c
     assert conn.execute("SELECT * FROM access_log").fetchone() is None
 
 
-def test_sni_handle_block_page_unrecognized_mode_value_still_logs(conn):
-    """Code-review fix: the logging gate matches the actual deny condition
-    (mode != 'redirect'), not just the literal string 'terminate', so a
-    corrupted/unexpected setting value still denies-and-logs instead of
-    silently reintroducing the GH #1 blind spot."""
-    db.set_setting(conn, "block_page_mode", "some-unexpected-value")
-    conn.commit()
-    user = _add_user(conn, "kid1", "pw")
-    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
-    assert sni_helper.handle_block_page(conn, "192.168.1.5", "unknown-site.example") is False
-    row = conn.execute("SELECT * FROM access_log").fetchone()
-    assert row is not None
-    assert row["reason"] == "unknown_domain"
-
-
-def test_sni_handle_block_page_redirect_does_not_log(conn):
-    """In redirect mode, authz_helper.decide() logs this same case with the
-    real path once the connection is bumped -- logging it here too would
-    just lose to the dedupe window (GH #5) and hide the richer entry."""
-    db.set_setting(conn, "block_page_mode", "redirect")
-    conn.commit()
-    user = _add_user(conn, "kid1", "pw")
-    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
-    sni_helper.handle_block_page(conn, "192.168.1.5", "unknown-site.example")
-    assert conn.execute("SELECT * FROM access_log").fetchone() is None
-
-
 # ============================================================
-# authz_helper.decide -- HTTP-layer decision on bump-mode domains
+# authz_helper.decide -- HTTP-layer decision (every request that reaches
+# this helper: bump-mode domains fully, plus every other mode via the
+# plain-HTTP path -- see the module's own 2026-09-08 docstring entry)
 # ============================================================
 
 def test_authz_unresolved_identity_denied(conn):
@@ -334,21 +323,54 @@ def test_authz_outside_lan_denied_and_logged(conn):
     assert row["reason"] == "outside_lan"
 
 
-def test_authz_unknown_domain_denied(conn):
+def test_authz_unconfigured_domain_allowed(conn):
+    """Fixed 2026-09-08, real gap found live: this plain-HTTP path used
+    to deny any domain that wasn't mode='bump', including a genuinely
+    unconfigured one -- see sni_helper.py's own
+    test_sni_handle_splice_unconfigured_domain_allowed_and_logged for
+    the full writeup (this is that same fix's plain-HTTP counterpart,
+    since HTTP has no SNI stage for sni_helper.py to catch this first)."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
-    assert authz_helper.decide(conn, "192.168.1.5", "unknown.example:443", "/") is False
+    assert authz_helper.decide(conn, "192.168.1.5", "unknown.example:443", "/") is True
     row = conn.execute("SELECT * FROM access_log").fetchone()
-    assert row["reason"] == "unknown_domain"
+    assert row["allowed"] == 1
+    assert row["reason"] == "unconfigured_domain"
 
 
-def test_authz_splice_mode_domain_denied_as_not_bump_mode(conn):
+def test_authz_trusted_mode_domain_always_allowed_unlogged(conn):
+    """Matches sni_helper.py's handle_trusted()/"trusted mode is
+    deliberately never logged" convention at every layer."""
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    _add_domain(conn, r"example\.com", mode="trusted", is_global=1)
+    assert authz_helper.decide(conn, "192.168.1.5", "example.com:443", "/") is True
+    assert conn.execute("SELECT * FROM access_log").fetchone() is None
+
+
+def test_authz_splice_mode_global_domain_allowed(conn):
+    """Fixed 2026-09-08 alongside the unconfigured-domain gap: a
+    splice-mode domain reaching this plain-HTTP path used to be denied
+    outright as "not_bump_mode" regardless of actual authorization --
+    even a globally-assigned one. Now matches sni_helper.py's own
+    handle_splice() exactly."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"example\.com", mode="splice", is_global=1)
+    assert authz_helper.decide(conn, "192.168.1.5", "example.com:443", "/") is True
+    row = conn.execute("SELECT * FROM access_log").fetchone()
+    assert row["allowed"] == 1
+    assert row["reason"] == "global_domain"
+
+
+def test_authz_splice_mode_domain_not_assigned_denied(conn):
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    _add_domain(conn, r"example\.com", mode="splice", is_global=0)
     assert authz_helper.decide(conn, "192.168.1.5", "example.com:443", "/") is False
     row = conn.execute("SELECT * FROM access_log").fetchone()
-    assert row["reason"] == "not_bump_mode"
+    assert row["allowed"] == 0
+    assert row["reason"] == "domain_not_assigned"
 
 
 def test_authz_bump_domain_not_assigned_to_user_denied(conn):

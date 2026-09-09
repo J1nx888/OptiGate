@@ -88,7 +88,12 @@ def _log_denial(
 
 def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
     domain = matching.find_domain(conn, sni)
-    if domain is None or domain["mode"] != "splice":
+    if domain is not None and domain["mode"] != "splice":
+        # Reached only if a race changed this domain's mode between two
+        # ssl_bump ACL evaluations for the same connection -- sni_bump
+        # already claims every genuine mode='bump' domain earlier in
+        # squid.conf's rule order ("first match wins"), so this branch
+        # is defensive, not something normal operation reaches.
         return False
 
     # Resolve the DEVICE first -- see authz_helper.decide()'s own comment
@@ -108,6 +113,33 @@ def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
         )
         return False
 
+    if domain is None:
+        # Fixed 2026-09-08, real gap found live: a domain with no
+        # `domains` row at all used to be denied here unconditionally,
+        # even though controller/adguard_sync.py's own
+        # _build_domain_deny_rules() docstring is explicit that an
+        # unconfigured domain is "deliberately still default-allow at
+        # the DNS tier." Since a non-bump device's HTTPS traffic never
+        # reaches Squid at all (see knftables_adapter.go's baseline
+        # rules -- only bump_v4 members' port 443 is redirected here),
+        # this mismatch meant turning on SSL-Bump for one device
+        # silently switched its ENTIRE traffic from "default-allow,
+        # blocked only by category" to "default-deny, allow-list only"
+        # -- a real, surprising, unintended side effect (confirmed
+        # live: Netflix, never configured anywhere, was blocked
+        # specifically because bump was on for the visiting device, not
+        # because of anything Netflix-specific). Splicing it through
+        # now makes a bump-enabled device's unconfigured-domain
+        # experience match a non-bump device's exactly -- Squid becomes
+        # a refinement layer for domains that actually need path/show
+        # level rules, not a stricter gate than the DNS tier's own
+        # already-decided policy.
+        logging_util.log_access(
+            conn, user_id=user_id, username=username, domain=sni, path=None,
+            allowed=True, reason="unconfigured_domain", device_id=device_id,
+        )
+        return True
+
     reason = matching.device_domain_reason(conn, device, domain)
     allowed = reason is not None
     logging_util.log_access(
@@ -118,55 +150,29 @@ def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
 
 
 def handle_block_page(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
-    # Reached only for connections none of the other three rules matched --
-    # i.e. this is already going to be denied one way or another. The only
-    # question is whether we bump it to explain that, or terminate outright.
-    # (No identity/LAN check needed here: authz_helper.py will independently
-    # deny this once decrypted regardless.)
+    # Reached only for connections none of the other three rules matched.
+    # Fixed 2026-09-08, alongside handle_splice()'s own fix: an
+    # unconfigured domain (no `domains` row at all) is now caught and
+    # spliced by handle_splice() itself, matching the DNS tier's own
+    # "default-allow for unconfigured" policy -- so this handler can no
+    # longer be reached by one. The ONLY thing that still falls through
+    # to here is a domain that DOES have a `domains` row (mode='splice')
+    # but this device/user isn't authorized for it -- already logged by
+    # handle_splice() before this rule is ever reached. The only
+    # question left is whether we bump it to explain that via a real
+    # page, or terminate outright. (No identity/LAN check needed here:
+    # authz_helper.py will independently deny this once decrypted
+    # regardless.)
+    #
+    # This used to ALSO be the only place that could ever log a
+    # genuinely unconfigured domain (GH #1's fix, so a kid trying a
+    # brand-new site wasn't completely invisible on the Report page) --
+    # that's no longer needed here since handle_splice() logs an
+    # ALLOWED "unconfigured_domain" entry for exactly that case now,
+    # which is strictly better visibility (every attempt is logged, not
+    # just denied ones, and only when block_page_mode happened to be
+    # 'terminate').
     mode = db.get_setting(conn, "block_page_mode", "terminate")
-
-    # Whenever this connection is going to be denied without decryption --
-    # i.e. any mode value other than 'redirect', not just the literal string
-    # 'terminate' -- this is the only point in the whole SNI-layer decision
-    # chain that can ever record a genuinely *unconfigured* domain:
-    # sni_bump/sni_trusted/sni_splice_allowed each require a matching
-    # `domains` row before doing anything, so none of them log one, and
-    # authz_helper.py never runs either since nothing gets decrypted.
-    # Without this, an unconfigured domain a kid tries is completely
-    # invisible on the Report page under the safe default -- no way to
-    # reactively approve it (GH #1). Matching the actual deny condition
-    # (`mode == "redirect"` below) rather than only the expected
-    # "terminate" value means an unrecognized/corrupted setting still gets
-    # logged instead of silently reintroducing this same blind spot.
-    #
-    # Skip logging when a domain row *does* exist: a configured splice-mode
-    # domain the user isn't permitted is already logged by handle_splice
-    # before this rule is ever reached, so logging again here would just be
-    # a duplicate (and a worse one -- no LAN/auth-specific reason).
-    #
-    # Skip logging entirely in 'redirect' mode: that path bumps the
-    # connection so authz_helper.decide() logs this same case
-    # (reason="unknown_domain") with the real path attached, which is
-    # strictly better information. If the admin switches from 'terminate'
-    # to 'redirect' between two attempts at the same domain, log_access()
-    # lets that later, richer entry through even though a path-less one
-    # from this layer was already logged for the same key -- see
-    # log_access()'s docstring/comment.
-    # Cost note (GH #7): this runs a domain lookup, sometimes a user lookup,
-    # and a log_access() read+write for every connection to any unconfigured
-    # domain -- including ordinary ad/tracker/CDN noise, not just
-    # meaningful "kid tried a new site" attempts. That's the accepted
-    # tradeoff of making this visible at all (GH #1); the per-process
-    # find_domain() call also can't be shared with the other three
-    # sni_helper modes, since each mode is a separate long-lived helper
-    # process with no memory in common. See GH #7 for the tradeoffs on
-    # fixing this properly; revisit if it shows up as real load or
-    # Report-page noise in practice.
-    if mode != "redirect" and matching.find_domain(conn, sni) is None:
-        device = device_identity.resolve_device(conn, client_ip)
-        user = device_identity.resolve_user_for_device(conn, device) if device is not None else None
-        _log_denial(conn, sni, "unknown_domain", device=device, user=user)
-
     return mode == "redirect"
 
 

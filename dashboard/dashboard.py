@@ -6219,10 +6219,22 @@ _ACCESS_LOG_REASON_LABELS = {
     "group_domain": "assigned to this device's group",
     "device_domain": "assigned directly to this device",
     "show_approved": "this show is approved",
+    # Added 2026-09-08 alongside the SSL-Bump default-allow fix
+    # (proxy/authz_helper.py, proxy/sni_helper.py): a domain with no
+    # `domains` row at all is allowed by default, same as the DNS tier
+    # already does for every other device -- not something a user/group
+    # explicitly granted, so it gets its own label rather than reusing
+    # one of the assignment-based ones above.
+    "unconfigured_domain": "not configured anywhere -- allowed by default (not on any blocklist)",
     # Blocked
     "outside_lan": "request didn't come from the configured LAN range",
-    "unknown_domain": "not a domain configured anywhere in this system",
-    "not_bump_mode": "domain isn't in bump mode (unconfigured, or splice-only)",
+    # unknown_domain/not_bump_mode: kept for OLD rows logged before the
+    # 2026-09-08 fix above -- neither is written anymore (an
+    # unconfigured or splice-mode domain is now allowed by default
+    # instead, see "unconfigured_domain"/"global_domain"/etc.), but
+    # historical entries still carry these values.
+    "unknown_domain": "not a domain configured anywhere in this system (pre-2026-09-08 entry)",
+    "not_bump_mode": "domain wasn't in bump mode (pre-2026-09-08 entry)",
     "domain_not_assigned": "domain exists, but isn't assigned to this user/group/device",
     "show_requires_user": "Crunchyroll show rules need a real user, this device has none assigned",
     "path_not_allowed": "this specific path isn't in the allowed list for this domain",

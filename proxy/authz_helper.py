@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Squid `external_acl_type` helper for the HTTP-layer decision on bump-mode
-domains (the ones ssl_bump fully decrypts, per sni_helper.py's 'bump' check).
+"""Squid `external_acl_type` helper for the HTTP-layer decision on every
+request that reaches it -- primarily bump-mode domains (the ones
+ssl_bump fully decrypts, per sni_helper.py's 'bump' check), but ALSO
+every plain-HTTP request from a bump_v4 device, regardless of that
+domain's own mode, since plain HTTP has no SNI/TLS stage for
+sni_helper.py's own trusted/bump/splice checks to run against first.
 
 Protocol (format `%>a %DST %PATH %DATA`): one line per request, four
 percent-encoded fields, respond "OK" or "ERR". The trailing %DATA field is
@@ -49,6 +53,26 @@ user_id) resolved to no identity at all and was denied everything, and
 even a user-resolved device could never benefit from a group/device-level
 domain grant. See common/matching.py's device_domain_reason() docstring
 for the full bug writeup and RoadMap.md's dated entry.
+
+**Fixed 2026-09-08**: `decide()` used to unconditionally deny anything
+that wasn't `mode == 'bump'` -- correct for a fully-decrypted HTTPS
+request (sni_helper.py's own sni_bump check already filtered to bump-mode
+domains before this ever runs), but wrong for the PLAIN-HTTP case: a
+bump_v4 device's plain-HTTP request to an unconfigured domain, or a
+splice-mode domain it's actually authorized for, was denied here
+outright, even though the exact same domain over HTTPS would have been
+correctly spliced through by sni_helper.py's handle_splice(). This is
+the mechanism that made Netflix -- never configured anywhere -- get
+blocked specifically because bump was on for the visiting device: an
+unconfigured domain is deliberately default-allow at the DNS tier
+(controller/adguard_sync.py's own docstring), and this function was the
+one place that didn't honor that. Now mirrors handle_splice()'s own
+fix: an unconfigured domain is allowed (matching the DNS tier's default),
+a 'trusted' domain is always allowed unchecked (matching sni_helper.py's
+own handle_trusted()), and a 'splice' domain is allowed only if this
+device/user is actually authorized for it -- exactly what would have
+happened over HTTPS. Only 'bump'-mode domains still go through the full
+show/path-level refinement below.
 """
 from __future__ import annotations
 
@@ -95,18 +119,41 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
         return False
 
     domain = matching.find_domain(conn, hostname)
-    if domain is None or domain["mode"] != "bump":
-        # Two ways to get here: a genuinely unconfigured domain, or a
-        # splice-mode domain this device isn't permitted -- ssl_bump's
-        # block_page rule (see sni_helper.py) deliberately bumps both so a
-        # real deny page can be served here instead of a bare connection
-        # failure. Either way: deny.
+
+    if domain is None:
+        # Fixed 2026-09-08 -- see this module's own docstring for the
+        # full writeup: an unconfigured domain is deliberately
+        # default-allow at the DNS tier, so this plain-HTTP path must
+        # not re-deny it just because it isn't mode='bump'.
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
-            path=path, allowed=False,
-            reason="unknown_domain" if domain is None else "not_bump_mode",
-            device_id=device_id,
+            path=path, allowed=True, reason="unconfigured_domain", device_id=device_id,
         )
+        return True
+
+    if domain["mode"] == "trusted":
+        # Matches sni_helper.py's handle_trusted()/"trusted mode is
+        # deliberately never logged" convention -- always spliced,
+        # unchecked, at every layer this project has.
+        return True
+
+    if domain["mode"] == "splice":
+        # Matches sni_helper.py's handle_splice() exactly -- this is
+        # the plain-HTTP version of the same per-user/group/device
+        # authorization check, no path/show-level refinement (that's
+        # bump-mode-only, below).
+        reason = matching.device_domain_reason(conn, device, domain)
+        allowed = reason is not None
+        logging_util.log_access(
+            conn, user_id=user_id, username=username, domain=hostname,
+            path=path, allowed=allowed, reason=reason or "domain_not_assigned", device_id=device_id,
+        )
+        return allowed
+
+    if domain["mode"] != "bump":
+        # Unreachable in practice -- domains.mode's own CHECK constraint
+        # only allows 'splice'/'bump'/'trusted', all three handled
+        # above. Defensive only.
         return False
 
     reason = matching.device_domain_reason(conn, device, domain)
