@@ -1606,6 +1606,34 @@ def test_update_network_sweep_rejects_zero_or_negative_interval(client, db_conn)
     assert db.get_setting(db_conn, "network_sweep_interval_minutes", "") == ""
 
 
+def test_run_network_sweep_now_sets_the_request_timestamp(client, db_conn):
+    import db
+    assert db.get_setting(db_conn, "network_sweep_run_now_requested_at", "") == ""
+
+    resp = client.post("/settings/network-sweep/run-now", headers=_auth_header())
+
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "network_sweep_run_now_requested_at", "") != ""
+
+
+def test_run_network_sweep_now_works_even_when_disabled(client, db_conn):
+    """An explicit one-off "Run now" click must not be silently ignored
+    just because the automatic schedule toggle is off."""
+    import db
+    db.set_setting(db_conn, "network_sweep_enabled", "0")
+    db_conn.commit()
+
+    resp = client.post("/settings/network-sweep/run-now", headers=_auth_header())
+
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "network_sweep_run_now_requested_at", "") != ""
+
+
+def test_settings_page_shows_the_run_now_button(client):
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"Run now" in resp.data
+
+
 def test_update_optigate_hostname_saves_lowercased_value(client, db_conn):
     resp = client.post(
         "/settings/optigate-hostname", data={"optigate_hostname_prefix": "MyNetwork"}, headers=_auth_header()

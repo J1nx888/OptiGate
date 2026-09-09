@@ -159,6 +159,35 @@ def _enabled(conn: sqlite3.Connection) -> bool:
     return db.get_setting(conn, "network_sweep_enabled", "1") == "1"
 
 
+def _run_now_requested(conn: sqlite3.Connection, state: dict[str, object]) -> bool:
+    """"Run now" (dashboard Settings page): dashboard.py can't call into
+    this process directly -- separate container, separate memory -- so
+    it just writes a fresh `network_sweep_run_now_requested_at`
+    timestamp and this tick loop notices it, the same "write a
+    timestamp, let the other process's own next tick notice it" pattern
+    already used for the optigate.home rewrite and the pending-devices
+    dismiss feature elsewhere in this project. A request is consumed
+    exactly once (compared against the last value THIS process already
+    acted on, tracked in-memory in `state`) -- so it fires once per
+    button click, not on every tick forever, and correctly fires again
+    for a second click even if the first one hasn't produced a new
+    timestamp string a naive equality check might miss (it always will,
+    since db.now_iso() has second resolution and two real clicks are
+    never the same second... but compared as "is it different from what
+    we last consumed," not "is it non-empty," specifically so that
+    edge case can never cause a second click to be silently ignored).
+    Deliberately bypasses BOTH the enabled toggle and the interval
+    check below -- an explicit one-off admin action should run
+    regardless of whether the automatic schedule is off, the same way
+    the Settings page's other "check/refresh now" buttons already work
+    independently of their own periodic schedules."""
+    requested_at = db.get_setting(conn, "network_sweep_run_now_requested_at", "")
+    if not requested_at or requested_at == state.get("last_run_now_consumed"):
+        return False
+    state["last_run_now_consumed"] = requested_at
+    return True
+
+
 def run_loop(on_error=None, on_success=None) -> PeriodicTask:
     """Starts the check-then-maybe-sweep loop on its own background
     thread, until the returned PeriodicTask.stop() is called -- same
@@ -175,17 +204,20 @@ def run_loop(on_error=None, on_success=None) -> PeriodicTask:
             db.init_db(conn)
             state["conn"] = conn
 
-        if not _enabled(conn):
-            return
-
-        now = time.monotonic()
-        last_swept = state.get("last_swept_monotonic")
-        if last_swept is not None and (now - last_swept) < _interval_seconds(conn):
-            return
+        manual = _run_now_requested(conn, state)
+        if not manual:
+            if not _enabled(conn):
+                return
+            now = time.monotonic()
+            last_swept = state.get("last_swept_monotonic")
+            if last_swept is not None and (now - last_swept) < _interval_seconds(conn):
+                return
 
         swept = sweep_once(conn)
-        state["last_swept_monotonic"] = now
-        log.info("network sweep: nudged %d address(es)", swept)
+        state["last_swept_monotonic"] = time.monotonic()
+        log.info(
+            "network sweep: nudged %d address(es)%s", swept, " (manual run-now request)" if manual else ""
+        )
 
     pt = PeriodicTask(
         _CHECK_INTERVAL_SECONDS, task, on_error=on_error, on_success=on_success,

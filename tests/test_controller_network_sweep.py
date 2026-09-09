@@ -245,6 +245,70 @@ def test_run_loop_stops_promptly(conn, monkeypatch):
     assert elapsed < 0.5, f"stop() took {elapsed:.3f}s, expected it to return promptly"
 
 
+def test_run_loop_run_now_bypasses_disabled_and_interval(conn, monkeypatch):
+    """"Run now" (dashboard Settings page button) is an explicit one-off
+    admin action -- must fire even when the automatic schedule is off
+    and even if a normal sweep isn't due yet."""
+    _reset_fake_socket(monkeypatch)
+    db.set_setting(conn, "local_network", "192.168.1.0/30")
+    db.set_setting(conn, "network_sweep_enabled", "0")
+    conn.commit()
+    monkeypatch.setattr(network_sweep, "_CHECK_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(network_sweep, "_interval_seconds", lambda conn: 9999)
+
+    task = network_sweep.run_loop()
+    try:
+        time.sleep(0.06)
+        assert _FakeSocket.instances == [], "must not have swept yet -- disabled and nothing requested"
+        db.set_setting(conn, "network_sweep_run_now_requested_at", db.now_iso())
+        conn.commit()
+        time.sleep(0.06)
+    finally:
+        task.stop()
+
+    assert len(_FakeSocket.instances) == 2, "exactly one sweep (2 hosts in a /30) for the one run-now request"
+
+
+def test_run_loop_run_now_fires_only_once_per_request(conn, monkeypatch):
+    _reset_fake_socket(monkeypatch)
+    db.set_setting(conn, "local_network", "192.168.1.0/30")
+    db.set_setting(conn, "network_sweep_enabled", "0")
+    db.set_setting(conn, "network_sweep_run_now_requested_at", "2026-09-09T00:00:00Z")
+    conn.commit()
+    monkeypatch.setattr(network_sweep, "_CHECK_INTERVAL_SECONDS", 0.02)
+
+    task = network_sweep.run_loop()
+    try:
+        time.sleep(0.1)
+    finally:
+        task.stop()
+
+    assert len(_FakeSocket.instances) == 2, "one pre-existing request must trigger exactly one sweep (2 hosts), not one per tick"
+
+
+def test_run_loop_run_now_fires_again_for_a_second_request(conn, monkeypatch):
+    _reset_fake_socket(monkeypatch)
+    db.set_setting(conn, "local_network", "192.168.1.0/30")
+    db.set_setting(conn, "network_sweep_enabled", "0")
+    conn.commit()
+    monkeypatch.setattr(network_sweep, "_CHECK_INTERVAL_SECONDS", 0.02)
+
+    task = network_sweep.run_loop()
+    try:
+        db.set_setting(conn, "network_sweep_run_now_requested_at", "2026-09-09T00:00:00Z")
+        conn.commit()
+        time.sleep(0.06)
+        assert len(_FakeSocket.instances) == 2, "first request: one sweep of the 2-host /30"
+
+        db.set_setting(conn, "network_sweep_run_now_requested_at", "2026-09-09T00:01:00Z")
+        conn.commit()
+        time.sleep(0.06)
+    finally:
+        task.stop()
+
+    assert len(_FakeSocket.instances) == 4, "a genuinely new request must trigger a second sweep (2 more hosts)"
+
+
 def test_run_loop_reports_errors_via_on_error_without_dying(conn, monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("database is locked")

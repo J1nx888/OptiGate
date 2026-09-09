@@ -1179,6 +1179,15 @@ the project owner asked for, not only an operational-health trail.
   `controller/network_sweep.py`'s active whole-subnet discovery sweep;
   takes effect on that process's next ~30s check tick, no restart
   needed.
+- `POST /settings/network-sweep/run-now` -> `run_network_sweep_now()` --
+  no form fields. Writes `network_sweep_run_now_requested_at` (a fresh
+  timestamp) for `controller/network_sweep.py`'s own background loop to
+  notice and consume on its next check tick -- the only way dashboard
+  can trigger an immediate sweep, since it's a separate container/
+  process from `controller`. Works even when
+  `network_sweep_enabled` is off (an explicit one-off action, not a
+  schedule change), and fires exactly once per click (a repeat click
+  writes a new, distinct timestamp).
 - `POST /settings/admin` -> `update_admin()` -- form fields
   `admin_username` (required, non-empty), `admin_password` (optional --
   leaving it blank keeps the current password hash). Updates

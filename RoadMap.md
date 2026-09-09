@@ -6799,6 +6799,24 @@ or their explicit real-time approval in a live conversation turn.**
     (comfortably covers up to a /20) so a fat-fingered huge range
     degrades gracefully instead of hanging or flooding the LAN.
 
+    **"Run now" added same day, project owner's follow-up request**:
+    a button on the Settings card that triggers an immediate sweep
+    on demand, independent of the schedule. Dashboard can't call into
+    `controller` directly (separate container/process), so
+    `run_network_sweep_now()` just writes a fresh
+    `network_sweep_run_now_requested_at` timestamp -- the same
+    write-a-timestamp-and-let-the-other-process's-own-loop-notice-it
+    pattern already used for the optigate.home rewrite and the
+    pending-devices dismiss feature. `network_sweep.py`'s own tick loop
+    (`_run_now_requested()`) consumes it exactly once per distinct
+    timestamp, bypassing both the enabled toggle and the interval check
+    -- an explicit one-off admin action fires regardless of the
+    automatic schedule, matching every other "check/refresh now" button
+    already on this page. 6 more tests (3 in
+    `tests/test_controller_network_sweep.py` for the bypass/once/
+    fires-again-for-a-new-request behavior, 3 in `tests/test_dashboard.py`
+    for the route and button).
+
     19 new tests in `tests/test_controller_network_sweep.py` (CIDR
     expansion including multi-CIDR and the sanity cap, nudge coverage,
     never writes `device_bindings` directly, status-setting writes,

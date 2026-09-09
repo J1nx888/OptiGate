@@ -6885,6 +6885,9 @@ SETTINGS_BODY = """
   <label>Every <input type="number" name="network_sweep_interval_minutes" value="{{ network_sweep_interval_minutes }}" min="1" style="width:5rem;"> minutes</label>
   <button class="add" type="submit">Save</button>
 </form>
+<form class="inline" method="post" action="{{ url_for('run_network_sweep_now') }}" style="margin-top:.5rem;">
+  <button class="btn small" type="submit" {{ 'disabled' if not local_network }}>Run now</button>
+</form>
 <p class="hint">
   {% if not local_network %}
   <strong>Nothing to sweep</strong> -- the network range above is empty, so there's no address list to probe. Set it first.
@@ -6893,7 +6896,7 @@ SETTINGS_BODY = """
   {% else %}
   <span class="badge allowed">{{ network_sweep_status }}</span>
   {% endif %}
-  Also requires the <code>interception</code> profile to actually be running (this is a <code>controller</code>-side feature, same as the ARP worker and nftables-manager) -- takes no effect while it's off.
+  Also requires the <code>interception</code> profile to actually be running (this is a <code>controller</code>-side feature, same as the ARP worker and nftables-manager) -- takes no effect while it's off. <strong>Run now</strong> works even while the toggle above is off (a one-off check, not a schedule change) -- takes effect within about 30 seconds, same "requires the interception profile" caveat.
 </p>
 </div>
 
@@ -7486,6 +7489,29 @@ def update_network_sweep():
     if not enabled:
         return flash_redirect("settings_page", "Saved. Network discovery sweep is now off.")
     return flash_redirect("settings_page", f"Saved. Sweeping every {interval_minutes} minute(s).")
+
+
+@app.route("/settings/network-sweep/run-now", methods=["POST"])
+@require_admin
+def run_network_sweep_now():
+    """Dashboard can't call into the controller process directly (a
+    separate container, separate memory) -- this just writes a fresh
+    timestamp that controller/network_sweep.py's own background loop
+    notices and consumes on its next check tick (~30s), the same
+    write-a-timestamp-and-let-the-other-process's-own-loop-notice-it
+    pattern already used elsewhere in this project (the optigate.home
+    rewrite, the pending-devices dismiss feature). See
+    network_sweep._run_now_requested()'s own docstring for exactly how
+    it's consumed -- deliberately works even when the automatic
+    schedule (network_sweep_enabled) is off, matching every other
+    one-off "check/refresh now" button on this page."""
+    conn = get_db()
+    db.set_setting(conn, "network_sweep_run_now_requested_at", db.now_iso())
+    conn.commit()
+    return flash_redirect(
+        "settings_page",
+        "Requested -- will run within about 30 seconds if the interception profile is currently running.",
+    )
 
 
 @app.route("/settings/block-page-mode", methods=["POST"])
