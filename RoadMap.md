@@ -7247,20 +7247,106 @@ and verified server-side both times -- the real blocker was the
 logout-username-caching bug above, found only after the second
 "it's still not working" report.
 
-**Item 20, found in passing, not yet investigated:** during the test,
-many `clients2.google.com`/`www.youtube.com`/analytics-domain CONNECT
-attempts from Matthew's device got an immediate `409` rejection from
-Squid (`access.log`, `NONE_NONE/409`, `text/html` body) -- the same
-Google-connection-coalescing behavior item 14 investigated and
-downgraded to "logged for awareness, no action needed" based on OLDER
-data showing `TCP_TUNNEL/200` (success). This session's evidence shows
-active failures, not just a logged warning -- contradicts item 14's own
-conclusion. Not investigated further tonight (not blocking anything
-in-test); worth a real look next time interception runs.
+**Item 20, UPDATED -- explained, same root cause as items 7/18, not a
+new mystery:** during the test, many `clients2.google.com`/
+`www.youtube.com`/analytics-domain CONNECT attempts from Matthew's
+device got an immediate `409` rejection from Squid (`access.log`,
+`NONE_NONE/409`, `text/html` body), which item 14 had investigated
+earlier and downgraded to "logged for awareness, no action needed"
+based on OLDER data showing `TCP_TUNNEL/200` (success). **Confirmed live
+for `www.youtube.com` specifically**: AdGuard's own query log shows
+`www.youtube.com` correctly DNS-rewritten to `192.168.1.250` (the box's
+own IP) via `RewriteRule` -- this IS the intended "friendly block page"
+mechanism working correctly for a hard-denied/category-blocked domain.
+But because Matthew's device is bump-enabled, its HTTPS attempt to that
+rewritten address gets swept into bump_v4's unconditional port-443
+redirect to Squid (same root cause as item 7/18) -- Squid then sees a
+connection whose real destination is the box's own IP but whose SNI
+says `www.youtube.com`, correctly flags `SECURITY ALERT: Host header
+forgery detected... local IP does not match any domain IP`, and kills
+the connection outright, before ever reaching `authz_helper.py`. Net
+effect: the block itself IS working (YouTube fails to load, as
+intended), but (a) it fails as a generic broken connection instead of a
+clean block page, and (b) it's **invisible to the Report page** --
+Squid's own forgery check happens before our own logging path ever
+sees it. This generalizes item 7/18 from "cosmetic, only affects the
+`optigate.home` troubleshooting page" to "actively breaks the block-page
+UX and defeats Report-page visibility for any hard-denied domain on a
+bump-enabled device" -- raises that fix's priority. `clients2.google.com`
+and the other Google-domain hits are very likely a related-but-separate
+instance of the SAME Squid forgery check (Google's own IP-coalescing
+behavior triggering it independently of any rewrite), not yet confirmed
+the same way.
 
 **Netflix (item 9's fix) and the general "unconfigured domain -> allow"
 behavior confirmed working correctly live** -- the one part of tonight's
-plan that worked exactly as designed, no caveats.
+original plan that worked exactly as designed, no caveats.
+
+**Item 21: no proactive connection-flush when a device is reclassified
+to something more restrictive.** Found via a real IoT device
+(`20:a1:71:9d:58:dc`, an Amazon Echo) that showed "awaiting login" with
+12 failed attempts yet still responded to voice commands, while music
+playback failed. Verified the device's classification and every
+relevant nftables rule (`unauthenticated_v4` membership,
+`DOCKER-USER`/`FORWARD` chain state) were all correct. Explanation,
+confirmed live by the project owner power-cycling the device (which
+then correctly lost ALL access, including voice): `ct mark`, this
+project's own mechanism for letting an accepted connection's return
+traffic keep flowing, is set once per connection and deliberately
+persists for that connection's entire lifetime (see
+`knftables_adapter.go`'s own comment on why). That's correct and
+intentional for a device that's already authenticated staying connected
+through a later, unrelated policy recompute -- but it also means a
+connection accepted BEFORE a device was correctly classified (e.g.
+during tonight's stale-image window, or simply a long-lived connection
+like Echo's always-on voice channel) keeps working indefinitely,
+completely unaffected by the device's current, correct classification.
+Enforcement here is forward-looking only -- new connections are
+evaluated correctly, existing ones never are. Real fix needs
+`nftables-manager` to proactively flush a device's conntrack entries the
+moment its classification moves to something more restrictive
+(unauthenticated, quarantine) -- not built, needs its own design/
+implementation pass (likely `internal/nft`, using knftables or a raw
+netlink conntrack call, since this can't be done through `nft` rules
+alone).
+
+**Item 22: `bypass_login` and `ignored` are two different things, and a
+device running its own DNS-hijack-detecting security software needs the
+latter.** A work laptop (`9c:c7:d3:b3:6d:a8`, "OIG Computer") was set to
+`bypass_login` (skips the captive-portal login only, per
+`common/policy_class.py`'s own docstring -- still gets full DNS-tier
+AUTHENTICATED treatment) but "wouldn't access the internet properly."
+AdGuard's query log showed the device running Cisco AnyConnect with the
+Umbrella/OpenDNS roaming security client (`connecttest.cisco.io`,
+repeated `debug.opendns.com` checks) -- software specifically designed
+to detect DNS being redirected away from OpenDNS's real servers, which
+is exactly what `authenticated_v4`'s DNS-tier redirect does for every
+device regardless of its own configured resolver. Likely explanation:
+the client detected the redirection as a hijack and defensively
+restricted its own network access. Fixed live by switching the device
+to fully `ignored` instead (excludes it from DNS interception entirely)
+-- matching how the household's other two work devices (`DOJ_Laptop`,
+`Office Computer`) were already configured; not yet re-confirmed working
+by the project owner as of this note. Not a bug in this project's own
+logic -- `bypass_login` did exactly what its docstring says. Worth a
+line on the Settings/Devices UI somewhere clarifying that a device
+running its own DNS-security software needs full Ignore, not just
+bypass-login, if this comes up again.
+
+**Item 23, feature request for a future round, explicitly deferred by
+the project owner ("note that while we continue testing"):** a direct
+"Add to ignore" action on the Devices list page, for both a single
+device (currently requires opening that device's own detail page to set
+Ignore) and in bulk. Note for whoever picks this up: bulk Ignore/
+Un-ignore ALREADY EXISTS today (`bulk_set_ignored_devices()`,
+`bulkDeviceIgnoreForm`/`bulkDeviceUnignoreForm`) but is tucked inside
+the collapsed "Manage" panel on the Devices page, not a top-level
+toolbar button -- worth confirming with the project owner whether they
+just didn't notice it there (promote it to the main toolbar row) or
+specifically want something more prominent/different from what's
+already built. The genuinely missing piece is the PER-ROW quick action
+-- today's per-row inline actions are bypass-login/pause-resume/delete
+only, no direct Ignore toggle without opening the device.
 
 ---
 
