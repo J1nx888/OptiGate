@@ -6742,8 +6742,36 @@ def health_page():
 
 
 SETTINGS_BODY = """
+<!-- Redesigned 2026-09-09, project owner's explicit request ("fewer,
+     more logical groupings... cohesive... not just bolt-on of separate
+     items"): the 12 independent one-topic cards this page used to have
+     (each its own border, each grown on incrementally over many
+     sessions) are grouped into 5 named sections below -- one .card per
+     section, containing one .settings-subsection per original topic.
+     Deliberately NOT merged into one form per section, let alone one
+     per page: several of these are already-independent ACTIONS with
+     different consequences (a one-off "run now"/"check now"/"clean up
+     now" vs. a persisted setting save), and forcing genuinely unrelated
+     fields to share one submit would mean a mistake in one (a bad CIDR,
+     say) blocks saving something else entirely unrelated (SafeSearch,
+     say) in the same request. The win here is visual/structural
+     cohesion -- fewer borders, clear section headings, related things
+     actually grouped together -- not fewer underlying actions. -->
+
 <div class="card">
-<h2>SSL-Bump CA certificate</h2>
+<h2>Security</h2>
+
+<div class="settings-subsection">
+<h3>Dashboard admin login</h3>
+<form class="add-form" method="post" action="{{ url_for('update_admin') }}">
+  <input type="text" name="admin_username" value="{{ admin_username }}" placeholder="Admin username">
+  <input type="password" name="admin_password" placeholder="New password (leave blank to keep current)">
+  <button class="add" type="submit">Save</button>
+</form>
+</div>
+
+<div class="settings-subsection">
+<h3>SSL-Bump CA certificate</h3>
 <p class="hint">Every device needs this certificate trusted to use bump-mode filtering (Crunchyroll, or any other domain switched to bump mode) -- same certificate for every device, no per-user certs.</p>
 {% if ca_cert_info %}
 <p class="hint"><strong>Current:</strong> {{ ca_cert_info.subject }}<br>Expires {{ ca_cert_info.expires }}<br><code style="font-size:.75em; word-break:break-all;">{{ ca_cert_info.fingerprint }}</code></p>
@@ -6774,34 +6802,13 @@ SETTINGS_BODY = """
 </details>
 <p class="hint" style="margin-top:.6rem;"><strong>After either action:</strong> restart the proxy container (<code>docker compose restart proxy</code>) for Squid to actually use it -- cert=/key= is only read at Squid startup, not live like everything else in this dashboard.</p>
 </div>
-
-<div class="card">
-<h2>Backup &amp; restore</h2>
-<p class="hint">
-  Exports every admin-configured setting -- users, devices, domains,
-  categories, schedules, and the SSL-Bump CA certificate itself -- into
-  one file. Restoring it (even on completely fresh hardware) puts back
-  the exact same CA certificate too, so no device needs to re-trust
-  anything afterward. Does NOT include the Report page's history, the
-  Events log, or a subscription category's fetched domain list (that
-  re-syncs on its own from the URL already saved in the backup).
-</p>
-<p class="hint"><strong>Treat this file like a password vault, not a plain config export</strong> -- it contains the CA certificate's private key and AdGuard's own admin password in plain text (AdGuard's API needs the real password, not a hash), plus every login's password hash. Store it somewhere only you can reach.</p>
-<a class="btn add" href="{{ url_for('download_backup') }}">Download backup</a>
-
-<details style="margin-top:1rem;">
-<summary>Restore from a backup file</summary>
-<p class="hint"><strong>This replaces every user, device, domain, category, schedule, and setting on this install with whatever's in the file</strong> -- anything not in the backup is deleted, not merged with what's here now. Meant for a fresh install or reverting to an earlier snapshot, not routine use.</p>
-<form class="add-form" method="post" action="{{ url_for('restore_backup') }}" enctype="multipart/form-data"
-      onsubmit="return confirm('This REPLACES every user, device, domain, category, schedule, and setting with what&#39;s in this backup file -- anything not in the file is deleted. This cannot be undone. Continue?')">
-  <input type="file" name="backup_file" accept=".zip" required>
-  <button class="danger" type="submit">Restore from backup</button>
-</form>
-</details>
 </div>
 
 <div class="card">
-<h2>Ad-block filter lists (AdGuard Home)</h2>
+<h2>Filtering &amp; AdGuard</h2>
+
+<div class="settings-subsection">
+<h3>Ad-block filter lists (AdGuard Home)</h3>
 <p class="hint">
   AdGuard Home checks its subscribed filter lists (its own default list,
   plus the curated uBlockOrigin/uAssets lists added on first run) on its
@@ -6813,22 +6820,22 @@ SETTINGS_BODY = """
   <button class="add" type="submit" {{ 'disabled' if not adguard_configured }}>Check for filter updates now</button>
 </form>
 {% if not adguard_configured %}
-<p class="hint"><strong>Not configured yet</strong> -- set the dashboard's own admin login below (the "Dashboard admin login" card further down this page); AdGuard's login is kept in sync with it automatically.</p>
+<p class="hint"><strong>Not configured yet</strong> -- set the dashboard's own admin login above (the "Security" section's "Dashboard admin login"); AdGuard's login is kept in sync with it automatically.</p>
 {% endif %}
 {% if adguard_ui_url %}
 <p class="hint" style="margin-top:.6rem;">
   <a class="btn add" href="{{ adguard_ui_url }}" target="_blank" rel="noopener">Open AdGuard's own dashboard &rarr;</a><br>
   Full query log, blocked-domain stats, and charts this project doesn't duplicate. Tighter integration (pulling those numbers into this dashboard directly) is a planned future improvement, not built yet.
   <strong>Only reachable if <code>ADGUARD_WEB_BIND</code> in <code>.env</code> is set to something other than the default <code>127.0.0.1</code></strong> (same idea as this dashboard's own <code>DASHBOARD_BIND</code>) -- otherwise this link only works from the Beelink itself, not your browser.
-  <strong>Logs in with the same username/password as this dashboard's own admin login</strong> (below) -- there's only one credential to remember now.
+  <strong>Logs in with the same username/password as this dashboard's own admin login</strong> (above) -- there's only one credential to remember now.
 </p>
 {% endif %}
 <details {{ 'open' if not adguard_url }}>
 <summary>Connection address</summary>
 <p class="hint">
   Only the address (host/port) is set here -- AdGuard's login itself is
-  always the dashboard's own admin username/password (see "Dashboard
-  admin login" below); changing that automatically writes the matching
+  always the dashboard's own admin username/password (see "Security"
+  above); changing that automatically writes the matching
   credential into AdGuard's own config too (a restart of the
   <code>adguard</code> container is needed for it to take effect --
   AdGuard only reads its config at startup, it has no live-reload).
@@ -6840,8 +6847,8 @@ SETTINGS_BODY = """
 </details>
 </div>
 
-<div class="card">
-<h2>SafeSearch &amp; YouTube Restricted Mode</h2>
+<div class="settings-subsection">
+<h3>SafeSearch &amp; YouTube Restricted Mode</h3>
 <p class="hint">
   Forces Google/Bing/DuckDuckGo/Ecosia/Yandex/Pixabay SafeSearch and
   YouTube Restricted Mode for every device on the network, via AdGuard
@@ -6859,8 +6866,30 @@ SETTINGS_BODY = """
 {% endif %}
 </div>
 
+<div class="settings-subsection">
+<h3>Blocked-site experience</h3>
+<form class="add-form" method="post" action="{{ url_for('update_block_page_mode') }}">
+  <select name="block_page_mode">
+    <option value="terminate" {{ 'selected' if block_page_mode=='terminate' }}>Just fail the connection (default -- safe for devices that haven't installed the certificate yet)</option>
+    <option value="redirect" {{ 'selected' if block_page_mode=='redirect' }}>Show a friendly page (requires the CA certificate already trusted on the device)</option>
+  </select>
+  <button class="add" type="submit">Save</button>
+</form>
+<p class="hint">
+  <strong>Only switch to "Show a friendly page" after confirming the CA certificate is installed and trusted on every device this applies to.</strong>
+  Showing a page requires decrypting that connection with the proxy's own certificate -- exactly like Crunchyroll already does. If a device hasn't trusted that certificate yet, it'll see a security warning ("connection not private") instead of a clean block message, which is more alarming than the plain connection failure it replaces. A simple way to check: if Crunchyroll itself loads correctly on a device, that device's certificate trust is set up correctly and this mode will work fine for it too. This is one setting for every device on the network -- there's no per-device override.
+</p>
+<p class="hint">
+  Bump-mode domains (Crunchyroll, or anything else you've set to bump mode) always show a page when blocked regardless of this setting, since they're already decrypted either way. This setting only affects splice-mode sites. To get an actual custom page here rather than Squid's generic one, also set <code>DASHBOARD_URL</code> in <code>.env</code> to this machine's address (e.g. <code>http://192.168.1.50:8787</code>) and restart the proxy container.
+</p>
+</div>
+</div>
+
 <div class="card">
-<h2>Local network</h2>
+<h2>Network</h2>
+
+<div class="settings-subsection">
+<h3>Local network</h3>
 <form class="add-form" method="post" action="{{ url_for('update_local_network') }}">
   <input type="text" name="local_network" value="{{ local_network }}" style="flex:1; min-width:280px;">
   <button class="add" type="submit">Save</button>
@@ -6868,8 +6897,8 @@ SETTINGS_BODY = """
 <p class="hint">Space-separated CIDRs, e.g. <code>192.168.1.0/24 192.168.0.0/24</code>. Requests from outside these ranges are denied regardless of user/site rules. <strong>Leave blank to disable this check</strong> and rely only on per-person proxy logins &mdash; do that if the proxy runs under Docker Desktop or bridge networking, where it sees an internal gateway address instead of the real client IP and this check would otherwise block everyone.</p>
 </div>
 
-<div class="card">
-<h2>Network discovery sweep</h2>
+<div class="settings-subsection">
+<h3>Network discovery sweep</h3>
 <p class="hint">
   Every other way this project notices a device is passive -- it only
   learns about one once that device happens to make some traffic this
@@ -6899,9 +6928,13 @@ SETTINGS_BODY = """
   Also requires the <code>interception</code> profile to actually be running (this is a <code>controller</code>-side feature, same as the ARP worker and nftables-manager) -- takes no effect while it's off. <strong>Run now</strong> works even while the toggle above is off (a one-off check, not a schedule change) -- takes effect within about 30 seconds, same "requires the interception profile" caveat.
 </p>
 </div>
+</div>
 
 <div class="card">
-<h2>Household time zone</h2>
+<h2>Household</h2>
+
+<div class="settings-subsection">
+<h3>Household time zone</h3>
 <p class="hint">The default time zone new <a href="{{ url_for('schedules') }}">schedules</a> are created with. Each schedule stores its own time zone once created, so changing this later never moves an existing schedule's meaning.</p>
 <form class="add-form" method="post" action="{{ url_for('update_household_time_zone') }}" id="householdTimeZoneForm">
   <select name="household_time_zone" id="householdTimeZoneSelect">
@@ -6949,35 +6982,50 @@ SETTINGS_BODY = """
 {% endif %}
 </div>
 
-<div class="card">
-<h2>Blocked-site experience</h2>
-<form class="add-form" method="post" action="{{ url_for('update_block_page_mode') }}">
-  <select name="block_page_mode">
-    <option value="terminate" {{ 'selected' if block_page_mode=='terminate' }}>Just fail the connection (default -- safe for devices that haven't installed the certificate yet)</option>
-    <option value="redirect" {{ 'selected' if block_page_mode=='redirect' }}>Show a friendly page (requires the CA certificate already trusted on the device)</option>
-  </select>
+<div class="settings-subsection">
+<h3>Memorable troubleshooting address</h3>
+<p class="hint">
+  A device that's already connected to the WiFi but lost internet access
+  (or just wants to self-check) can go to this address in a browser to
+  see its own Label, User/Group, IP address, and MAC address -- point
+  anyone who loses internet at it instead of walking them through
+  finding those yourself. The <code>.home</code> suffix is fixed; only
+  the first part is yours to change.
+</p>
+<form class="add-form" method="post" action="{{ url_for('update_optigate_hostname') }}">
+  <input type="text" name="optigate_hostname_prefix" value="{{ optigate_hostname_prefix }}" style="max-width:12rem;">
+  <span class="hint" style="margin:0;">.home</span>
   <button class="add" type="submit">Save</button>
 </form>
 <p class="hint">
-  <strong>Only switch to "Show a friendly page" after confirming the CA certificate is installed and trusted on every device this applies to.</strong>
-  Showing a page requires decrypting that connection with the proxy's own certificate -- exactly like Crunchyroll already does. If a device hasn't trusted that certificate yet, it'll see a security warning ("connection not private") instead of a clean block message, which is more alarming than the plain connection failure it replaces. A simple way to check: if Crunchyroll itself loads correctly on a device, that device's certificate trust is set up correctly and this mode will work fine for it too. This is one setting for every device on the network -- there's no per-device override.
+  Currently <code>{{ optigate_hostname_prefix }}.home</code> --
+  {% if optigate_rewrite_status.startswith('live') %}<span class="badge allowed">{{ optigate_rewrite_status }}</span>
+  {% else %}<span class="badge blocked">{{ optigate_rewrite_status }}</span>{% endif %}
+  <br>Visit it plain, with <strong>no port</strong> --
+  <code>http://{{ optigate_hostname_prefix }}.home</code>, not
+  <code>{{ optigate_hostname_prefix }}.home:8787</code> or any other port
+  (that reaches this admin login instead, which is a real gap found live
+  2026-09-08: nothing here previously said this, and the DASHBOARD_URL
+  hint just below shows a port right next to this hostname, an easy mix-up).
 </p>
 <p class="hint">
-  Bump-mode domains (Crunchyroll, or anything else you've set to bump mode) always show a page when blocked regardless of this setting, since they're already decrypted either way. This setting only affects splice-mode sites. To get an actual custom page here rather than Squid's generic one, also set <code>DASHBOARD_URL</code> in <code>.env</code> to this machine's address (e.g. <code>http://192.168.1.50:8787</code>) and restart the proxy container.
+  <strong>Requires <code>DASHBOARD_URL</code> set in <code>.env</code></strong> (this
+  machine's own address, e.g. <code>http://192.168.1.50:8787</code> --
+  <em>that port is for DASHBOARD_URL only, never for visiting the
+  troubleshooting address above</em>) so AdGuard knows which IP to
+  resolve this hostname to -- same requirement the "Blocked-site
+  experience" section above already has. Pushed to AdGuard
+  immediately when you click Save (and again automatically whenever
+  this dashboard container starts) -- no need to wait on anything else.
 </p>
 </div>
-
-<div class="card">
-<h2>Dashboard admin login</h2>
-<form class="add-form" method="post" action="{{ url_for('update_admin') }}">
-  <input type="text" name="admin_username" value="{{ admin_username }}" placeholder="Admin username">
-  <input type="password" name="admin_password" placeholder="New password (leave blank to keep current)">
-  <button class="add" type="submit">Save</button>
-</form>
 </div>
 
 <div class="card">
-<h2>Bulk import devices</h2>
+<h2>Devices &amp; data</h2>
+
+<div class="settings-subsection">
+<h3>Bulk import devices</h3>
 <p class="hint">
   A CSV of known devices -- one row per device, <code>MAC address,Device name</code>
   (a header row is fine and gets skipped automatically). Useful for a
@@ -6993,8 +7041,8 @@ SETTINGS_BODY = """
 </form>
 </div>
 
-<div class="card">
-<h2>Remove outdated devices</h2>
+<div class="settings-subsection">
+<h3>Remove outdated devices</h3>
 <p class="hint">
   Devices whose real last-seen time (from network observation -- ARP/DHCP
   discovery, active scans, or AdGuard's own query log; NOT the unused
@@ -7040,42 +7088,30 @@ SETTINGS_BODY = """
 {% endif %}
 </div>
 
-<div class="card">
-<h2>Memorable troubleshooting address</h2>
+<div class="settings-subsection">
+<h3>Backup &amp; restore</h3>
 <p class="hint">
-  A device that's already connected to the WiFi but lost internet access
-  (or just wants to self-check) can go to this address in a browser to
-  see its own Label, User/Group, IP address, and MAC address -- point
-  anyone who loses internet at it instead of walking them through
-  finding those yourself. The <code>.home</code> suffix is fixed; only
-  the first part is yours to change.
+  Exports every admin-configured setting -- users, devices, domains,
+  categories, schedules, and the SSL-Bump CA certificate itself -- into
+  one file. Restoring it (even on completely fresh hardware) puts back
+  the exact same CA certificate too, so no device needs to re-trust
+  anything afterward. Does NOT include the Report page's history, the
+  Events log, or a subscription category's fetched domain list (that
+  re-syncs on its own from the URL already saved in the backup).
 </p>
-<form class="add-form" method="post" action="{{ url_for('update_optigate_hostname') }}">
-  <input type="text" name="optigate_hostname_prefix" value="{{ optigate_hostname_prefix }}" style="max-width:12rem;">
-  <span class="hint" style="margin:0;">.home</span>
-  <button class="add" type="submit">Save</button>
+<p class="hint"><strong>Treat this file like a password vault, not a plain config export</strong> -- it contains the CA certificate's private key and AdGuard's own admin password in plain text (AdGuard's API needs the real password, not a hash), plus every login's password hash. Store it somewhere only you can reach.</p>
+<a class="btn add" href="{{ url_for('download_backup') }}">Download backup</a>
+
+<details style="margin-top:1rem;">
+<summary>Restore from a backup file</summary>
+<p class="hint"><strong>This replaces every user, device, domain, category, schedule, and setting on this install with whatever's in the file</strong> -- anything not in the backup is deleted, not merged with what's here now. Meant for a fresh install or reverting to an earlier snapshot, not routine use.</p>
+<form class="add-form" method="post" action="{{ url_for('restore_backup') }}" enctype="multipart/form-data"
+      onsubmit="return confirm('This REPLACES every user, device, domain, category, schedule, and setting with what&#39;s in this backup file -- anything not in the file is deleted. This cannot be undone. Continue?')">
+  <input type="file" name="backup_file" accept=".zip" required>
+  <button class="danger" type="submit">Restore from backup</button>
 </form>
-<p class="hint">
-  Currently <code>{{ optigate_hostname_prefix }}.home</code> --
-  {% if optigate_rewrite_status.startswith('live') %}<span class="badge allowed">{{ optigate_rewrite_status }}</span>
-  {% else %}<span class="badge blocked">{{ optigate_rewrite_status }}</span>{% endif %}
-  <br>Visit it plain, with <strong>no port</strong> --
-  <code>http://{{ optigate_hostname_prefix }}.home</code>, not
-  <code>{{ optigate_hostname_prefix }}.home:8787</code> or any other port
-  (that reaches this admin login instead, which is a real gap found live
-  2026-09-08: nothing here previously said this, and the DASHBOARD_URL
-  hint just below shows a port right next to this hostname, an easy mix-up).
-</p>
-<p class="hint">
-  <strong>Requires <code>DASHBOARD_URL</code> set in <code>.env</code></strong> (this
-  machine's own address, e.g. <code>http://192.168.1.50:8787</code> --
-  <em>that port is for DASHBOARD_URL only, never for visiting the
-  troubleshooting address above</em>) so AdGuard knows which IP to
-  resolve this hostname to -- same requirement the "Blocked-site
-  experience" card's friendly page above already has. Pushed to AdGuard
-  immediately when you click Save (and again automatically whenever
-  this dashboard container starts) -- no need to wait on anything else.
-</p>
+</details>
+</div>
 </div>
 """
 

@@ -246,6 +246,22 @@ code {
   margin-bottom: 1.25rem;
 }
 
+/* ---- Settings subsections: added 2026-09-09 for the Settings page
+   redesign (fewer, more logical groupings -- one .card per named
+   section, e.g. "Security"/"Network", containing one
+   .settings-subsection per topic that used to be its own standalone
+   card). h3 sits one level below the card's own h2 group title;
+   a top border on every subsection after the first is the only visual
+   separator needed inside an already-bordered card. ---- */
+h3 {
+  font-size: .88rem;
+  font-weight: 700;
+  margin: 0 0 .5rem;
+  color: var(--text);
+}
+.settings-subsection { padding-top: 1.2rem; margin-top: 1.2rem; border-top: 1px solid var(--border); }
+.settings-subsection:first-of-type { padding-top: 0; margin-top: 0; border-top: none; }
+
 .cert-banner {
   background: var(--success-bg);
   border: 1px solid var(--success-border);

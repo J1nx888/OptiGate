@@ -6936,6 +6936,23 @@ or their explicit real-time approval in a live conversation turn.**
     "trusted: always splice, never checked" mode for exactly this kind
     of legitimate-but-noisy infrastructure traffic.
 
+    **LIKELY BENIGN, checked further 2026-09-09 -- no live testing
+    needed for this part.** Checked `squid.conf.template` for any
+    directive that would turn this alert into an actual deny (nothing
+    matches `forgery`/`unsupported_protocol`/etc. anywhere in it) --
+    this project has never configured any special handling for it, it's
+    purely Squid's own built-in behavior. More importantly: the exact
+    `access.log` entries carrying the flagged Google connections (same
+    timestamps, same device) were `TCP_TUNNEL/200` with real byte
+    counts -- i.e. those connections completed successfully, not reset
+    or denied. That's real evidence (not just Squid's own general
+    reputation for this check) that the alert is logged as a warning
+    and nothing more here. Downgrading this from "needs investigation"
+    to "logged for awareness, no action needed" -- if it turns out to
+    correlate with a real, reproducible connectivity complaint later,
+    revisit the `sni_trusted` allowlist idea above, but there's no
+    current evidence it's causing one.
+
 ### Soak test stopped (2026-09-08)
 
 Project owner said they were done sending feedback for this window and
