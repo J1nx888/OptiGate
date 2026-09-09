@@ -4614,19 +4614,43 @@ def test_deleting_a_device_removes_its_domain_assignments(client, db_conn):
 
 
 # ============================================================
-# Logout (HTTP Basic Auth has no real session -- best-effort browser-cache
-# trick, see the /logout route's docstring)
+# Logout (HTTP Basic Auth has no real server-side session -- rewritten
+# 2026-09-09 after a real live lockout, see the /logout route's own
+# docstring for the full story: the previous fake-credential URL trick
+# caused several browsers to cache "logout" as the username and keep
+# resubmitting it on every later login attempt, defeating even a
+# correct password.)
 # ============================================================
 
-def test_logout_with_bogus_credentials_returns_401(client):
-    resp = client.get("/logout", headers=_auth_header(username="logout", password="logout"))
-    assert resp.status_code == 401
-    assert "WWW-Authenticate" in resp.headers
-
-
-def test_logout_requires_some_credential(client):
+def test_logout_page_reachable_with_no_credentials_at_all(client):
+    """Must stay reachable even to someone currently unable to log in --
+    unlike every other page in this app, no @require_admin here."""
     resp = client.get("/logout")
-    assert resp.status_code == 401
+    assert resp.status_code == 200
+    assert "WWW-Authenticate" not in resp.headers
+
+
+def test_logout_page_explains_the_real_manual_step(client):
+    resp = client.get("/logout")
+    body = resp.data.decode()
+    assert "close" in body.lower()
+    assert "saved password" in body.lower() or "saved login" in body.lower()
+
+
+def test_logout_page_does_not_prompt_for_or_accept_any_credential_check(client):
+    """The old bogus-credential trick actively poisoned some browsers'
+    cached username -- confirm this page never even looks at whatever
+    Authorization header a browser might still be sending."""
+    resp = client.get("/logout", headers=_auth_header(username="logout", password="logout"))
+    assert resp.status_code == 200
+
+
+def test_sidebar_logout_link_has_no_embedded_credentials(client, db_conn):
+    """Real regression check for the fix itself: the sidebar link must
+    never again embed a username:password@ pair in its href -- that's
+    exactly the mechanism that poisoned browsers' cached credentials."""
+    resp = client.get("/report", headers=_auth_header())
+    assert b"logout:logout@" not in resp.data
 
 
 # ============================================================

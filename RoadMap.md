@@ -7256,25 +7256,39 @@ credential to remember" invariant this project believed it had
 password change since whatever first triggered AdGuard's own mid-uptime
 config rewrite -- worth telling the project owner to double check
 AdGuard's password if a change was ever made and never explicitly
-re-verified.** (2) Separately, and now flagged for a real
-fix next round, per the project owner's own words ("lets fix that bug in
-the next round"): `SETTINGS_BODY`'s "Log out" link
-(`dashboard.py`, ~line 350) works by sending deliberately-wrong
-`logout`/`logout` Basic-Auth credentials to force the browser to drop
-its cached login -- but several browsers then CACHE `logout` as the
-*username* for the origin and keep resubmitting it on every later
-attempt, even once a correct password is pasted into a fresh-looking
-prompt whose username field silently stayed pre-filled with `logout`.
-Confirmed directly in `dashboard`'s own log: every failed attempt during
-recovery showed `username: 'logout'`, never `admin`, regardless of which
-(correct) password was tried. The user's actual working password was
-never wrong at any point tonight -- this UI mechanism was quietly
-defeating every login attempt after the first "Log out" click. Real fix
-needs a different logout mechanism entirely (HTTP Basic Auth has no
-clean server-side logout -- likely candidates: a plain instructional
-page telling the admin to close the browser/clear site data, or moving
-off Basic Auth to a real session-cookie login where a server-side logout
-is actually possible) -- a real design decision, not a one-line patch.
+re-verified.** (2) **DONE (fixed 2026-09-09, next session):** the
+`BASE` template's "Log out" link (`dashboard.py`) used to navigate to
+`http://logout:logout@{{ request.host }}/logout` -- deliberately-wrong
+Basic-Auth credentials embedded in the URL, meant to force the browser
+to drop its cached login. Real bug: several browsers instead CACHE
+`logout` as the *username* for the origin and keep resubmitting it on
+every later attempt, even once a correct password is pasted into a
+fresh-looking prompt whose username field silently stayed pre-filled
+with `logout`. Confirmed directly in `dashboard`'s own log during that
+session's recovery: every failed attempt showed `username: 'logout'`,
+never `admin`, regardless of which (correct) password was tried -- the
+project owner's actual working password was never wrong at any point;
+this UI mechanism was quietly defeating every login attempt after the
+first "Log out" click. Of the two candidate fixes this entry originally
+listed, chose the plain instructional page over migrating to a real
+session-cookie login -- the latter would mean rewriting `require_admin`
+and every one of this project's ~1100 tests' own `_auth_header()` calls
+for a problem a much smaller, safer change fully solves. **Fixed**: the
+sidebar link now points at a plain `{{ url_for('logout') }}` (no
+embedded credentials at all -- nothing left to poison any browser's
+cache with), and `/logout` itself no longer attempts any Basic-Auth
+trick or requires `@require_admin` (deliberately reachable even to
+someone currently unable to log in) -- it renders a small standalone
+page (not the full dashboard chrome) explaining the one real, honest,
+manual step: close the browser, or clear its saved password for this
+site specifically. HTTP Basic Auth genuinely has no reliable
+cross-browser server-side logout -- this stops pretending otherwise
+instead of trying a cleverer trick that would just have its own
+browser-specific edge cases. 4 new/rewritten tests in
+`tests/test_dashboard.py` (reachable with zero credentials, explains the
+real step, doesn't even look at a `logout`/`logout` credential if one is
+still sent, and the sidebar's own link is checked to never again embed
+a `logout:logout@` pair). Not yet deployed live.
 
 **Two lockout passwords set live during recovery** (both later replaced
 by the project owner's own choice, per instruction after each): the

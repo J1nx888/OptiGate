@@ -258,22 +258,65 @@ def require_admin(view):
     return wrapped
 
 
+_LOGOUT_BODY = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log out -- OptiGate</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+<div class="page" style="max-width: 32rem; margin: 3rem auto; padding: 0 1rem;">
+<div class="card">
+<h1>Log out</h1>
+<p>OptiGate's admin login uses your browser's own built-in sign-in
+prompt, which has no "log out" button a website can press for you --
+only your browser can actually forget a saved login. To sign out for
+real, do ONE of these:</p>
+<ul>
+  <li><strong>Close this browser tab or window</strong> -- most browsers
+  forget a saved login the moment the browser itself closes.</li>
+  <li><strong>Clear this site's saved password</strong> from your
+  browser's own settings (e.g. Chrome/Edge: Settings &rarr; Privacy and
+  security &rarr; Clear browsing data &rarr; Cookies and site data,
+  scoped to this site).</li>
+</ul>
+<p class="hint">Simply navigating back to the dashboard will sign you
+right back in with whatever's still saved -- that's expected, not a
+bug, until you do one of the two things above.</p>
+<p><a class="btn add" href="{{ url_for('report') }}">&larr; Back to the dashboard</a></p>
+</div>
+</div>
+</body>
+</html>"""
+
+
 @app.route("/logout")
-@require_admin
 def logout():
     """HTTP Basic Auth has no real server-side session to revoke -- the
-    browser just caches the credential per-origin until it's closed. The
-    Logout link in BASE navigates here with a deliberately wrong credential
-    embedded in the URL (http://logout:logout@host/logout); that overwrites
-    whatever the browser had cached for this origin, @require_admin above
-    then 401s it (same as any other bad credential), and browsers respond
-    to a 401 + WWW-Authenticate on a top-level navigation by showing a
-    fresh native sign-in prompt. This body only runs in the practically
-    impossible case that the real admin credentials happen to literally be
-    "logout"/"logout"."""
-    return Response(
-        "Logged out.", 401, {"WWW-Authenticate": 'Basic realm="OptiGate Admin"'}
-    )
+    browser just caches the credential per-origin until it's closed, and
+    there's no reliable, cross-browser way for a server to make it
+    forget that.
+
+    **Rewritten 2026-09-09 after a real live lockout**: this used to
+    navigate here via a URL with a deliberately wrong credential embedded
+    in it (http://logout:logout@host/logout) to try to force a fresh
+    sign-in prompt -- a commonly-suggested Basic-Auth "logout" trick.
+    Confirmed live that it actively backfires: several browsers cache
+    "logout" as the *username* for this origin after that navigation,
+    then keep resubmitting it on every later login attempt regardless of
+    what password is typed, silently defeating every subsequent login
+    until the browser's saved credentials are cleared by hand anyway --
+    worse than doing nothing, since the admin has no way to tell their
+    own (correct) password apart from a UI bug without checking server
+    logs. Replaced with a plain page explaining the one real, manual step
+    (close the browser, or clear its saved password for this site) --
+    honest about the limitation instead of a trick that can lock someone
+    out. Deliberately NOT behind @require_admin: this page must stay
+    reachable even to someone who's currently unable to log in, and it
+    reveals nothing sensitive."""
+    return render_template_string(_LOGOUT_BODY)
 
 
 # ==========================================================
@@ -347,7 +390,7 @@ try { if (localStorage.getItem("og_sidebar_collapsed") === "1") document.documen
         <svg class="sidebar-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
         <span class="sidebar-label">Collapse</span>
       </button>
-      <a class="sidebar-item" href="http://logout:logout@{{ request.host }}{{ url_for('logout') }}" title="Log out">
+      <a class="sidebar-item" href="{{ url_for('logout') }}" title="Log out">
         <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         <span class="sidebar-label">Log out</span>
       </a>
