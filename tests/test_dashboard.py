@@ -1634,6 +1634,59 @@ def test_settings_page_shows_the_run_now_button(client):
     assert b"Run now" in resp.data
 
 
+def test_run_network_sweep_now_warns_when_controller_is_not_running(client, db_conn):
+    """Real gap found live 2026-09-09, project owner's own words: "we
+    can't just let it go off into nothingness." No interception_runtime
+    row at all (a fresh install, or -- the actual live case -- the
+    interception profile simply isn't running) must produce an honest
+    warning, not the generic "will run" message that implies success
+    it can't back up. The request is still queued regardless (see the
+    next test)."""
+    resp = client.post("/settings/network-sweep/run-now", headers=_auth_header(), follow_redirects=True)
+    assert b"interception profile isn&#39;t running" in resp.data or b"interception profile isn't running" in resp.data
+
+
+def test_run_network_sweep_now_still_queues_the_request_when_controller_is_down(client, db_conn):
+    """The honest warning doesn't mean giving up on the request -- if
+    the profile starts moments later, controller's own next check tick
+    should still pick this exact request up."""
+    import db
+    client.post("/settings/network-sweep/run-now", headers=_auth_header())
+    assert db.get_setting(db_conn, "network_sweep_run_now_requested_at", "") != ""
+
+
+def test_run_network_sweep_now_gives_the_normal_message_when_controller_is_up(client, db_conn):
+    import db
+    _insert_runtime_row(db_conn, mode="running", last_healthy_at=db.now_iso())
+
+    resp = client.post("/settings/network-sweep/run-now", headers=_auth_header(), follow_redirects=True)
+
+    assert b"Requested -- will run within about 30 seconds." in resp.data
+
+
+def test_run_network_sweep_now_warns_when_controller_reports_stale(client, db_conn):
+    """A stopped/crashed controller leaves interception_runtime frozen
+    at whatever mode it last reported -- staleness on last_healthy_at,
+    not just the mode column, is what actually catches that (same
+    reasoning as _subsystem_stale()'s own docstring)."""
+    import db
+    _insert_runtime_row(db_conn, mode="running", last_healthy_at=db.iso_secs_ago(120))
+
+    resp = client.post("/settings/network-sweep/run-now", headers=_auth_header(), follow_redirects=True)
+
+    assert b"interception profile isn&#39;t running" in resp.data or b"interception profile isn't running" in resp.data
+
+
+def test_settings_page_shows_live_interception_status_for_the_sweep(client, db_conn):
+    import db
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"interception profile: not running" in resp.data
+
+    _insert_runtime_row(db_conn, mode="running", last_healthy_at=db.now_iso())
+    resp = client.get("/settings", headers=_auth_header())
+    assert b"interception profile: running" in resp.data
+
+
 def test_update_optigate_hostname_saves_lowercased_value(client, db_conn):
     resp = client.post(
         "/settings/optigate-hostname", data={"optigate_hostname_prefix": "MyNetwork"}, headers=_auth_header()

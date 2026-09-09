@@ -6931,7 +6931,13 @@ SETTINGS_BODY = """
   {% else %}
   <span class="badge allowed">{{ network_sweep_status }}</span>
   {% endif %}
-  Also requires the <code>interception</code> profile to actually be running (this is a <code>controller</code>-side feature, same as the ARP worker and nftables-manager) -- takes no effect while it's off. <strong>Run now</strong> works even while the toggle above is off (a one-off check, not a schedule change) -- takes effect within about 30 seconds, same "requires the interception profile" caveat.
+  This is a <code>controller</code>-side feature (same as the ARP worker and nftables-manager) -- it only runs at all while the <code>interception</code> profile is up.
+  {% if interception_controller_is_up %}
+  <span class="badge allowed">interception profile: running</span>
+  {% else %}
+  <span class="badge blocked">interception profile: not running</span> -- Save and Run now both still work, but nothing will act on them until it's started.
+  {% endif %}
+  <strong>Run now</strong> works even while the toggle above is off (a one-off check, not a schedule change).
 </p>
 </div>
 </div>
@@ -7206,6 +7212,32 @@ def _optigate_rewrite_status(conn, adguard_url: str, adguard_username: str, adgu
     return "not active yet -- click Save below to push it"
 
 
+def _interception_controller_is_up(conn) -> bool:
+    """Whether the `controller` process (where network_sweep.py's own
+    background loop actually lives) is up and self-reporting right now
+    -- reuses the EXACT same interception_runtime.mode/last_healthy_at
+    liveness check the Health page already relies on
+    (_get_runtime_row()/_is_stale()/_subsystem_is_up(), all defined
+    above), rather than inventing a second way to answer "is this
+    process actually alive." `nft_mode`/`nft_last_healthy_at` (the
+    OTHER half of that same row) is nftables-manager's own, separate
+    process's health -- irrelevant here, since network_sweep.py runs
+    inside `controller` itself, not nftables-manager.
+
+    Added 2026-09-09, real gap found live: the project owner clicked
+    "Run now" while `controller` wasn't running at all (interception
+    off for the night) and the request just silently queued with a
+    generic "will run within about 30 seconds" message -- true only if
+    something is actually alive to run it. Their own words: "we can't
+    just let it go off into nothingness." A missing runtime_row (a
+    brand-new install where controller has genuinely never run even
+    once) counts as down, same as a stale one."""
+    row = _get_runtime_row(conn)
+    if row is None:
+        return False
+    return _subsystem_is_up(row["mode"], _is_stale(row["last_healthy_at"]))
+
+
 def _network_sweep_status(conn) -> str:
     """Read-only status line for the Settings page's "Network discovery
     sweep" card -- never writes anything, mirrors
@@ -7293,6 +7325,7 @@ def settings_page():
         network_sweep_enabled=network_sweep_enabled,
         network_sweep_interval_minutes=network_sweep_interval_minutes,
         network_sweep_status=_network_sweep_status(conn),
+        interception_controller_is_up=_interception_controller_is_up(conn),
         block_page_mode=block_page_mode, device_stale_days=device_stale_days,
         stale_devices=stale_devices, adguard_url=adguard_url,
         adguard_configured=bool(adguard_url and adguard_password),
@@ -7546,13 +7579,31 @@ def run_network_sweep_now():
     network_sweep._run_now_requested()'s own docstring for exactly how
     it's consumed -- deliberately works even when the automatic
     schedule (network_sweep_enabled) is off, matching every other
-    one-off "check/refresh now" button on this page."""
+    one-off "check/refresh now" button on this page.
+
+    Fixed 2026-09-09, real gap found live: this used to say "will run
+    within about 30 seconds" unconditionally, even when `controller`
+    (the only thing that would ever act on this) wasn't running at
+    all -- the project owner's own words: "we can't just let it go off
+    into nothingness." Now checks _interception_controller_is_up()
+    FIRST and says so plainly if it's down, rather than implying success
+    it can't back up. The request is still queued either way (harmless,
+    and correct if the profile gets started moments later) -- only the
+    MESSAGE changes, matching what will actually happen."""
     conn = get_db()
     db.set_setting(conn, "network_sweep_run_now_requested_at", db.now_iso())
     conn.commit()
+    if not _interception_controller_is_up(conn):
+        return flash_redirect(
+            "settings_page",
+            "Queued, but the interception profile isn't running right now, so nothing will act on "
+            "it yet -- start it first (docker compose --profile interception up -d). This request "
+            "will still run the moment it comes up.",
+            error=True,
+        )
     return flash_redirect(
         "settings_page",
-        "Requested -- will run within about 30 seconds if the interception profile is currently running.",
+        "Requested -- will run within about 30 seconds.",
     )
 
 

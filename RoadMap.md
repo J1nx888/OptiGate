@@ -7023,6 +7023,36 @@ it with the right message, automatic run does not), 1 in
 its own badge, doesn't crash on it), plus the Settings-page/route
 coverage this shares with item 11's own original network-sweep tests.
 
+**Follow-up, same day**: deployed item 15 above, then the project
+owner clicked "Run now" and reported (correctly) that nothing showed
+up on the Events page. Diagnosed live: `controller` -- the only
+process that ever acts on a "Run now" request -- wasn't running at
+all (interception was off for the night, on purpose). The request had
+correctly queued in the database; there was just nothing alive to
+service it. The project owner's own response, verbatim: **"you need
+to fix that button. We need some logic to check if it ran and if not,
+tell the admin that it wasn't able to run, we can't just let it go off
+into nothingness."**
+
+**DONE**: `run_network_sweep_now()` (the route behind the button) now
+checks `_interception_controller_is_up()` -- a new helper that reuses
+the EXACT SAME `interception_runtime.mode`/`last_healthy_at` liveness
+check the Health page already relies on
+(`_get_runtime_row()`/`_is_stale()`/`_subsystem_is_up()`, all
+pre-existing) -- rather than inventing a second way to answer "is this
+process actually alive." If `controller` is down (or has never run
+even once, e.g. a fresh install), the flash message says so plainly
+and points at the fix (`docker compose --profile interception up -d`)
+instead of implying success it can't back up. The request is still
+queued either way -- harmless, and correct if the profile starts
+moments later. The Settings page's own hint text was also upgraded
+from a static "requires the interception profile" caveat to a live
+badge ("interception profile: running"/"not running"), so the gap is
+visible *before* clicking, not just after. 7 new tests in
+`tests/test_dashboard.py` (controller down/up/stale message variants,
+the request still queues regardless, the live Settings-page badge in
+both states). Full suite: 1093 passed, 34 skipped.
+
 ### Soak test stopped (2026-09-08)
 
 Project owner said they were done sending feedback for this window and
