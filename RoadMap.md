@@ -7348,6 +7348,22 @@ already built. The genuinely missing piece is the PER-ROW quick action
 -- today's per-row inline actions are bypass-login/pause-resume/delete
 only, no direct Ignore toggle without opening the device.
 
+**Item 24, feature request for a future round, explicitly deferred by
+the project owner ("note that for the future"):** the "Shift mode now"
+action (Phase 12, `add_schedule_override()`/`SCHEDULES_BODY`'s own
+"Shift mode now" card) only exists on the Schedules page today. The
+project owner wants to trigger it directly from a User's own detail
+page too, not just from Schedules. Note for whoever picks this up:
+`user_detail()` already computes and DISPLAYS a user's active override
+read-only ("reflects any active 'Shift mode now' override, not just the
+clock") -- the missing piece is the actual action form. Since this would
+live on a specific user's own page, the target is already known (no
+need for the Schedules page's own who-picker combobox) -- just needs a
+mode-schedule picker (`mode_schedules`, already computed for
+`schedules()`, would need computing for `user_detail()` too) + duration,
+posting to the same existing `add_schedule_override()` route with
+`target=f"user:{user_id}"` pre-filled.
+
 ---
 
 ## Cross-cutting: security-by-design
