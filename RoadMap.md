@@ -7205,6 +7205,78 @@ session). Whether Squid itself exposes any directive to relax the
 Host-header-forgery check for specific cases was not researched this
 session -- worth checking before assuming (a)/(b) are the only options.
 
+**Item 17: DONE (researched and fixed 2026-09-09, next session).**
+Researched both mitigations (a)/(b) above before implementing. Confirmed
+via Squid's own official docs/mailing list (core developer Amos
+Jeffries) that the Host-header-forgery check fires unconditionally
+whenever an SNI is visible during peek/splice, with NO config directive
+to relax or disable it for specific cases -- closing that open question
+from the original finding. Also checked and rejected a blog's claim that
+Squid has a `tls_ech`/ECH-aware ACL to allowlist this case directly:
+verified against Squid's official 6.2 release notes and its current ACL
+type listing and found no such ACL exists at any version. That leaves
+mitigation (a) -- strip/reject the ECH signal itself -- as the real fix;
+(b) (blocking QUIC for bump_v4 devices) was not pursued, since it only
+forces a TCP fallback and does nothing about ECH riding over that same
+TCP connection. Chose AdGuard's `$dnstype=HTTPS` rule modifier: rather
+than blocking the domain outright, this narrowly blocks just the
+HTTPS/SVCB-type DNS record (the one carrying the `ech=`/`alpn=` payload)
+for bump-mode domains, forcing the client to fall back to a plain A/AAAA
+lookup and a normal, visible-SNI TLS handshake that Squid's forgery
+check can validate correctly -- A/AAAA answers, and every other domain,
+are completely unaffected.
+
+**Verification found a serious false alarm in my own test methodology,
+not a real limitation -- worth recording in full.** Initial live testing
+against production AdGuard appeared to show `$dnstype=HTTPS` doesn't
+work at all -- even AdGuard's own canonical documented `$dnstype=AAAA`
+example, and a plain unscoped `||domain^` full block, failed to filter
+anything, with the query log showing `reason=NotFilteredNotFound,
+rules=[]` on every attempt despite the rules correctly round-tripping
+through `/control/filtering/status`. This was reported transparently
+rather than shipping something unverified. At the project owner's
+suggestion, root-caused it on the disposable smoke-test VM by standing
+up both AdGuard v0.108.0-b.90 (beta) and v0.107.79 (production's exact
+version) in isolated Docker containers alongside the VM's own untouched
+stack. **Real cause: AdGuard needs roughly 1-1.5 seconds after
+`/control/filtering/set_rules` returns to finish recompiling its rule
+engine before new rules actually take effect** -- every test script
+had been querying DNS immediately after setting rules, before that
+recompile finished. Adding a `time.sleep(1.5)` between the two calls
+made every previously-"broken" variant work correctly (hostname syntax,
+regex syntax, with/without `$client=`, and finally the real
+`$dnstype=HTTPS` case), on BOTH AdGuard versions -- confirming the fix
+works exactly as designed on the exact version already running in
+production, with no AdGuard upgrade needed. Pure bug in the test
+methodology, not in AdGuard, Squid, or the chosen design -- flagged
+explicitly in the code's own docstring so this doesn't get
+rediscovered the hard way again.
+
+**Fixed**: new `controller/adguard_sync.py` functions `_ech_strip_rule()`
+(builds one `/regex/$client=...,dnstype=HTTPS` rule for a domain pattern
+and its authorized client IPs) and `build_ech_strip_rules()` (queries
+`domains WHERE mode = 'bump'`, and for each one collects the IPs of
+every device that is both `bump_eligible()` and actually authorized for
+that specific domain via `matching.device_domain_reason()` -- the same
+authorization check `_build_domain_deny_rules()` already uses, just
+inverted to collect the allowed set instead of the denied set --
+deliberately scoped to avoid both leaving a genuinely-affected device
+unprotected and needlessly withholding the hint from a device whose
+traffic never reaches Squid at all). Wired into `sync_once()`'s managed
+rule set alongside the existing hard-deny/splice-deny builders. 13 new
+tests in `tests/test_controller_adguard_sync.py` (rule shape, multiple
+client IPs, empty when no bump domains or no authorized device, excludes
+a non-bump-eligible/unauthenticated/unassigned/ignored device, covers a
+device once properly assigned, ignores splice-mode domains, one rule per
+bump domain, accepts a shared `eligible_devices` list, and a full
+`sync_once()` integration check that the ECH-strip rule for an
+authorized device actually appears in the pushed rule set). Full suite
+green. Not yet deployed -- needs `docker compose build controller`;
+since the interception profile is currently off (Bark Home has the
+network), the rebuilt image is inert until the next live-test window,
+where the actual end-to-end fix (Crunchyroll/Asurascans successfully
+bumped) still needs a real confirmation, same status as item 21.
+
 **Item 18 (confirms item 7 is still open, doesn't newly break
 anything): `optigate.home` shows only the box's own IP
 (`192.168.1.250`) on Matthew's (bump-enabled) tablet**, not his device

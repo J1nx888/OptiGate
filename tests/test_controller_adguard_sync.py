@@ -264,6 +264,129 @@ def test_build_rules_excludes_a_device_in_an_ignored_group(conn):
 
 
 # ============================================================
+# _ech_strip_rule / build_ech_strip_rules (added 2026-09-09, RoadMap.md
+# item 17 -- see build_ech_strip_rules()'s own docstring for the full,
+# live-verified story: ECH-carrying bump-mode domains defeat Squid's
+# own bump/splice decision, and the fix is withholding just the
+# HTTPS-type DNS record for the exact devices that need Squid to
+# actually inspect that domain.)
+# ============================================================
+
+def test_ech_strip_rule_shape():
+    rule = adguard_sync._ech_strip_rule("crunchyroll\\.com", ["192.168.1.10"])
+    assert rule == "/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.10,dnstype=HTTPS"
+
+
+def test_ech_strip_rule_joins_multiple_client_ips_with_commas():
+    rule = adguard_sync._ech_strip_rule("example\\.com", ["10.0.0.1", "10.0.0.2"])
+    assert rule == "/(?i)(?:^|\\.)(?:example\\.com)$/$client=10.0.0.1,10.0.0.2,dnstype=HTTPS"
+
+
+def test_build_ech_strip_rules_empty_when_no_bump_domains(conn):
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True)
+    assert adguard_sync.build_ech_strip_rules(conn) == []
+
+
+def test_build_ech_strip_rules_empty_when_no_device_is_authorized(conn):
+    _insert_domain(conn, "crunchyroll\\.com", is_global=False)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True)
+    assert adguard_sync.build_ech_strip_rules(conn) == []
+
+
+def test_build_ech_strip_rules_covers_an_authorized_bump_eligible_device(conn):
+    _insert_domain(conn, "crunchyroll\\.com", is_global=True)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True)
+
+    rules = adguard_sync.build_ech_strip_rules(conn)
+
+    assert len(rules) == 1
+    assert "192.168.1.10" in rules[0]
+    assert "dnstype=HTTPS" in rules[0]
+
+
+def test_build_ech_strip_rules_excludes_a_non_bump_eligible_device(conn):
+    """A device not bump_enabled (or not yet authenticated) never has
+    its traffic routed through Squid for this domain -- withholding its
+    ECH/HTTP-3 hint would be pure downside for it, zero benefit."""
+    _insert_domain(conn, "crunchyroll\\.com", is_global=True)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False)
+
+    assert adguard_sync.build_ech_strip_rules(conn) == []
+
+
+def test_build_ech_strip_rules_excludes_a_bump_enabled_device_not_yet_authenticated(conn):
+    _insert_domain(conn, "crunchyroll\\.com", is_global=True)
+    _insert_device_with_binding(
+        conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=False
+    )
+
+    assert adguard_sync.build_ech_strip_rules(conn) == []
+
+
+def test_build_ech_strip_rules_excludes_a_bump_eligible_device_not_assigned_a_non_global_domain(conn):
+    _insert_domain(conn, "example\\.com", is_global=False)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True)
+
+    assert adguard_sync.build_ech_strip_rules(conn) == []
+
+
+def test_build_ech_strip_rules_covers_a_bump_eligible_device_once_assigned(conn):
+    domain_id = _insert_domain(conn, "example\\.com", is_global=False)
+    device_id = _insert_device_with_binding(
+        conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True,
+    )
+    conn.execute("INSERT INTO device_domains (device_id, domain_id) VALUES (?, ?)", (device_id, domain_id))
+    conn.commit()
+
+    rules = adguard_sync.build_ech_strip_rules(conn)
+
+    assert len(rules) == 1
+    assert "192.168.1.10" in rules[0]
+
+
+def test_build_ech_strip_rules_ignores_splice_mode_domains(conn):
+    _insert_domain(conn, "a-splice-domain\\.com", mode="splice", is_global=True)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True)
+
+    assert adguard_sync.build_ech_strip_rules(conn) == []
+
+
+def test_build_ech_strip_rules_excludes_an_ignored_device(conn):
+    _insert_domain(conn, "crunchyroll\\.com", is_global=True)
+    _insert_device_with_binding(
+        conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True, ignored=True,
+    )
+
+    assert adguard_sync.build_ech_strip_rules(conn) == []
+
+
+def test_build_ech_strip_rules_emits_one_rule_per_bump_domain(conn):
+    _insert_domain(conn, "crunchyroll\\.com", is_global=True)
+    _insert_domain(conn, "asurascans\\.com", is_global=True)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True)
+
+    rules = adguard_sync.build_ech_strip_rules(conn)
+
+    assert len(rules) == 2
+    assert any("crunchyroll" in r for r in rules)
+    assert any("asurascans" in r for r in rules)
+
+
+def test_build_ech_strip_rules_accepts_a_shared_eligible_devices_list(conn):
+    """Same efficiency contract as build_rules()/build_splice_deny_rules()
+    -- sync_once() fetches eligible_devices once and threads it through
+    every builder, this one included."""
+    _insert_domain(conn, "crunchyroll\\.com", is_global=True)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True)
+
+    shared = adguard_sync._fetch_eligible_devices(conn)
+    rules = adguard_sync.build_ech_strip_rules(conn, eligible_devices=shared)
+
+    assert len(rules) == 1
+    assert "192.168.1.10" in rules[0]
+
+
+# ============================================================
 # build_splice_deny_rules (added 2026-08-31, see its own docstring / GH #9)
 # ============================================================
 
@@ -356,6 +479,28 @@ def test_sync_once_pushes_both_bump_and_splice_rule_sets(conn, monkeypatch):
     assert any("crunchyroll" in r for r in managed)
     assert any("example" in r for r in managed)
     assert any("use-application-dns" in r for r in managed)
+
+
+def test_sync_once_includes_ech_strip_rules_for_a_bump_eligible_authorized_device(conn, monkeypatch):
+    _insert_domain(conn, "crunchyroll\\.com", mode="bump", is_global=True)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:02", "192.168.1.20", bump_enabled=True, is_authenticated=True)
+
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: [])
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_safesearch_status", lambda *a, **k: {"enabled": False})
+    pushed = {}
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: pushed.setdefault("rules", rules),
+    )
+
+    count = adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+
+    # 1 ECH-strip rule + the always-on anti-DoH baseline -- no bump
+    # hard-deny here (the device IS authorized, is_global=True), no
+    # splice-deny (no splice-mode domains configured).
+    assert count == 1 + len(adguard_sync.build_anti_doh_rules())
+    managed = pushed["rules"][1:-1]
+    assert any("192.168.1.20" in r and "dnstype=HTTPS" in r for r in managed)
 
 
 def test_sync_once_fetches_the_device_list_exactly_once(conn, monkeypatch):

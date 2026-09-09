@@ -77,6 +77,19 @@ story; `sync_once()` below still calls it every cycle as a second,
 now-redundant path for when the interception profile happens to be
 running, but the dashboard's own direct call is what actually makes it
 work by default.
+
+**ECH-strip addendum (2026-09-09, RoadMap.md item 17)**: `build_ech_strip_rules()`
+adds a FOURTH rule source to the same managed block, for `mode='bump'`
+domains specifically. Not a block/allow decision either -- it withholds
+just the HTTPS/SVCB-type DNS record (via AdGuard's `$dnstype=HTTPS`
+modifier) for exactly the devices actually authorized to reach that
+domain through Squid, so a Cloudflare-fronted domain's Encrypted Client
+Hello (which lives ONLY in that record) can't hide the real SNI from
+Squid's own bump/splice decision. See that function's own docstring for
+the full live-verified story -- an initial attempt to verify this
+appeared to fail entirely, root-caused to a race in the verification
+itself (AdGuard needs a moment to recompile its rule engine after a
+rules change), not any real limitation of AdGuard or this modifier.
 """
 from __future__ import annotations
 
@@ -413,6 +426,112 @@ def build_rules(
     )
 
 
+def _ech_strip_rule(pattern: str, client_ips: list[str]) -> str:
+    """One AdGuard rule withholding the HTTPS/SVCB-type DNS record for
+    `pattern`, scoped to `client_ips` via `$client=` -- same regex-anchor
+    convention as `_domain_rule()` above (matches Squid's own suffix-match
+    rules exactly), but `$dnstype=HTTPS` instead of a block/dnsrewrite
+    action. A/AAAA (and every other record type) for the same domain are
+    completely untouched -- only the ONE record type that carries `ech=`
+    and the HTTP/3 `alpn=` hint is withheld, so the client has nothing to
+    build an Encrypted Client Hello or a cold QUIC attempt with, and
+    falls back to a normal, visible-SNI TLS 1.3 handshake. See
+    `build_ech_strip_rules()`'s own docstring for the live-verified
+    evidence this exists to address."""
+    body = f"(?i)(?:^|\\.)(?:{pattern})$"
+    return f"/{body}/$client={','.join(client_ips)},dnstype=HTTPS"
+
+
+def build_ech_strip_rules(
+    conn: sqlite3.Connection,
+    eligible_devices: list[sqlite3.Row] | None = None,
+) -> list[str]:
+    """RoadMap.md item 17: Cloudflare-fronted `mode='bump'` domains
+    (Crunchyroll, Asurascans) publish Encrypted Client Hello (ECH) in
+    their DNS HTTPS/SVCB record -- the browser then sends a TLS
+    ClientHello whose visible SNI is a generic, shared placeholder
+    (`cloudflare-ech.com`, used by thousands of unrelated sites), with
+    the real hostname encrypted inside where Squid cannot read it.
+    Confirmed live 2026-09-09 (RoadMap.md's dated entry, with Squid's
+    OWN `access.log` literally showing `CONNECT cloudflare-ech.com:443`):
+    Squid's built-in anti-spoofing check then validates that the visible
+    SNI's hostname actually resolves to the connection's real
+    destination IP -- which it never can for a shared ECH placeholder --
+    and kills the connection with `SECURITY ALERT: Host header forgery
+    detected`, entirely inside Squid's own core TLS-bump machinery,
+    before `proxy/sni_helper.py`'s own allow/deny logic ever runs. No
+    Squid config directive relaxes this check (confirmed against Squid's
+    own release notes and current ACL documentation -- no ECH-aware ACL
+    exists at any Squid version, contrary to at least one blog's
+    inaccurate claim); this is an acknowledged, unresolved upstream
+    limitation, not something fixable on the Squid side at all.
+
+    **The fix, entirely at the DNS tier**: AdGuard's `$dnstype=HTTPS`
+    modifier withholds just the HTTPS-type record for a domain, for
+    exactly the devices this needs to apply to -- the client then has no
+    `ech=`/`alpn=` hint to build an ECH ClientHello or attempt cold
+    QUIC with at all, and falls back to a normal, visible-SNI TLS 1.3
+    handshake Squid's own `sni_helper.py` can correctly bump or splice.
+    A/AAAA answers, and every other domain, are completely untouched.
+
+    **Verified live before writing this function, not assumed from
+    documentation**: an initial attempt to verify this against the real
+    production AdGuard instance appeared to fail -- `$dnstype=HTTPS` (and
+    even AdGuard's own canonical documented `$dnstype=AAAA` example)
+    seemed to block nothing at all. Root-caused on a disposable smoke-test
+    VM (a standalone AdGuard container, isolated from this project's own
+    stack -- see RoadMap.md's dated entry), running BOTH the current
+    production AdGuard version (v0.107.79) and the newest available
+    v0.108.0 beta side by side: the real cause was a race in the
+    VERIFICATION itself, not AdGuard or this modifier -- AdGuard needs a
+    brief moment to recompile its rule engine after
+    `/control/filtering/set_rules`, and the first test round queried
+    immediately afterward, before that finished. With a short delay
+    between setting rules and querying, `$dnstype=HTTPS` correctly
+    withheld the HTTPS-type answer (`ancount=0`) while leaving the SAME
+    domain's A record fully resolved (`ancount=2`, unfiltered) -- on
+    v0.107.79 specifically, our actual pinned production version. No
+    AdGuard upgrade needed; the mechanism already works exactly as
+    documented, on the version we already run.
+
+    Deliberately mirrors `_build_domain_deny_rules()`'s own
+    authorization check (`matching.device_domain_reason()` non-None AND
+    `bump_eligible()`) but collects the ALLOWED set instead of the
+    denied one: an unauthorized device already gets no resolution at all
+    for a bump-mode domain (`build_rules()`'s own hard deny, evaluated
+    first in the same managed block), so there's nothing to strip for
+    it. A non-bump-eligible device querying the SAME domain is
+    untouched -- its traffic never reaches Squid either way, so
+    withholding its ECH/HTTP-3 hint would be pure downside (worse
+    performance, zero benefit) for a device this was never meant to
+    apply to.
+
+    Returns an empty list when there are no bump-mode domains configured
+    at all, or no eligible device is actually authorized for any of
+    them -- both legitimate "nothing to strip yet" states, not errors.
+    """
+    domains = conn.execute("SELECT pattern, id, is_global FROM domains WHERE mode = 'bump' ORDER BY id").fetchall()
+    if not domains:
+        return []
+
+    if eligible_devices is None:
+        eligible_devices = _fetch_eligible_devices(conn)
+    if not eligible_devices:
+        return []
+
+    rules = []
+    for domain in domains:
+        allowed_ips = []
+        for device in eligible_devices:
+            if not bump_eligible(device):
+                continue
+            if matching.device_domain_reason(conn, device, domain) is not None:
+                allowed_ips.append(device["ipv4_address"])
+        if allowed_ips:
+            rules.append(_ech_strip_rule(domain["pattern"], allowed_ips))
+    return rules
+
+
 def build_splice_deny_rules(
     conn: sqlite3.Connection,
     block_page_ip: str | None = None,
@@ -720,7 +839,7 @@ def sync_once(
     block still means "nothing to deny.\"
 
     Fetches the eligible-device list ONCE (2026-09-02, a real
-    efficiency gap found by code review) and shares it across all three
+    efficiency gap found by code review) and shares it across all
     device-aware builders below, instead of each independently
     re-querying and re-classifying the full device list -- see
     `_fetch_eligible_devices()`'s own docstring for the before/after."""
@@ -730,6 +849,7 @@ def sync_once(
         + build_splice_deny_rules(conn, block_page_ip, eligible_devices=eligible_devices)
         + build_category_deny_rules(conn, block_page_ip=block_page_ip, eligible_devices=eligible_devices)
         + build_anti_doh_rules()
+        + build_ech_strip_rules(conn, eligible_devices=eligible_devices)
     )
     current = adguard_client.get_custom_rules(base_url, username, password)
     preserved = _strip_managed_block(current)
