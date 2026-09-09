@@ -7425,36 +7425,44 @@ line on the Settings/Devices UI somewhere clarifying that a device
 running its own DNS-security software needs full Ignore, not just
 bypass-login, if this comes up again.
 
-**Item 23, feature request for a future round, explicitly deferred by
-the project owner ("note that while we continue testing"):** a direct
-"Add to ignore" action on the Devices list page, for both a single
-device (currently requires opening that device's own detail page to set
-Ignore) and in bulk. Note for whoever picks this up: bulk Ignore/
-Un-ignore ALREADY EXISTS today (`bulk_set_ignored_devices()`,
-`bulkDeviceIgnoreForm`/`bulkDeviceUnignoreForm`) but is tucked inside
-the collapsed "Manage" panel on the Devices page, not a top-level
-toolbar button -- worth confirming with the project owner whether they
-just didn't notice it there (promote it to the main toolbar row) or
-specifically want something more prominent/different from what's
-already built. The genuinely missing piece is the PER-ROW quick action
--- today's per-row inline actions are bypass-login/pause-resume/delete
-only, no direct Ignore toggle without opening the device.
+**Item 23: DONE (built 2026-09-09, next session).** A direct "Add to
+ignore" action on the Devices list page, for both a single device
+(previously required opening that device's own detail page) and in
+bulk. Two real gaps closed: (1) a per-row quick Ignore/Un-ignore toggle
+-- both the "Devices awaiting login" card and the main Devices table
+now have an inline Ignore button per row (Un-ignore instead, once
+ignored), reusing the existing `bulk_set_ignored_devices()` route with
+a single-element `device_ids` list rather than a new backend route.
+Deliberately hidden (not shown as either Ignore or Un-ignore) for a
+device that's only effectively ignored via its GROUP being in Ignore
+mode (`d.group_ignored` true, `d.ignored` itself still 0) -- toggling
+that device's own flag wouldn't change its actual, group-driven state,
+so showing a button there would look actionable while doing nothing
+real. (2) The bulk Ignore/Un-ignore buttons were already built
+(`bulkDeviceIgnoreForm`/`bulkDeviceUnignoreForm`) but tucked inside the
+collapsed "Manage" panel -- promoted to the main toolbar row alongside
+Enable/Disable/Delete, matching the project owner's actual ask ("I want
+that option for bulk settings too") rather than assuming they'd missed
+it. 8 new tests in `tests/test_dashboard.py`.
 
-**Item 24, feature request for a future round, explicitly deferred by
-the project owner ("note that for the future"):** the "Shift mode now"
-action (Phase 12, `add_schedule_override()`/`SCHEDULES_BODY`'s own
-"Shift mode now" card) only exists on the Schedules page today. The
-project owner wants to trigger it directly from a User's own detail
-page too, not just from Schedules. Note for whoever picks this up:
-`user_detail()` already computes and DISPLAYS a user's active override
-read-only ("reflects any active 'Shift mode now' override, not just the
-clock") -- the missing piece is the actual action form. Since this would
-live on a specific user's own page, the target is already known (no
-need for the Schedules page's own who-picker combobox) -- just needs a
-mode-schedule picker (`mode_schedules`, already computed for
-`schedules()`, would need computing for `user_detail()` too) + duration,
-posting to the same existing `add_schedule_override()` route with
-`target=f"user:{user_id}"` pre-filled.
+**Item 24: DONE (built 2026-09-09, next session).** "Shift mode now"
+(Phase 12) now reachable directly from a User's own detail page, not
+just Schedules. Since the page already knows its one target, there's no
+combobox -- only mode schedules that ALREADY target this user (globally,
+or explicitly via `schedule_users`) are offered, unlike the Schedules
+page's own picker (which lets you pick any user/group/device and only
+validates the combination at submit time) -- avoids a click that would
+just bounce back with `add_schedule_override()`'s own "isn't assigned
+yet" error. Also added, beyond the original ask: an "Active override"
+card showing the user's own currently-forced schedule with a Cancel
+button, shown INSTEAD of the Shift-mode-now form while one is active
+(never both at once) -- `user_detail()` already computed and displayed
+this read-only before, but had no way to act on it from this page.
+`add_schedule_override()`/`cancel_schedule_override()` both gained a
+`redirect_to`/`user_id` pair (same convention `pause_device()`/
+`resume_device()` already use) so acting from the User page returns
+there instead of bouncing to Schedules. 6 new tests in
+`tests/test_dashboard.py`.
 
 **Session closed 2026-09-09**: `controller`/`nftables-manager`/
 `arp-worker` stopped (`docker compose stop`), Bark Home handed the

@@ -1405,6 +1405,53 @@ USER_DETAIL_BODY = """
 <p class="hint">Computed live from <a href="{{ url_for('schedules') }}">Schedules</a> assigned to {{ u.display_name }} (directly, or Everyone) -- reflects any active "Shift mode now" override, not just the clock.</p>
 </div>
 
+{% if active_override_for_user %}
+<div class="card">
+<h2>Active override</h2>
+<p class="hint">
+  <strong>{{ active_override_for_user.schedule_name }}</strong> is forced
+  active until <strong>{{ active_override_for_user.expires_at }}</strong> --
+  every other mode schedule that would normally apply to
+  {{ u.display_name }} is suppressed until then.
+</p>
+<form method="post" action="{{ url_for('cancel_schedule_override') }}">
+  <input type="hidden" name="override_id" value="{{ active_override_for_user.id }}">
+  <input type="hidden" name="redirect_to" value="user_detail">
+  <input type="hidden" name="user_id" value="{{ u.id }}">
+  <button class="danger small" type="submit">Cancel override</button>
+</form>
+</div>
+{% elif mode_schedules_for_user %}
+<div class="card">
+<h2>Shift mode now</h2>
+<p class="hint">
+  Force a mode schedule active for {{ u.display_name }} right now, for a
+  set amount of time -- e.g. school let out early, so give Free Time now
+  instead of waiting for School's window to end. Every other mode
+  schedule normally targeting {{ u.display_name }} is suppressed for the
+  duration.
+</p>
+<form class="add-form" method="post" action="{{ url_for('add_schedule_override') }}" style="flex-wrap:wrap;">
+  <input type="hidden" name="target" value="user:{{ u.id }}">
+  <input type="hidden" name="redirect_to" value="user_detail">
+  <input type="hidden" name="user_id" value="{{ u.id }}">
+  <select name="schedule_id">
+    {% for s in mode_schedules_for_user %}
+    <option value="{{ s.id }}">{{ s.name }}</option>
+    {% endfor %}
+  </select>
+  <input type="number" name="duration_minutes" value="120" min="1" max="1440" style="width:6rem;">
+  <span class="hint" style="margin:0;">minutes</span>
+  <span style="display:flex; gap:.3rem;">
+    {% for label, mins in [('30m', 30), ('1h', 60), ('2h', 120), ('4h', 240), ('rest of day', 1440)] %}
+    <button class="btn small" type="button" onclick="this.form.duration_minutes.value={{ mins }}">{{ label }}</button>
+    {% endfor %}
+  </span>
+  <button class="add" type="submit">Shift now</button>
+</form>
+</div>
+{% endif %}
+
 <div class="card">
 <h2>Pause the internet</h2>
 {% if user_devices %}
@@ -1623,12 +1670,34 @@ def user_detail(user_id: int):
         "SELECT DISTINCT series_id AS id, series_name FROM user_shows "
         "WHERE user_id != ? ORDER BY series_name", (user_id,)
     ).fetchall()
+    # RoadMap.md item 24 (2026-09-09, project owner's explicit request):
+    # "Shift mode now" directly from this page, not just Schedules'. Only
+    # offers a mode schedule that actually already targets THIS user
+    # (globally, or explicitly) -- unlike the Schedules page's own picker
+    # (which lets you pick ANY user/group/device, and only validates the
+    # combination server-side at submit time), this page already knows
+    # its one target, so there's no reason to offer a choice that would
+    # just bounce back with add_schedule_override()'s own "isn't assigned
+    # yet" error.
+    mode_schedules_for_user = conn.execute(
+        "SELECT s.* FROM schedules s WHERE s.is_mode = 1 AND (s.is_global = 1 OR EXISTS ("
+        "SELECT 1 FROM schedule_users su WHERE su.schedule_id = s.id AND su.user_id = ?"
+        ")) ORDER BY s.name",
+        (user_id,),
+    ).fetchall()
+    active_override_for_user = conn.execute(
+        "SELECT so.*, s.name AS schedule_name FROM schedule_overrides so "
+        "JOIN schedules s ON s.id = so.schedule_id "
+        "WHERE so.user_id = ? AND so.expires_at > ?",
+        (user_id, db.now_iso()),
+    ).fetchone()
     body = render_template_string(
         USER_DETAIL_BODY, u=u, assigned_domains=assigned_domains, shows=shows,
         user_devices=user_devices, paused_device_count=paused_device_count,
         assigned_devices=assigned_devices,
         active_schedules=active_schedules, global_domains=_global_domains(conn),
         all_approved_shows=_entity_combo(all_approved_shows, lambda s: s["series_name"]),
+        mode_schedules_for_user=mode_schedules_for_user, active_override_for_user=active_override_for_user,
         domain_count=domain_count, domains_page=domains_page, domains_per_page=domains_per_page,
         domains_total_pages=domains_total_pages, domains_page_size_options=LIST_PAGE_SIZE_OPTIONS,
         domains_range_start=0 if domain_count == 0 else (domains_page - 1) * domains_per_page + 1,
@@ -2876,8 +2945,9 @@ DEVICES_BODY = """
   Seen on the network but not yet assigned -- gated to DNS-only access
   until someone logs in via the captive portal, or an admin acts below.
   Use <strong>Bypass</strong> for a device that will never log in on its
-  own (a TV, a thermostat), or <strong>Manage</strong> to assign it to a
-  kid or group directly instead of waiting on a login.
+  own but should still get normal filtering, <strong>Ignore</strong> for
+  one that should never be filtered at all, or <strong>Manage</strong>
+  to assign it to a kid or group directly instead of waiting on a login.
 </p>
 <div class="table-scroll">
 <table>
@@ -2904,6 +2974,12 @@ DEVICES_BODY = """
       <form class="inline" method="post" action="{{ url_for('bypass_login_device') }}">
         <input type="hidden" name="device_id" value="{{ d.id }}">
         <button class="btn small" type="submit" title="Let this device online without ever needing to log in">Bypass</button>
+      </form>
+      <form class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}"
+            onsubmit="return confirm('Ignore this device? It will never be filtered, and it will no longer show up in this list.');">
+        <input type="hidden" name="device_ids" value="{{ d.id }}">
+        <input type="hidden" name="ignored" value="1">
+        <button class="btn small" type="submit" title="Never filter this device at all -- a TV, thermostat, or anything else that will never log in">Ignore</button>
       </form>
       <form class="inline" method="post" action="{{ url_for('dismiss_pending_device') }}">
         <input type="hidden" name="device_id" value="{{ d.id }}">
@@ -2998,6 +3074,16 @@ DEVICES_BODY = """
         onsubmit="return confirm('Delete every checked device? This cannot be undone.');">
     <button class="danger small" type="submit" disabled>Delete</button>
   </form>
+  <span class="toolbar-sep"></span>
+  <form id="bulkDeviceIgnoreForm" class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}"
+        onsubmit="return confirm('Set every checked device to Ignore (never filtered)? This clears any user/group assignment on them.');">
+    <input type="hidden" name="ignored" value="1">
+    <button class="btn small" type="submit" disabled title="Never filter any checked device -- clears any user/group assignment">Ignore</button>
+  </form>
+  <form id="bulkDeviceUnignoreForm" class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}">
+    <input type="hidden" name="ignored" value="">
+    <button class="btn small" type="submit" disabled title="Stop ignoring every checked device -- each becomes Unassigned">Un-ignore</button>
+  </form>
   <button class="btn small" type="button" id="deviceBulkManageToggle" disabled>Manage</button>
   <span class="hint" id="deviceBulkCount" style="margin:0;">Check devices below to act on several at once.</span>
 </div>
@@ -3011,16 +3097,6 @@ DEVICES_BODY = """
     <button class="add small" type="submit" {{ 'disabled' if not groups }}>Apply</button>
   </form>
   {% if not groups %}<p class="hint">No groups yet -- add one above first.</p>{% endif %}
-  <p class="hint" style="margin:.6rem 0 .3rem;">Or set Ignore status directly (clears any user/group assignment, same as picking Ignore on a single device's own Manage page):</p>
-  <form id="bulkDeviceIgnoreForm" class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}"
-        onsubmit="return confirm('Set every checked device to Ignore (never filtered)? This clears any user/group assignment on them.');">
-    <input type="hidden" name="ignored" value="1">
-    <button class="danger small" type="submit">Set to Ignore</button>
-  </form>
-  <form id="bulkDeviceUnignoreForm" class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}">
-    <input type="hidden" name="ignored" value="">
-    <button class="btn small" type="submit">Remove Ignore</button>
-  </form>
 </div>
 {% endif %}
 {% if any_devices_exist %}
@@ -3087,6 +3163,20 @@ DEVICES_BODY = """
       <form class="inline" method="post" action="{{ url_for('bypass_login_device') }}">
         <input type="hidden" name="device_id" value="{{ d.id }}">
         <button class="btn small" type="submit" title="Let this device online without ever needing to log in">Bypass</button>
+      </form>
+      {% endif %}
+      {% if d.ignored %}
+      <form class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}">
+        <input type="hidden" name="device_ids" value="{{ d.id }}">
+        <input type="hidden" name="ignored" value="">
+        <button class="btn small" type="submit" title="Stop ignoring this device -- it becomes Unassigned">Un-ignore</button>
+      </form>
+      {% elif not d.group_ignored %}
+      <form class="inline" method="post" action="{{ url_for('bulk_set_ignored_devices') }}"
+            onsubmit="return confirm('Ignore this device? It will never be filtered, and any user/group assignment will be cleared.');">
+        <input type="hidden" name="device_ids" value="{{ d.id }}">
+        <input type="hidden" name="ignored" value="1">
+        <button class="btn small" type="submit" title="Never filter this device at all -- a TV, thermostat, or anything else that will never log in">Ignore</button>
       </form>
       {% endif %}
       {% if not effective_ignored %}
@@ -4836,34 +4926,46 @@ def add_schedule_override():
     the window. See common/schedule_eval.py's schedule_is_active_for_device()
     for the enforcement side; this route only ever writes one row to
     schedule_overrides. Deliberately not a saved/reusable preset -- see
-    RoadMap.md's design discussion."""
+    RoadMap.md's design discussion.
+
+    RoadMap.md item 24 (2026-09-09, project owner's explicit request:
+    "I need the ability to do a shift schedule from the user page (not
+    just the schedule page)"): also reachable from a User's own detail
+    page now, which already knows its target (no combobox needed there,
+    just a hidden `target=user:<id>`) -- `redirect_to`/`user_id` (a
+    SEPARATE field from the target's own encoded user id, present even
+    when target parsing fails validation below) send the flash back to
+    that page instead of the Schedules page, same `redirect_to`
+    convention `pause_device()`/`resume_device()` already use."""
     schedule_id = request.form.get("schedule_id", "")
     target = request.form.get("target", "")
+    redirect_to = request.form.get("redirect_to", "schedules")
+    redirect_user_id = request.form.get("user_id", "")
     try:
         minutes = int(request.form.get("duration_minutes", ""))
     except ValueError:
         minutes = 0
 
+    def _result(message: str, *, error: bool = False):
+        if redirect_to == "user_detail" and redirect_user_id:
+            return flash_redirect("user_detail", message, error=error, user_id=redirect_user_id)
+        return flash_redirect("schedules", message, error=error)
+
     conn = get_db()
     schedule = conn.execute("SELECT * FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
     if schedule is None:
-        return flash_redirect("schedules", "That schedule no longer exists.", error=True)
+        return _result("That schedule no longer exists.", error=True)
     if not schedule["is_mode"]:
-        return flash_redirect(
-            "schedules",
-            f'"{schedule["name"]}" isn\'t a mode schedule -- check "Mode schedule" on it first.',
-            error=True,
-        )
+        return _result(f'"{schedule["name"]}" isn\'t a mode schedule -- check "Mode schedule" on it first.', error=True)
     if minutes <= 0 or minutes > 1440:
-        return flash_redirect("schedules", "Pick a duration between 1 minute and 24 hours.", error=True)
+        return _result("Pick a duration between 1 minute and 24 hours.", error=True)
 
     user_id, group_id, device_id = _parse_override_target(target)
     if user_id is None and group_id is None and device_id is None:
-        return flash_redirect("schedules", "Pick who this applies to.", error=True)
+        return _result("Pick who this applies to.", error=True)
 
     if not _schedule_targets_selection(conn, schedule_id, user_id=user_id, group_id=group_id, device_id=device_id):
-        return flash_redirect(
-            "schedules",
+        return _result(
             f'"{schedule["name"]}" isn\'t assigned to that kid/group/device yet -- '
             "assign it from the schedule's Manage page first.",
             error=True,
@@ -4877,19 +4979,26 @@ def add_schedule_override():
         (schedule_id, user_id, group_id, device_id, db.now_iso(), expires_at),
     )
     conn.commit()
-    return flash_redirect(
-        "schedules", f'"{schedule["name"]}" forced active for {minutes} minute{"s" if minutes != 1 else ""}.'
-    )
+    return _result(f'"{schedule["name"]}" forced active for {minutes} minute{"s" if minutes != 1 else ""}.')
 
 
 @app.route("/schedules/override/cancel", methods=["POST"])
 @require_admin
 def cancel_schedule_override():
+    """See add_schedule_override()'s own docstring for the redirect_to/
+    user_id convention -- same reasoning here, so cancelling an override
+    from the User detail page's own "Active override" card returns there
+    instead of to Schedules."""
     override_id = request.form.get("override_id", "")
+    redirect_to = request.form.get("redirect_to", "schedules")
+    redirect_user_id = request.form.get("user_id", "")
     conn = get_db()
     conn.execute("DELETE FROM schedule_overrides WHERE id = ?", (override_id,))
     conn.commit()
-    return flash_redirect("schedules", "Override cancelled -- normal schedule resumed.")
+    message = "Override cancelled -- normal schedule resumed."
+    if redirect_to == "user_detail" and redirect_user_id:
+        return flash_redirect("user_detail", message, user_id=redirect_user_id)
+    return flash_redirect("schedules", message)
 
 
 def _failed_login_attempts(conn, mac_address: str) -> dict | None:

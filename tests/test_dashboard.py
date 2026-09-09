@@ -4272,6 +4272,109 @@ def test_devices_page_manage_panel_has_ignore_bulk_buttons(client, db_conn):
 
 
 # ============================================================
+# RoadMap.md item 23 (2026-09-09, project owner's explicit request: "I
+# realized I want to add an 'Add to ignore' option on the devices main
+# page without having to directly open the individual device. I want
+# that option for bulk settings too."): a per-row quick Ignore/Un-ignore
+# action (previously only reachable by opening a device's own detail
+# page), and the bulk Ignore/Un-ignore buttons promoted from the
+# collapsed "Manage" panel to the main toolbar row, alongside
+# Enable/Disable/Delete.
+# ============================================================
+
+def test_bulk_ignore_buttons_are_in_the_main_toolbar_not_the_manage_panel(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:70"}, headers=_auth_header())
+    resp = client.get("/devices", headers=_auth_header())
+    body = resp.data.decode()
+    toolbar = body[body.index('id="deviceBulkToolbar"'):body.index('id="deviceBulkManagePanel"')]
+    assert 'id="bulkDeviceIgnoreForm"' in toolbar
+    assert 'id="bulkDeviceUnignoreForm"' in toolbar
+
+
+def test_devices_table_row_shows_a_quick_ignore_button_for_an_unassigned_device(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:71"}, headers=_auth_header())
+    resp = client.get("/devices", headers=_auth_header())
+    body = resp.data.decode()
+    row_start = body.index("aa:bb:cc:dd:ee:71")
+    row = body[row_start:body.index("</tr>", row_start)]
+    assert ">Ignore<" in row
+
+
+def test_devices_table_quick_ignore_button_actually_ignores_the_device(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:72"}, headers=_auth_header())
+    device_id = db_conn.execute("SELECT id FROM devices").fetchone()["id"]
+
+    resp = client.post(
+        "/devices/bulk-ignore", data={"device_ids": [str(device_id)], "ignored": "1"}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    assert db_conn.execute("SELECT ignored FROM devices WHERE id = ?", (device_id,)).fetchone()["ignored"] == 1
+
+
+def test_devices_table_row_shows_un_ignore_for_an_already_ignored_device(client, db_conn):
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:73", "assignment": "ignored"}, headers=_auth_header()
+    )
+    resp = client.get("/devices", headers=_auth_header())
+    body = resp.data.decode()
+    row_start = body.index("aa:bb:cc:dd:ee:73")
+    row = body[row_start:body.index("</tr>", row_start)]
+    assert ">Un-ignore<" in row
+
+
+def test_devices_table_row_hides_the_quick_toggle_for_a_group_ignored_device(client, db_conn):
+    """A device that's only effectively ignored because its GROUP is in
+    Ignore mode (devices.ignored itself still 0) must not show a
+    misleading per-row "Ignore" button that would look actionable but
+    change nothing real -- see common/policy_class.py's own distinction
+    between a device's own `ignored` flag and its group's."""
+    client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    client.post(
+        "/groups/ignored", data={"group_id": group_id, "ignored": "1"}, headers=_auth_header()
+    )
+    client.post(
+        "/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:74", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+
+    resp = client.get("/devices", headers=_auth_header())
+    body = resp.data.decode()
+    # ">Ignore<"/">Un-ignore<" also appear in the page's own bulk-toolbar
+    # buttons regardless of any row's state -- isolate this device's own
+    # table row before asserting, rather than searching the whole page.
+    row_start = body.index("aa:bb:cc:dd:ee:74")
+    row = body[row_start:body.index("</tr>", row_start)]
+    assert ">Ignore<" not in row
+    assert ">Un-ignore<" not in row
+
+
+def test_pending_devices_card_shows_a_quick_ignore_button(client, db_conn):
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:75")
+    resp = client.get("/devices", headers=_auth_header())
+    body = resp.data.decode()
+    assert "Devices awaiting login" in body
+    # Scope to the pending-devices card itself (up to the next top-level
+    # card, "Groups") -- the main Devices table's own toolbar further
+    # down the page also always has an "Ignore" button, regardless of
+    # this device.
+    card = body[body.index("Devices awaiting login"):body.index('<h2>Groups')]
+    assert ">Ignore<" in card
+
+
+def test_pending_devices_card_quick_ignore_button_actually_ignores_it(client, db_conn):
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:76")
+
+    resp = client.post(
+        "/devices/bulk-ignore", data={"device_ids": [str(device_id)], "ignored": "1"}, headers=_auth_header()
+    )
+
+    assert resp.status_code == 302
+    assert db_conn.execute("SELECT ignored FROM devices WHERE id = ?", (device_id,)).fetchone()["ignored"] == 1
+
+
+# ============================================================
 # Devices page pagination -- added 2026-09-07, project owner's explicit
 # request ("check the devices... page for the same issues... use the
 # page-size picker with the prev/next configuration"), same reasoning as
@@ -6447,6 +6550,125 @@ def test_cancel_schedule_override_removes_it(client, db_conn):
 
     resp = client.post("/schedules/override/cancel", data={"override_id": override_id}, headers=_auth_header())
     assert resp.status_code == 302
+    assert db_conn.execute("SELECT * FROM schedule_overrides WHERE id = ?", (override_id,)).fetchone() is None
+
+
+# ============================================================
+# RoadMap.md item 24 (2026-09-09, project owner's explicit request: "I
+# need the ability to do a shift schedule from the user page (not just
+# the schedule page)"): "Shift mode now" reachable directly from a
+# User's own detail page.
+# ============================================================
+
+def test_user_detail_shows_shift_mode_now_for_a_global_mode_schedule(client, db_conn):
+    _add_mode_schedule(client, db_conn, "Free Time")
+    client.post("/users/add", data={"username": "kid_shift1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid_shift1'").fetchone()["id"]
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    # ">Shift mode now<" (the card heading), not the bare phrase -- an
+    # unrelated hint on this same page ("...reflects any active 'Shift
+    # mode now' override...") always mentions it too, regardless of
+    # whether this card renders.
+    assert b">Shift mode now<" in resp.data
+    assert f'value="user:{user_id}"'.encode() in resp.data
+
+
+def test_user_detail_omits_shift_mode_now_when_no_mode_schedule_targets_this_user(client, db_conn):
+    _add_mode_schedule(client, db_conn, "Free Time", is_global=False)
+    client.post("/users/add", data={"username": "kid_shift2", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid_shift2'").fetchone()["id"]
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert b">Shift mode now<" not in resp.data
+
+
+def test_user_detail_offers_a_mode_schedule_explicitly_assigned_to_this_user(client, db_conn):
+    schedule_id = _add_mode_schedule(client, db_conn, "Free Time", is_global=False)
+    client.post("/users/add", data={"username": "kid_shift3", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid_shift3'").fetchone()["id"]
+    client.post(
+        "/schedules/update",
+        data={
+            "schedule_id": schedule_id, "days": ["mon"], "start_time": "00:00", "end_time": "23:59",
+            "time_zone": "UTC", "is_mode": "on", "user_ids": [str(user_id)],
+        },
+        headers=_auth_header(),
+    )
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert b">Shift mode now<" in resp.data
+
+
+def test_shift_mode_now_from_user_page_creates_the_override_and_redirects_back(client, db_conn):
+    schedule_id = _add_mode_schedule(client, db_conn, "Free Time")
+    client.post("/users/add", data={"username": "kid_shift4", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid_shift4'").fetchone()["id"]
+
+    resp = client.post(
+        "/schedules/override",
+        data={
+            "schedule_id": schedule_id, "target": f"user:{user_id}", "duration_minutes": "60",
+            "redirect_to": "user_detail", "user_id": user_id,
+        },
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert f"/users/{user_id}" in resp.headers["Location"]
+    assert db_conn.execute(
+        "SELECT * FROM schedule_overrides WHERE schedule_id = ? AND user_id = ?", (schedule_id, user_id)
+    ).fetchone() is not None
+
+
+def test_shift_mode_now_from_user_page_error_also_redirects_back_not_to_schedules(client, db_conn):
+    client.post("/users/add", data={"username": "kid_shift5", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid_shift5'").fetchone()["id"]
+
+    resp = client.post(
+        "/schedules/override",
+        data={
+            "schedule_id": "999999", "target": f"user:{user_id}", "duration_minutes": "60",
+            "redirect_to": "user_detail", "user_id": user_id,
+        },
+        headers=_auth_header(),
+    )
+
+    assert "error=1" in resp.headers["Location"]
+    assert f"/users/{user_id}" in resp.headers["Location"]
+
+
+def test_user_detail_shows_active_override_and_lets_it_be_cancelled(client, db_conn):
+    schedule_id = _add_mode_schedule(client, db_conn, "Free Time")
+    client.post("/users/add", data={"username": "kid_shift6", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid_shift6'").fetchone()["id"]
+    client.post(
+        "/schedules/override",
+        data={"schedule_id": schedule_id, "target": f"user:{user_id}", "duration_minutes": "60"},
+        headers=_auth_header(),
+    )
+    override_id = db_conn.execute(
+        "SELECT id FROM schedule_overrides WHERE schedule_id = ? AND user_id = ?", (schedule_id, user_id)
+    ).fetchone()["id"]
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+    assert b"Active override" in resp.data
+    assert b"Cancel override" in resp.data
+    # The "Shift mode now" form must not ALSO show while an override is
+    # already active for this user -- one or the other, never both.
+    assert b">Shift mode now<" not in resp.data
+
+    cancel_resp = client.post(
+        "/schedules/override/cancel",
+        data={"override_id": override_id, "redirect_to": "user_detail", "user_id": user_id},
+        headers=_auth_header(),
+    )
+    assert cancel_resp.status_code == 302
+    assert f"/users/{user_id}" in cancel_resp.headers["Location"]
     assert db_conn.execute("SELECT * FROM schedule_overrides WHERE id = ?", (override_id,)).fetchone() is None
 
 
