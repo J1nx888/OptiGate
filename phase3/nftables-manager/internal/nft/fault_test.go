@@ -329,6 +329,47 @@ func TestBaselineRules_MarkForwardableTraffic(t *testing.T) {
 	}
 }
 
+// TestEnsureBaseline_PrunesLegacyRenamedTable covers the cleanup for
+// the bug found live 2026-09-10: a pre-rename version of this binary
+// left an `inet parental_proxy` table in the kernel, registered at the
+// same prerouting/dstnat hook as the current `inet optigate` table, with
+// stale device-set membership that silently shadowed the live policy.
+// EnsureBaseline must delete every legacyTableNames table before
+// building the current one.
+func TestEnsureBaseline_PrunesLegacyRenamedTable(t *testing.T) {
+	ctx := context.Background()
+	optigateFake := knftables.NewFake(knftables.InetFamily, "optigate")
+	legacyFake := knftables.NewFake(knftables.InetFamily, "parental_proxy")
+
+	// Stand up the legacy table the way the old binary would have.
+	seed := legacyFake.NewTransaction()
+	seed.Add(&knftables.Table{})
+	seed.Add(&knftables.Chain{Name: "prerouting"})
+	if err := legacyFake.Run(ctx, seed); err != nil {
+		t.Fatalf("seeding legacy table: %v", err)
+	}
+	if chains, err := legacyFake.List(ctx, "chains"); err != nil || len(chains) == 0 {
+		t.Fatalf("legacy table should exist before prune (chains=%v err=%v)", chains, err)
+	}
+
+	m := &Manager{nft: optigateFake, legacyNfts: map[string]knftables.Interface{"parental_proxy": legacyFake}}
+	if err := m.EnsureBaseline(ctx); err != nil {
+		t.Fatalf("EnsureBaseline: %v", err)
+	}
+
+	if _, err := legacyFake.List(ctx, "chains"); err == nil || !knftables.IsNotFound(err) {
+		t.Errorf("legacy table inet parental_proxy should be gone after EnsureBaseline, got err=%v", err)
+	}
+	if _, err := optigateFake.List(ctx, "chains"); err != nil {
+		t.Errorf("current table inet optigate should exist after EnsureBaseline, got err=%v", err)
+	}
+
+	// Second call is a no-op, not an error (legacy table already gone).
+	if err := m.EnsureBaseline(ctx); err != nil {
+		t.Errorf("second EnsureBaseline after prune should not error: %v", err)
+	}
+}
+
 // TestBaselineRules_DropsQUICForBumpDevices is a regression test for the
 // HTTPS-interception bypass found live 2026-09-10: a bump device played
 // non-whitelisted Crunchyroll because Chrome switched to HTTP-3 over

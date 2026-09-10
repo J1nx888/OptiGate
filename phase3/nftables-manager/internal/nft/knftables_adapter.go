@@ -38,6 +38,14 @@ type Manager struct {
 	// comment for why this single, narrow exception exists.
 	dockerUserNft knftables.Interface
 
+	// legacyNfts holds one interface per legacyTableNames entry, used
+	// only by pruneLegacyTables to delete tables a pre-rename version of
+	// this binary left behind. New() populates it; a directly-built
+	// Manager{} leaves it nil and pruneLegacyTables is then a no-op,
+	// same treatment ensureDockerUserException gives a nil
+	// dockerUserNft.
+	legacyNfts map[string]knftables.Interface
+
 	// dnsRedirectPort is the local port baselineRules() redirects
 	// port-53/853 traffic to -- AdGuard's own DNS listener. Zero value
 	// (every existing test's plain Manager{...} struct literal, and any
@@ -102,7 +110,21 @@ func New(dnsRedirectPort int, selfIP string) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open knftables interface for docker's ip filter table: %w", err)
 	}
-	return &Manager{nft: nft, dockerUserNft: dockerUserNft, dnsRedirectPort: dnsRedirectPort, selfIP: selfIP}, nil
+	legacyNfts := make(map[string]knftables.Interface, len(legacyTableNames))
+	for _, name := range legacyTableNames {
+		legacy, err := knftables.New(knftables.InetFamily, name)
+		if err != nil {
+			return nil, fmt.Errorf("open knftables interface for legacy table %q: %w", name, err)
+		}
+		legacyNfts[name] = legacy
+	}
+	return &Manager{
+		nft:             nft,
+		dockerUserNft:   dockerUserNft,
+		legacyNfts:      legacyNfts,
+		dnsRedirectPort: dnsRedirectPort,
+		selfIP:          selfIP,
+	}, nil
 }
 
 // SelfIPFromDashboardURL extracts a literal IPv4 host from a
@@ -152,6 +174,10 @@ func SelfIPFromDashboardURL(dashboardURL string) string {
 // exactly the baseline rule set instead of appending a duplicate copy
 // every restart -- verified by TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls.
 func (m *Manager) EnsureBaseline(ctx context.Context) error {
+	if err := m.pruneLegacyTables(ctx); err != nil {
+		return err
+	}
+
 	tx := m.nft.NewTransaction()
 
 	tx.Add(&knftables.Table{
@@ -187,6 +213,40 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 	}
 
 	return m.ensureDockerUserException(ctx)
+}
+
+// legacyTableNames are `inet` tables an EARLIER version of this
+// project's nftables-manager created and owned, before a rename. They
+// are NOT this version's `optigate` table and nothing here writes to
+// them any more -- but a table left in the kernel keeps enforcing its
+// last-written rules forever, and because it is registered at the same
+// prerouting/dstnat hook as the current table, its stale device-set
+// membership silently shadows the live policy (found live 2026-09-10:
+// a device still sitting in the abandoned `parental_proxy` table's
+// `unauthenticated_v4` set was being force-redirected to the captive
+// portal and to a DNS port nothing listens on any more, regardless of
+// its correct classification in the current table). pruneLegacyTables
+// deletes them on every startup.
+var legacyTableNames = []string{"parental_proxy"}
+
+// pruneLegacyTables deletes every table in legacyNfts if present,
+// tolerating "already gone" (knftables.IsNotFound) so it is a no-op on
+// every box that never ran the pre-rename version and on every restart
+// after the first cleanup. Runs before EnsureBaseline builds the
+// current table so there is never a moment where both a legacy table
+// and the current one are live at the same hook. A directly-built
+// Manager{} (legacyNfts nil -- every existing test, and any caller that
+// only needs the current table) is a no-op, same as
+// ensureDockerUserException with a nil dockerUserNft.
+func (m *Manager) pruneLegacyTables(ctx context.Context) error {
+	for name, legacy := range m.legacyNfts {
+		tx := legacy.NewTransaction()
+		tx.Delete(&knftables.Table{})
+		if err := legacy.Run(ctx, tx); err != nil && !knftables.IsNotFound(err) {
+			return fmt.Errorf("delete legacy table inet %q: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // Teardown removes the "optigate" table entirely (the Go equivalent of
