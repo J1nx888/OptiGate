@@ -6656,14 +6656,19 @@ or their explicit real-time approval in a live conversation turn.**
    Beelink, not a stale checkout) via the project's own
    `golang:1.25-bookworm` Docker-based build/test workflow -- `go build
    ./...`, `go vet ./...`, `go test ./...` all clean, plus a `gofmt -l
-   .` formatting check. Not yet deployed -- needs `docker compose build
-   nftables-manager` and the interception profile restarted to take
-   effect, and genuinely needs a live retest (the next supervised
-   window: confirm `optigate.home` shows the actual device, and that
-   Crunchyroll/YouTube-style hard-denies on a bump-enabled device no
-   longer show `SECURITY ALERT: Host header forgery detected` in
-   Squid's `access.log`) before being considered fully verified
-   end-to-end -- same pending-verification status as items 17/21.
+   .` formatting check. **Deployed 2026-09-09**: `docker compose build
+   nftables-manager` run on production (a full non-cached Go recompile
+   from the real checkout, so it also confirms the change compiles in
+   the actual image build path). Image is **inert until the
+   interception profile is next started** (Bark Home currently has the
+   network), at which point `docker compose --profile interception up
+   -d` picks it up automatically -- no further build needed. Still needs
+   a live retest in the next supervised window (confirm `optigate.home`
+   shows the actual device, and that Crunchyroll/YouTube-style
+   hard-denies on a bump-enabled device no longer show `SECURITY ALERT:
+   Host header forgery detected` in Squid's `access.log`) before being
+   considered fully verified end-to-end -- same pending-verification
+   status as items 17/21.
 8. **The "this page is blocked" message doesn't display for any
    blocked page.** User's own hypothesis, worth taking seriously: this
    could be an SSL/TLS limitation, not a bug in the block-page code
@@ -7343,11 +7348,14 @@ device once properly assigned, ignores splice-mode domains, one rule per
 bump domain, accepts a shared `eligible_devices` list, and a full
 `sync_once()` integration check that the ECH-strip rule for an
 authorized device actually appears in the pushed rule set). Full suite
-green. Not yet deployed -- needs `docker compose build controller`;
-since the interception profile is currently off (Bark Home has the
-network), the rebuilt image is inert until the next live-test window,
-where the actual end-to-end fix (Crunchyroll/Asurascans successfully
-bumped) still needs a real confirmation, same status as item 21.
+green. **Deployed 2026-09-09**: `docker compose build controller` run
+on production. Image is **inert until the interception profile is next
+started** (Bark Home currently has the network) -- `docker compose
+--profile interception up -d` picks it up automatically, no further
+build needed. The actual end-to-end fix (Crunchyroll/Asurascans
+successfully bumped, no more `NONE_NONE/409` in Squid's `access.log`)
+still needs a real confirmation in the next supervised window, same
+status as items 7/21.
 
 **Item 18 (confirms item 7 is still open, doesn't newly break
 anything): `optigate.home` shows only the box's own IP
@@ -7397,10 +7405,11 @@ two repair-loop ticks. 4 new tests in
 recovers within the retry budget on both read and write, a persistent
 one still raises `AdGuardConfigSyncError` after exhausting retries, and
 a genuinely missing file fails immediately with no retry delay at all).
-Not yet deployed live -- needs `docker compose build adguard dashboard`
-and a restart of both containers to take effect; the `entrypoint.sh`
-half specifically needs `adguard` itself restarted, not just rebuilt,
-since the fix lives in its own startup script. **Also means the "one
+**Deployed live 2026-09-09**: `adguard` and `dashboard` both rebuilt
+and restarted on production (the `entrypoint.sh` half needed `adguard`
+itself restarted, not just rebuilt, since the fix lives in its startup
+script -- done). Confirmed running: `adguard` back up cleanly, the
+`_repair_loop` re-applying the grant every 5s. **Also means the "one
 credential to remember" invariant this project believed it had
 (2026-09-07's unification work) has probably not actually held for any
 password change since whatever first triggered AdGuard's own mid-uptime
@@ -7438,7 +7447,10 @@ browser-specific edge cases. 4 new/rewritten tests in
 `tests/test_dashboard.py` (reachable with zero credentials, explains the
 real step, doesn't even look at a `logout`/`logout` credential if one is
 still sent, and the sidebar's own link is checked to never again embed
-a `logout:logout@` pair). Not yet deployed live.
+a `logout:logout@` pair). **Deployed live 2026-09-09**: `dashboard`
+rebuilt and restarted on production; `curl` to `/logout` with no
+credentials confirmed to return `200` (the page is reachable without
+being logged in, as intended).
 
 **Two lockout passwords set live during recovery** (both later replaced
 by the project owner's own choice, per instruction after each): the
@@ -7556,12 +7568,15 @@ neither restrictive set changed at all. Verified against the real
 edited source (scp'd to the Beelink, not a stale checkout) via the
 project's own `golang:1.25-bookworm` Docker-based build/test workflow --
 `go build ./...`, `go vet ./...`, `go test ./...` all clean, plus a
-`gofmt -l .` formatting check. Not yet deployed -- needs
-`docker compose build nftables-manager` and the interception profile
-restarted to take effect, and genuinely needs a live retest (the exact
-Echo power-cycle scenario, this time WITHOUT power-cycling, to confirm
-the flush alone now cuts it off) before being considered fully verified
-end-to-end.
+`gofmt -l .` formatting check. **Deployed 2026-09-09**: `docker compose
+build nftables-manager` run on production (twice -- once for this item,
+then a fresh non-cached recompile alongside item 7). Image is **inert
+until the interception profile is next started** -- `docker compose
+--profile interception up -d` picks it up automatically, no further
+build needed. Still needs a live retest (the exact Echo power-cycle
+scenario, this time WITHOUT power-cycling, to confirm the flush alone
+now cuts it off) before being considered fully verified end-to-end --
+same pending-verification status as items 7/17.
 
 **Item 22: `bypass_login` and `ignored` are two different things, and a
 device running its own DNS-hijack-detecting security software needs the
@@ -7596,9 +7611,12 @@ user/group assignment, since the two are mutually exclusive at the UI
 level everywhere else in this project. An admin standing at a device
 like the OIG Computer laptop above can now pick Ignore on the spot
 instead of remembering to go do it from the dashboard afterward. 6 new
-tests in `tests/test_captive_portal_server.py`.
+tests in `tests/test_captive_portal_server.py`. **Deployed live
+2026-09-09** as part of the same `dashboard` rebuild/restart that
+carried items 23/25 -- no interception profile needed; live on
+production now.
 
-**Item 23: DONE (built 2026-09-09, next session).** A direct "Add to
+**Item 23: DONE (built + deployed 2026-09-09, next session).** A direct "Add to
 ignore" action on the Devices list page, for both a single device
 (previously required opening that device's own detail page) and in
 bulk. Two real gaps closed: (1) a per-row quick Ignore/Un-ignore toggle
@@ -7616,9 +7634,11 @@ real. (2) The bulk Ignore/Un-ignore buttons were already built
 collapsed "Manage" panel -- promoted to the main toolbar row alongside
 Enable/Disable/Delete, matching the project owner's actual ask ("I want
 that option for bulk settings too") rather than assuming they'd missed
-it. 8 new tests in `tests/test_dashboard.py`.
+it. 8 new tests in `tests/test_dashboard.py`. **Deployed live
+2026-09-09** (`dashboard` rebuilt + restarted on production; no
+interception profile needed).
 
-**Item 24: DONE (built 2026-09-09, next session).** "Shift mode now"
+**Item 24: DONE (built + deployed 2026-09-09, next session).** "Shift mode now"
 (Phase 12) now reachable directly from a User's own detail page, not
 just Schedules. Since the page already knows its one target, there's no
 combobox -- only mode schedules that ALREADY target this user (globally,
@@ -7635,7 +7655,8 @@ this read-only before, but had no way to act on it from this page.
 `redirect_to`/`user_id` pair (same convention `pause_device()`/
 `resume_device()` already use) so acting from the User page returns
 there instead of bouncing to Schedules. 6 new tests in
-`tests/test_dashboard.py`.
+`tests/test_dashboard.py`. **Deployed live 2026-09-09** (same
+`dashboard` rebuild/restart; no interception profile needed).
 
 **Session closed 2026-09-09**: `controller`/`nftables-manager`/
 `arp-worker` stopped (`docker compose stop`), Bark Home handed the
@@ -7715,9 +7736,51 @@ IP; attributes to the resolved device/user; falls back to the raw IP
 with no binding; advances the watermark and doesn't re-log on the next
 pass; skips malformed/answer-less entries; the `start()` loop polls
 repeatedly, survives an `AdGuardError`, and stays idle when
-`DASHBOARD_URL` isn't a plain IP). Full suite green. Deployed the same
-way the other dashboard changes this session were (rebuild + restart
-`dashboard`, no interception profile needed).
+`DASHBOARD_URL` isn't a plain IP). Full suite green. **Deployed live
+2026-09-09**: `dashboard` rebuilt + restarted on production (no
+interception profile needed). Caught one follow-on during deploy --
+`dashboard/Dockerfile` COPYs its `dashboard/*.py` modules by explicit
+name, not a glob, so the new file crashed the first rebuilt image with
+`ModuleNotFoundError`; added it to that COPY line (commit `262fcc6`)
+and redeployed. Confirmed running on production: startup log shows
+"adguard report back-fill poller started", the poller completed its
+first cycle against the real production AdGuard query log with no
+errors, and wrote its `adguard_report_sync_watermark` setting (0 rows
+back-filled so far, which is the expected healthy result while nothing
+is actively hitting a hard-deny over HTTPS).
+
+### Deployment status of everything from this session (as of 2026-09-09)
+
+Production box (`pp-beelink`, hostname `optigate-MINI-S`) is at git
+`b2011bb`. Bark Home currently has the network; only the base services
+(`dashboard`/`proxy`/`adguard`) run.
+
+**Live on production now** (base-service changes, no interception
+profile needed):
+
+| Item | Change | Container |
+|---|---|---|
+| 19a | AdGuard config permission repair loop | `adguard` (rebuilt + **restarted** -- entrypoint fix) |
+| 19b | Logout username-caching fix | `dashboard` |
+| 22 follow-up | "Ignore" on the captive-portal admin action | `dashboard` |
+| 23 | Per-row + toolbar quick-ignore on Devices | `dashboard` |
+| 24 | "Shift mode now" on the User detail page | `dashboard` |
+| 25 | HTTPS hard-deny Report-page back-fill poller | `dashboard` |
+
+**Image built on production, inert until the interception profile is
+next started** (`docker compose --profile interception up -d` picks
+them up automatically, no rebuild needed) -- each still needs a live
+end-to-end retest in the next supervised window:
+
+| Item | Change | Container | Live retest to run |
+|---|---|---|---|
+| 7 | `bump_v4` self-IP exception in the nftables redirect | `nftables-manager` | `optigate.home` shows the real device; no `SECURITY ALERT: Host header forgery detected` for a bump device's hard-denied domain |
+| 17 | AdGuard `$dnstype=HTTPS` ECH-strip rules | `controller` | Crunchyroll/Asurascans bump successfully; no `NONE_NONE/409` in Squid's `access.log` |
+| 21 | conntrack flush on device reclassification | `nftables-manager` | reclassify the Echo (`20:a1:71:9d:58:dc`) WITHOUT power-cycling; confirm the open voice connection is cut |
+
+**No deploy needed:** item 16 (rebuild alone was the fix, done), and
+the documentation commits (`341736d`, `b2011bb` -- markdown only,
+`git pull`ed to prod).
 
 ---
 
