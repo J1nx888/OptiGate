@@ -33,6 +33,20 @@ Test series that must be BLOCKED: **Black Clover `GRE50KV36`** (not approved).
    inconsistent / context-dependent; needs checking what installed the CA
    and where.)
 
+   **Retest 2026-09-10 ~17:44 (Bark VPN toggled off, bump re-enabled):**
+   the same `ERROR: failure while accepting a TLS connection` /
+   `NONE_NONE/000` hit `static.crunchyroll.com`, `metrics.crunchyroll.com`,
+   **`www.google.com`, `clients2/clients4.google.com`, `gstatic`** — a
+   broad spread of unrelated hosts, all failing the handshake identically.
+   That breadth rules out per-site pinning and rules out the VPN as the
+   cause: it's the device's Chrome not trusting the OptiGate CA, period.
+   (The Bark VPN was also *not* fully off — `screentime.bark.us` still had
+   ~80 failed tunnel attempts — so it added noise on top, but underneath,
+   blocker (a) is a plain device CA-trust problem, not CR-specific and not
+   VPN interference.) Confirmed: the fix for (a) is device-side — CA in
+   the Android **system** store, or a browser with its own trust store
+   (Firefox + imported CA), or a non-Android client.
+
 2. **`host_verify_strict` (Squid default `on`) breaks spliced multi-IP
    CDN traffic.** `cache.log` is full of
    `SECURITY ALERT: Host header forgery detected … (local IP does not
