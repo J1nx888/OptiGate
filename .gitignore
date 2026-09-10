@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .claude/
+
+# transient live-tail capture (see squid_access_live_snapshot.log for the committed point-in-time copy)
+docs/design/crunchyroll-trace-2026-09-10/squid_access_live.log
