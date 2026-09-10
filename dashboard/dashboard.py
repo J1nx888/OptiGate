@@ -7939,6 +7939,19 @@ def main() -> None:
         finally:
             _boot_settings_conn.close()
 
+        # Back-fills the Report page with DNS-tier hard-denies that never
+        # reach a logging call otherwise -- a hard-denied domain over
+        # HTTPS resolves to this box's own IP, the connection is refused
+        # on port 443 (nothing listens there by design), and nothing ever
+        # calls log_access(). This polls AdGuard's own query log for
+        # those and writes the missing rows. Same DASHBOARD_URL gate as
+        # block_page_server above (no block-page IP -> nothing to
+        # correlate). See adguard_report_sync.py's own module docstring.
+        import adguard_report_sync
+
+        adguard_report_sync.start()
+        print("adguard report back-fill poller started", file=sys.stderr, flush=True)
+
     # Phase 4 milestone 3: the captive-portal login server nftables'
     # own baseline rules have redirected unauthenticated_v4's plain-HTTP
     # traffic to since Phase 3 was designed (see

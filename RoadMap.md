@@ -7480,18 +7480,16 @@ instance of the SAME Squid forgery check (Google's own IP-coalescing
 behavior triggering it independently of any rewrite), not yet confirmed
 the same way.
 
-**Closed by item 7's DONE fix below (2026-09-09, next session), with
-one caveat**: the same self-IP exception stops Squid from ever seeing
-this connection, replacing the confusing forgery-alert kill with a
-plain connection refusal -- (a) is fixed (no more generic broken-
-connection-flavored failure specific to bump-enabled devices). (b) is
-NOT fixed by this change: a refused connection still has nothing to
-call `log_access()`, so it's still invisible to the Report page --
-that part turns out to be a pre-existing, universal limitation for
-HTTPS hard-denies on EVERY device type, not something specific to this
-bump-enabled interaction, so it's out of scope for item 7's fix and
-would need its own future RoadMap item if it becomes a priority. Not
-yet live-retested, same status as item 7 itself.
+**Both parts now addressed (2026-09-09):** (a) is closed by item 7's
+DONE fix -- the self-IP exception stops Squid from ever seeing this
+connection, replacing the confusing forgery-alert kill with the same
+plain connection refusal every non-bump device already gets. (b) is
+closed by item 25 (Follow-up work section below) -- a `dashboard`
+background poller reads AdGuard's own query log and back-fills the
+Report page's `access_log` with these DNS-tier hard-denies, which
+otherwise never reach a logging call at all over HTTPS. Neither is
+live-retested yet; item 7 needs the next supervised interception
+window, item 25 is verifiable on the always-on base stack.
 
 **Netflix (item 9's fix) and the general "unconfigured domain -> allow"
 behavior confirmed working correctly live** -- the one part of tonight's
@@ -7651,6 +7649,75 @@ session's teardown, before this fix existed). `dashboard`/`proxy`/
 Nine real findings this session (items 16-24), one already fixed live
 (the AdGuard credential resync), several needing their own design
 passes before the next test window -- see each item above for details.
+
+---
+
+## Follow-up work (2026-09-09, post-session, no live test window)
+
+### Item 25: DNS-tier hard-denies over HTTPS are invisible on the Report page
+
+Surfaced by item 20 and confirmed while fixing item 7: when
+`controller/adguard_sync.py` hard-denies a domain, it does so with an
+AdGuard `$dnsrewrite=NOERROR;A;<block_page_ip>` custom rule -- the name
+resolves to this box's own IP so `block_page_server.py` can show a
+friendly page. For **plain HTTP** that works end to end: the device's
+port-80 request lands on `block_page_server.py`'s real listener, which
+calls `logging_util.log_access()`, and the block shows on the Report
+page. For **HTTPS** it does not: nothing listens on port 443 by
+`block_page_server.py`'s own deliberate design (no cert this project's
+CA can present that an arbitrary domain's device already trusts), so the
+connection is simply refused -- and since nothing ever *accepts* it,
+nothing ever calls `log_access()`. The block works; it's just invisible
+on the Report page. Same blind spot for every device, bump-enabled or
+not. Item 7's fix does **not** address this (it only stops Squid's
+forgery-alert kill for bump devices, bringing them to parity with the
+plain-refusal every other device already gets) -- flagged there as its
+own item, this is it.
+
+**DONE (built 2026-09-09, post-session).** New
+`dashboard/adguard_report_sync.py`: a background poller (started from
+`dashboard.main()` under the same `DASHBOARD_URL` gate
+`block_page_server` already uses) that reads AdGuard's OWN query log --
+which records every DNS query it answers, including the ones served from
+one of this project's `$dnsrewrite` rules -- and for every entry whose
+answer is `block_page_ip` AND whose queried name is a `mode='bump'`/
+`'splice'` domain or a category domain this project manages (so an
+admin's own unrelated AdGuard Rewrites-list entry pointing at the same
+IP is never misattributed), writes one `access_log` "blocked" row via
+the exact same `logging_util.log_access()` every other block path uses.
+Same table, same 5-minute dedupe, `reason="dns_hard_deny"` -- the Report
+page needed zero changes. Device/user attribution reuses
+`device_identity.resolve_device()` / `resolve_user_for_device()` /
+`log_identity_fields()`, the same path the Squid helpers use; an entry
+from an IP with no active binding still logs against the raw IP with the
+existing `"(unauthenticated)"` placeholder. A persisted watermark
+(`adguard_report_sync_watermark` setting) bounds the work to new entries
+each poll.
+
+**Why `dashboard`, not `controller`:** `controller` only runs under the
+`interception` profile, which is off for most of this box's real
+operating time (Bark Home usually has the network) -- but the AdGuard
+rules persist in AdGuard's own config regardless of whether `controller`
+is running, so the blocks keep happening and something always-on has to
+observe them. `dashboard` already starts `block_page_server.py` and
+`captive_portal_server.py` as background components; this is one more.
+
+**Scope, deliberately limited:** this recovers *visibility* only, not
+the friendly-page UX -- the browser still just sees a refused connection
+on port 443. Terminating TLS there to show a real page was already
+rejected by `block_page_server.py`'s own design (a "connection not
+private" warning on every hard-denied HTTPS domain for every device is
+worse than a silent refusal). 15 new tests in
+`tests/test_adguard_report_sync.py` (writes a row for bump/splice/
+category hard-denies; ignores an ordinary allowed lookup; ignores a
+domain this project doesn't manage even when the answer IS the block
+IP; attributes to the resolved device/user; falls back to the raw IP
+with no binding; advances the watermark and doesn't re-log on the next
+pass; skips malformed/answer-less entries; the `start()` loop polls
+repeatedly, survives an `AdGuardError`, and stays idle when
+`DASHBOARD_URL` isn't a plain IP). Full suite green. Deployed the same
+way the other dashboard changes this session were (rebuild + restart
+`dashboard`, no interception profile needed).
 
 ---
 
