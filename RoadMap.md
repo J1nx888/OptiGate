@@ -7928,7 +7928,7 @@ the built image / binary):
 | Container | Carries | Notes |
 |---|---|---|
 | `controller` (`53d0686`) | AdGuard-creds-from-DB (`f5705a8`), item 13 v2fly (controller half), **off-LAN discovery guard + one-time junk purge (`2425cd2`, finding #3 controller half)** | Verified in the image: `_purge_offlan_discovery_junk` + `_resolve_adguard_credentials` in `main.py`, `import matching` + off-LAN guard in `identity.py`, `_V2FLY_ATTR_RE` in `blocklist_parser.py`. `--adguard-username/--adguard-password` removed from `docker-compose.yml`. On next start, `_purge_offlan_discovery_junk()` deletes the 2 orphan `172.17.0.2` device rows. |
-| `nftables-manager` (`548bec52`) | **QUIC/udp-443 drop for `bump_v4` devices (`3e381d0`)**, legacy `inet parental_proxy` table auto-prune on startup (`89cf895`, finding #4 fix) | Verified in the binary: the `udp dport 443 drop` rule string and the `legacy table` / `parental_proxy` prune strings are present. The QUIC drop only matches `bump_v4` members; with zero bump devices it is inert until one is added. |
+| `nftables-manager` (`548bec52`) | **QUIC/udp-443 drop for `bump_v4` devices (`3e381d0`)**, legacy `inet parental_proxy` table auto-prune on startup (`89cf895`, finding #4 fix) | Verified in the binary: the `udp dport 443 drop` rule string and the `legacy table` / `parental_proxy` prune strings are present. The QUIC drop only matches `bump_v4` members; with zero bump devices it is inert until one is added. **The QUIC-drop live check also closes finding #2** (Asurascans "loads unfiltered" was h3 riding past the un-redirected udp/443, not a bump bug -- see finding #2). |
 | `arp-worker` | unchanged | 2026-09-09 image. |
 
 **Live-verified in the 2026-09-10 window:**
@@ -8118,37 +8118,49 @@ redesign in a dedicated session, not a live quick-patch**.
      in `ANALYSIS.md` -- but (a)/(b)/(c) must land first or a perfect
      classifier still never runs.
 
-2. **Asurascans bump is path-dependent and leaky.** A deep link to an
-   approved path bumps; the site root and any non-listed path are
-   *spliced through and allowed* instead of bumped-and-denied -- the
-   opposite of the deny-by-default goal. `domains` only has
-   `asurascans.com` (id 28, `mode='bump'`, `is_global=0`); no live
-   Squid/`access_log` traffic for it at all this session, which points
-   at Asura's rebrand to **`asuracomic.net`** (not in `domains`, so
-   default-splice/allow).
+2. **~~Asurascans bump is path-dependent and leaky~~ -- diagnosed
+   2026-09-11: it's the QUIC bypass, not a bump bug. No fix of its own;
+   resolves with the staged `udp/443 drop`.** Original report: a deep
+   link to an approved path bumps; the site root and any non-listed
+   path load *unfiltered* instead of bumped-and-denied.
 
-   **Investigated 2026-09-10 -- there is no per-path bump bug.**
-   `proxy/sni_helper.py`'s `handle_bump()` keys purely on
-   `matching.find_domain(sni)["mode"] == "bump"` -- it never looks at
-   the path (it can't; nothing is decrypted yet), and squid.conf's
-   `ssl_bump bump step2 sni_bump` is ordered *before*
-   `ssl_bump splice step2 sni_splice_allowed`, first-match-wins. A real
-   `mode='bump'` domain therefore always bumps, every path. The
-   "root/non-listed paths splice through" behaviour is entirely the
-   rebrand: `asuracomic.net` has no `domains` row, so it hits
-   `handle_splice()` with `domain is None`, which (by the deliberate
-   2026-09-08 "match the DNS tier's default-allow" fix) logs
-   `unconfigured_domain` / `allowed=1` and splices it. The deep link
-   that *did* bump was still hitting the old `asurascans.com` host.
+   **The rebrand theory in the first write-up was backwards.** Checked
+   live 2026-09-11: `asurascans.com` **is** the current canonical host,
+   and **`asuracomic.net` 301-redirects to it**. Domain id 28 in prod
+   is already correct -- `pattern='asurascans.com'`, `mode='bump'`,
+   assigned to `matthew`, one `domain_paths` rule
+   (`/comics/surviving-the-game-as-a-barbarian*`). Nothing to add.
 
-   **Remaining action (owner, via the dashboard -- direct prod DB
-   writes are classifier-blocked):** confirm Asura's current host(s)
-   in a browser, then Domains -> Add `asuracomic\.net`, mode = bump
-   (mirror whatever `is_global` / user assignment `asurascans.com`
-   has). Once a real `domains` row exists, every path on it
-   bumps-and-enforces exactly like Crunchyroll. Optionally also add
-   `asura` path allow-rules if any deep paths should be permitted
-   without a per-show check.
+   **There is no per-path bump bug and no code leak.** `sni_helper.py`'s
+   `handle_bump()` keys purely on the domain's `mode` (it can't see the
+   path -- nothing is decrypted yet) and `ssl_bump bump` is ordered
+   before `ssl_bump splice`, first-match-wins, so a `mode='bump'`
+   domain bumps on every path. Once decrypted, `authz_helper.decide()`
+   sends a bump domain that has >=1 path rule straight to
+   `matching.path_allowed()`: `/comics/surviving-the-game-as-a-barbarian/...`
+   matches -> allowed; `/` and every other comic -> `path_not_allowed`
+   -> **denied**. That is exactly the deny-by-default the owner wants.
+
+   **So "not bumped, just loads" == the request never reached Squid ==
+   the QUIC/HTTP-3 bypass.** Asura is Cloudflare-fronted; Chrome
+   switches that origin to h3 after the first `Alt-Svc`, and before
+   `3e381d0` a `bump_v4` device's `udp dport 443` was not redirected --
+   so h3 traffic went straight to Cloudflare, unfiltered. Same root
+   cause as the Crunchyroll QUIC finding. The approved deep link the
+   owner opened directly went over TCP once (bumped + enforced);
+   everything after it rode the h3 connection. Compounded by the
+   intermittent CA-trust failure (finding #1a): when the bump TLS
+   accept fails, that TCP connection dies and Chrome retries over h3.
+
+   **Fix: already written.** `3e381d0`'s
+   `ip saddr @bump_v4 udp dport 443 drop` forces the browser back to
+   tcp/443, which is redirected into Squid and enforced. Staged in
+   `nftables-manager` image `548bec52`; **verify in the same next
+   interception window as items 7/17 and the QUIC-drop live check.**
+   Optional, low value: add `asuracomic\.net` as a second bump domain
+   -- but it only ever serves a 301 to `asurascans.com`, whose content
+   load is already enforced, so skip unless Asura starts serving real
+   content there again.
 
 3. **~~`optigate.home` unreachable for `bypass_login` devices~~ --
    CONFIRMED + DOCUMENTED AS INTENDED (2026-09-10).** Owner's read was
