@@ -40,11 +40,12 @@ Test series that must be BLOCKED: **Black Clover `GRE50KV36`** (not approved).
    broad spread of unrelated hosts, all failing the handshake identically.
    That breadth rules out per-site pinning and rules out the VPN as the
    cause: it's the device's Chrome not trusting the OptiGate CA, period.
-   (The Bark VPN was also *not* fully off — `screentime.bark.us` still had
-   ~80 failed tunnel attempts — so it added noise on top, but underneath,
-   blocker (a) is a plain device CA-trust problem, not CR-specific and not
-   VPN interference.) Confirmed: the fix for (a) is device-side — CA in
-   the Android **system** store, or a browser with its own trust store
+   (The Bark VPN was OFF for this retest and carrying no traffic — the
+   `screentime.bark.us` `TCP_TUNNEL/500` lines were just Bark's app
+   failing to auto-reconnect, every attempt cancelled, not intercepting
+   anything. So the retest is a clean isolation of the VPN variable and
+   blocker (a) is confirmed device-side.) The fix for (a): CA in the
+   Android **system** store, or a browser with its own trust store
    (Firefox + imported CA), or a non-Android client.
 
 2. **`host_verify_strict` (Squid default `on`) breaks spliced multi-IP
