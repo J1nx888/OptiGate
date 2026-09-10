@@ -8145,14 +8145,21 @@ redesign in a dedicated session, not a live quick-patch**.
    startup. **Re-verified live 2026-09-10** -- `optigate.home` from a
    known non-bypass device shows the device-status page. Closed.
 
-5. **Report page "Recent activity" table -- owner sees no allowed/blocked
-   Status column** (only Time, User, Device, Domain, Show/Path). The
-   deployed `REPORT_BODY` (line ~6426) *does* render a `Result` column
-   with an `allowed`/`blocked` badge, so this is most likely a stale
-   cached page (dashboard was restarted this date) or the `.badge`
-   CSS not rendering -- but treat as a possible regression until
-   confirmed with a hard refresh + a look at `.badge.allowed`/
-   `.badge.blocked` styling. If real, it's a fast dashboard fix.
+5. **~~Report page "Recent activity" -- no allowed/blocked Status
+   column~~ -- FIXED 2026-09-10 (`6da84c8`).** The `Result` column (with
+   the `allowed`/`blocked` badge) has been in `REPORT_BODY` since the
+   initial commit and prod renders it correctly (verified: `<th>Result</th>`
+   in the rendered HTML, badge computed style green/red and visible).
+   The owner's browser was serving a **heuristically-cached** copy of
+   `/report` from before -- no dashboard HTML response set any cache
+   header, so a plain reload could reuse a stale page. New
+   `@app.after_request` sends `Cache-Control: no-store, must-revalidate`
+   + `Pragma: no-cache` on every `text/html` response (CSS/JS/JSON/CSV/
+   images keep their own caching; `sw.js` already network-firsts
+   `/static/`). Matches the app's stated intent -- `sw.js`'s own comment:
+   "Every dashboard page ... always goes to the network, no exceptions"
+   -- which nothing enforced for the pages. Prod-verified: `/report`
+   and `/devices` now return `no-store`; `app.css` unaffected.
 
 6. **`host_verify_strict` breaks spliced multi-IP CDN traffic** --
    upgraded from "noise" to a real blocker after the 2026-09-10 QUIC
