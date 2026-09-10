@@ -1268,6 +1268,190 @@ def test_remove_show_deletes_row(client, db_conn):
 
 
 # ============================================================
+# Integrations page -- Crunchyroll cross-user management (2026-09-10)
+# ============================================================
+
+def _mk_kids(client, db_conn, *names):
+    ids = {}
+    for n in names:
+        client.post("/users/add", data={"username": n, "password": "pw"}, headers=_auth_header())
+        ids[n] = db_conn.execute("SELECT id FROM users WHERE username = ?", (n,)).fetchone()[0]
+    return ids
+
+
+def _approve_direct(db_conn, user_id, series_id="GYE5K0XVR", name="Ace Attorney"):
+    db_conn.execute(
+        "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?,?,?)",
+        (user_id, series_id, name),
+    )
+    db_conn.commit()
+
+
+def test_integrations_nav_item_present_and_active(client):
+    resp = client.get("/integrations", headers=_auth_header())
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert 'href="/integrations"' in body
+    assert "Third-party integrations" in body
+    # planned integrations named, per the RoadMap ask
+    assert "YouTube" in body and "Discord" in body
+
+
+def test_integrations_requires_admin(client):
+    assert client.get("/integrations").status_code == 401
+    assert client.post("/integrations/crunchyroll/approve", data={}).status_code == 401
+    assert client.post("/integrations/crunchyroll/remove_all", data={}).status_code == 401
+    assert client.post("/integrations/crunchyroll/remove_one", data={}).status_code == 401
+
+
+def test_integrations_empty_state(client, db_conn):
+    resp = client.get("/integrations", headers=_auth_header())
+    assert "No Crunchyroll shows approved for anyone yet." in resp.get_data(as_text=True)
+
+
+def test_integrations_lists_every_series_with_all_its_users(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1", "kid2", "kid3")
+    _approve_direct(db_conn, kids["kid1"], "GYE5K0XVR", "Ace Attorney")
+    _approve_direct(db_conn, kids["kid2"], "GYE5K0XVR", "Ace Attorney")
+    _approve_direct(db_conn, kids["kid3"], "G6M0K1P2Q", "Naruto")
+
+    body = client.get("/integrations", headers=_auth_header()).get_data(as_text=True)
+    assert "Ace Attorney" in body and "GYE5K0XVR" in body
+    assert "Naruto" in body and "G6M0K1P2Q" in body
+    # kid1 + kid2 both shown against Ace Attorney
+    ace_cell = body.split("GYE5K0XVR", 1)[1].split("Remove from everyone", 1)[0]
+    assert "kid1" in ace_cell and "kid2" in ace_cell and "kid3" not in ace_cell
+
+
+def test_approve_show_for_multiple_users_via_existing_series_id(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1", "kid2", "kid3")
+    _approve_direct(db_conn, kids["kid1"], "GYE5K0XVR", "Ace Attorney")
+
+    resp = client.post(
+        "/integrations/crunchyroll/approve",
+        data={"existing_series_id": "GYE5K0XVR", "user_ids": [str(kids["kid2"]), str(kids["kid3"])]},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    got = {
+        r["user_id"]
+        for r in db_conn.execute("SELECT user_id FROM user_shows WHERE series_id = 'GYE5K0XVR'").fetchall()
+    }
+    assert got == {kids["kid1"], kids["kid2"], kids["kid3"]}
+
+
+def test_approve_show_for_users_via_pasted_url_and_name(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1", "kid2")
+    resp = client.post(
+        "/integrations/crunchyroll/approve",
+        data={
+            "url": "https://www.crunchyroll.com/series/GABC12345/some-show",
+            "name": "Custom Name",
+            "user_ids": [str(kids["kid1"]), str(kids["kid2"])],
+        },
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    rows = db_conn.execute(
+        "SELECT series_id, series_name FROM user_shows WHERE series_id = 'GABC12345'"
+    ).fetchall()
+    assert len(rows) == 2
+    assert {r["series_name"] for r in rows} == {"Custom Name"}
+
+
+def test_approve_show_with_no_users_selected_is_rejected(client, db_conn):
+    _mk_kids(client, db_conn, "kid1")
+    resp = client.post(
+        "/integrations/crunchyroll/approve",
+        data={"existing_series_id": "GYE5K0XVR"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) c FROM user_shows").fetchone()["c"] == 0
+
+
+def test_approve_show_with_invalid_url_is_rejected(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1")
+    resp = client.post(
+        "/integrations/crunchyroll/approve",
+        data={"url": "https://example.com/nope", "user_ids": [str(kids["kid1"])]},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) c FROM user_shows").fetchone()["c"] == 0
+
+
+def test_approve_show_ignores_a_nonexistent_user_id(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1")
+    resp = client.post(
+        "/integrations/crunchyroll/approve",
+        data={"url": "https://www.crunchyroll.com/series/GYE5K0XVR/ace-attorney",
+              "name": "Ace Attorney", "user_ids": [str(kids["kid1"]), "9999"]},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    rows = db_conn.execute("SELECT user_id FROM user_shows").fetchall()
+    assert [r["user_id"] for r in rows] == [kids["kid1"]]
+
+
+def test_remove_show_from_all_users(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1", "kid2", "kid3")
+    for k in ("kid1", "kid2"):
+        _approve_direct(db_conn, kids[k], "GYE5K0XVR", "Ace Attorney")
+    _approve_direct(db_conn, kids["kid3"], "GOTHER123", "Other Show")
+
+    resp = client.post(
+        "/integrations/crunchyroll/remove_all",
+        data={"series_id": "GYE5K0XVR"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    remaining = db_conn.execute("SELECT series_id FROM user_shows").fetchall()
+    assert [r["series_id"] for r in remaining] == ["GOTHER123"]
+
+
+def test_remove_show_from_all_users_when_nobody_had_it(client, db_conn):
+    resp = client.post(
+        "/integrations/crunchyroll/remove_all",
+        data={"series_id": "GNOBODY00"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_remove_show_from_one_user_only(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1", "kid2")
+    _approve_direct(db_conn, kids["kid1"], "GYE5K0XVR", "Ace Attorney")
+    _approve_direct(db_conn, kids["kid2"], "GYE5K0XVR", "Ace Attorney")
+
+    resp = client.post(
+        "/integrations/crunchyroll/remove_one",
+        data={"series_id": "GYE5K0XVR", "user_id": str(kids["kid1"])},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    rows = db_conn.execute("SELECT user_id FROM user_shows WHERE series_id = 'GYE5K0XVR'").fetchall()
+    assert [r["user_id"] for r in rows] == [kids["kid2"]]
+
+
+def test_approve_show_refreshes_stored_name_without_erroring(client, db_conn):
+    kids = _mk_kids(client, db_conn, "kid1")
+    _approve_direct(db_conn, kids["kid1"], "GYE5K0XVR", "Old Name")
+    resp = client.post(
+        "/integrations/crunchyroll/approve",
+        data={"url": "https://www.crunchyroll.com/series/GYE5K0XVR/ace-attorney",
+              "name": "New Name", "user_ids": [str(kids["kid1"])]},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    row = db_conn.execute(
+        "SELECT series_name FROM user_shows WHERE user_id = ? AND series_id = 'GYE5K0XVR'", (kids["kid1"],)
+    ).fetchone()
+    assert row["series_name"] == "New Name"
+
+
+# ============================================================
 # domains filtered by user (GH #2)
 # ============================================================
 

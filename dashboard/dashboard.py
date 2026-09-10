@@ -340,7 +340,7 @@ try { if (localStorage.getItem("og_sidebar_collapsed") === "1") document.documen
 </script>
 </head>
 <body>
-{% set page_titles = {'report': 'Report', 'users': 'Users', 'domains': 'Domains', 'categories': 'Categories', 'schedules': 'Schedules', 'devices': 'Devices', 'health': 'Health', 'events': 'Events', 'settings': 'Settings'} %}
+{% set page_titles = {'report': 'Report', 'users': 'Users', 'domains': 'Domains', 'categories': 'Categories', 'schedules': 'Schedules', 'devices': 'Devices', 'integrations': 'Integrations', 'health': 'Health', 'events': 'Events', 'settings': 'Settings'} %}
 <div class="app-shell">
   <nav class="sidebar">
     <a class="sidebar-brand" href="{{ url_for('report') }}">
@@ -371,6 +371,10 @@ try { if (localStorage.getItem("og_sidebar_collapsed") === "1") document.documen
       <a class="sidebar-item {{ 'active' if active=='devices' else '' }}" href="{{ url_for('devices') }}" title="Devices">
         <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         <span class="sidebar-label">Devices</span>
+      </a>
+      <a class="sidebar-item {{ 'active' if active=='integrations' else '' }}" href="{{ url_for('integrations') }}" title="Integrations">
+        <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v4a2 2 0 0 1-4 0V3"/><path d="M4 8h16a1 1 0 0 1 1 1v3a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5V9a1 1 0 0 1 1-1z"/><path d="M12 17v4"/></svg>
+        <span class="sidebar-label">Integrations</span>
       </a>
       <a class="sidebar-item {{ 'active' if active=='health' else '' }}" href="{{ url_for('health_page') }}" title="Health">
         <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
@@ -1718,22 +1722,10 @@ def add_show():
     once -- an exact match on an already-known series_id needs no URL
     parsing or title lookup at all."""
     user_id = request.form.get("user_id", "")
-    existing_series_id = request.form.get("existing_series_id", "").strip()
     conn = get_db()
-    if existing_series_id:
-        existing = conn.execute(
-            "SELECT series_name FROM user_shows WHERE series_id = ? LIMIT 1", (existing_series_id,)
-        ).fetchone()
-        if existing is None:
-            return flash_redirect("user_detail", "That show is no longer on record.", error=True, user_id=user_id)
-        series_id, name = existing_series_id, existing["series_name"]
-    else:
-        url = request.form.get("url", "")
-        override_name = request.form.get("name", "").strip()
-        series_id, suggested_name = parse_series_url(url)
-        if series_id is None:
-            return flash_redirect("user_detail", suggested_name, error=True, user_id=user_id)
-        name = override_name or cr_api.series_title(series_id) or suggested_name
+    series_id, name, error = _resolve_series_from_form(conn, request.form)
+    if error is not None:
+        return flash_redirect("user_detail", error, error=True, user_id=user_id)
     conn.execute(
         "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?,?,?) "
         "ON CONFLICT(user_id, series_id) DO UPDATE SET series_name = excluded.series_name",
@@ -1741,6 +1733,39 @@ def add_show():
     )
     conn.commit()
     return flash_redirect("user_detail", f"Approved {name}.", user_id=user_id)
+
+
+def _resolve_series_from_form(conn, form):
+    """Shared by add_show() (per-user card) and approve_show_for_users()
+    (the cross-user Integrations page). Turns a submitted form into a
+    concrete (series_id, series_name) pair, two ways in, exactly as
+    add_show() always did:
+
+      - `existing_series_id`: a series already approved for someone,
+        picked from a combobox -- no URL parsing or cr_api title lookup,
+        just reuse the name already on record.
+      - `url` (+ optional `name` override): a pasted Crunchyroll series
+        URL, parsed by parse_series_url(); the name is the explicit
+        override if given, else cr_api.series_title(), else the slug.
+
+    Returns `(series_id, name, error)` -- `error` is None on success, or
+    a human-readable string (and series_id/name None) on failure. Never
+    raises for a bad URL or an unreachable cr_api.
+    """
+    existing_series_id = form.get("existing_series_id", "").strip()
+    if existing_series_id:
+        existing = conn.execute(
+            "SELECT series_name FROM user_shows WHERE series_id = ? LIMIT 1", (existing_series_id,)
+        ).fetchone()
+        if existing is None:
+            return None, None, "That show is no longer on record."
+        return existing_series_id, existing["series_name"], None
+    series_id, suggested_name = parse_series_url(form.get("url", ""))
+    if series_id is None:
+        return None, None, suggested_name  # parse_series_url returns the error message here
+    override_name = form.get("name", "").strip()
+    name = override_name or cr_api.series_title(series_id) or suggested_name
+    return series_id, name, None
 
 
 @app.route("/shows/remove", methods=["POST"])
@@ -1775,6 +1800,179 @@ def parse_series_url(url: str) -> tuple[str | None, str]:
     slug = match.group(2) or ""
     name = " ".join(w.capitalize() for w in slug.split("-") if w) or series_id
     return series_id, name
+
+
+# ==========================================================
+# INTEGRATIONS (third-party services -- Crunchyroll today)
+# ==========================================================
+
+INTEGRATIONS_BODY = """
+<div class="card">
+<h2>Third-party integrations</h2>
+<p class="hint">
+  Cross-account management for external services. Approvals still live
+  per-user (each kid's own page is the per-person view) -- this page is
+  the household-wide counterpart: every approval in one table, and
+  one-click add/remove across users.
+</p>
+<p class="hint" style="margin-top:.4rem;">
+  <strong>Live now:</strong> Crunchyroll.
+  <strong>Planned:</strong> YouTube (channel/creator whitelist), Discord.
+</p>
+</div>
+
+<div class="card">
+<h2>Approved Crunchyroll shows &mdash; everyone ({{ series|length }})</h2>
+<div class="table-scroll">
+<table>
+  <tr><th>Series</th><th>Approved for</th><th></th></tr>
+  {% for s in series %}
+  <tr>
+    <td>{{ s.series_name }}<br><code class="hint">{{ s.series_id }}</code></td>
+    <td>
+      {% for usr in s.users %}
+      <span class="chip">{{ usr.name }}
+        <form class="inline" method="post" action="{{ url_for('remove_show_from_one_user') }}">
+          <input type="hidden" name="series_id" value="{{ s.series_id }}">
+          <input type="hidden" name="user_id" value="{{ usr.id }}">
+          <button class="linklike danger" type="submit" title="Remove for {{ usr.name }} only" aria-label="Remove for {{ usr.name }} only">&times;</button>
+        </form>
+      </span>
+      {% endfor %}
+    </td>
+    <td>
+      <form class="inline" method="post" action="{{ url_for('remove_show_from_all_users') }}"
+            onsubmit="return confirm('Remove {{ s.series_name }} from all {{ s.users|length }} user(s)?')">
+        <input type="hidden" name="series_id" value="{{ s.series_id }}">
+        <button class="danger small" type="submit">Remove from everyone</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3"><em>No Crunchyroll shows approved for anyone yet.</em></td></tr>
+  {% endfor %}
+</table>
+</div>
+</div>
+
+<div class="card">
+<h2>Approve a show for one or more users</h2>
+{% if users %}
+<form class="add-form" method="post" action="{{ url_for('approve_show_for_users') }}">
+  {% if known_series %}
+  <div class="combobox" data-combobox data-mode="single" data-empty="No shows on record yet." style="max-width:320px;">
+    <div class="combobox-current" data-combobox-current></div>
+    <input type="search" class="combobox-input" data-combobox-input placeholder="Pick a show already on record&hellip;">
+    <div class="combobox-results" data-combobox-results></div>
+    <input type="hidden" name="existing_series_id" data-combobox-hidden value="">
+    <script type="application/json" data-combobox-items>{{ known_series|tojson }}</script>
+  </div>
+  <span class="hint" style="margin:0;">&mdash; or &mdash;</span>
+  {% endif %}
+  <input type="url" name="url" placeholder="Paste a new Crunchyroll series URL" style="flex:1; min-width:280px;">
+  <input type="text" name="name" placeholder="Name (auto-filled, editable)">
+  <fieldset class="chip-checks">
+    <legend class="hint">Approve for:</legend>
+    {% for usr in users %}
+    <label class="chip"><input type="checkbox" name="user_ids" value="{{ usr.id }}"> {{ usr.display_name }}</label>
+    {% endfor %}
+  </fieldset>
+  <button class="add" type="submit">Approve show</button>
+</form>
+<p class="hint">
+  Picking a show already on record skips re-pasting/re-resolving its URL --
+  if both a picked show and a URL are given, the picked one wins. Approving
+  a show a user already has just refreshes its stored name, never errors.
+</p>
+{% else %}
+<p class="hint">No users yet -- add one from the <a href="{{ url_for('users') }}">Users</a> page first.</p>
+{% endif %}
+</div>
+"""
+
+
+@app.route("/integrations")
+@require_admin
+def integrations():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT us.series_id, us.series_name, u.id AS user_id, u.display_name "
+        "FROM user_shows us JOIN users u ON u.id = us.user_id "
+        "ORDER BY us.series_name COLLATE NOCASE, u.display_name COLLATE NOCASE"
+    ).fetchall()
+    series: list[dict] = []
+    by_id: dict[str, dict] = {}
+    for r in rows:
+        entry = by_id.get(r["series_id"])
+        if entry is None:
+            entry = {"series_id": r["series_id"], "series_name": r["series_name"], "users": []}
+            by_id[r["series_id"]] = entry
+            series.append(entry)
+        entry["users"].append({"id": r["user_id"], "name": r["display_name"]})
+    known_series = conn.execute(
+        "SELECT DISTINCT series_id AS id, series_name FROM user_shows ORDER BY series_name COLLATE NOCASE"
+    ).fetchall()
+    users = conn.execute(
+        "SELECT id, display_name FROM users ORDER BY display_name COLLATE NOCASE"
+    ).fetchall()
+    body = render_template_string(
+        INTEGRATIONS_BODY,
+        series=series,
+        known_series=_entity_combo(known_series, lambda s: s["series_name"]),
+        users=users,
+    )
+    return render("integrations", body)
+
+
+@app.route("/integrations/crunchyroll/approve", methods=["POST"])
+@require_admin
+def approve_show_for_users():
+    """Cross-user counterpart to add_show(): resolve one series (pasted
+    URL or a pick from the on-record list, via the shared
+    _resolve_series_from_form) and approve it for every checked user in
+    one submit."""
+    conn = get_db()
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return flash_redirect("integrations", "Pick at least one user to approve the show for.", error=True)
+    series_id, name, error = _resolve_series_from_form(conn, request.form)
+    if error is not None:
+        return flash_redirect("integrations", error, error=True)
+    valid = {str(r["id"]) for r in conn.execute("SELECT id FROM users").fetchall()}
+    targets = [uid for uid in user_ids if uid in valid]
+    if not targets:
+        return flash_redirect("integrations", "None of those users exist anymore.", error=True)
+    conn.executemany(
+        "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?,?,?) "
+        "ON CONFLICT(user_id, series_id) DO UPDATE SET series_name = excluded.series_name",
+        [(uid, series_id, name) for uid in targets],
+    )
+    conn.commit()
+    return flash_redirect("integrations", f"Approved {name} for {len(targets)} user(s).")
+
+
+@app.route("/integrations/crunchyroll/remove_all", methods=["POST"])
+@require_admin
+def remove_show_from_all_users():
+    conn = get_db()
+    series_id = request.form.get("series_id", "")
+    cur = conn.execute("DELETE FROM user_shows WHERE series_id = ?", (series_id,))
+    conn.commit()
+    if cur.rowcount:
+        return flash_redirect("integrations", f"Removed the show from {cur.rowcount} user(s).")
+    return flash_redirect("integrations", "That show wasn't approved for anyone.", error=True)
+
+
+@app.route("/integrations/crunchyroll/remove_one", methods=["POST"])
+@require_admin
+def remove_show_from_one_user():
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM user_shows WHERE user_id = ? AND series_id = ?",
+        (request.form.get("user_id", ""), request.form.get("series_id", "")),
+    )
+    conn.commit()
+    return flash_redirect("integrations", "Removed.")
 
 
 # ==========================================================

@@ -4977,8 +4977,53 @@ regressions.
   per-user "Approved Crunchyroll shows" card (item 3 above helps within
   that existing per-user view, but doesn't replace the need for this
   standalone cross-user page).
+
+  **DONE (built + tested 2026-09-10).** New **Integrations** sidebar item
+  (between Devices and Health) -> new `/integrations` page
+  (`dashboard/dashboard.py`, `integrations()` + `INTEGRATIONS_BODY`),
+  `active='integrations'` added to the nav and `page_titles`. Framed as
+  cross-account management for external services -- an intro card names
+  Crunchyroll as live and YouTube (channel/creator whitelist) + Discord
+  as planned, none of the latter built. All four asks delivered:
+  - **See every approved series across all users** -- one table grouped
+    by `series_id` (`SELECT ... FROM user_shows JOIN users`, grouped in
+    Python), each row listing its users as chips.
+  - **Remove from everyone at once** -- per-row `POST
+    /integrations/crunchyroll/remove_all` (`DELETE FROM user_shows WHERE
+    series_id = ?`), confirms + reports the affected-user count.
+  - **Approve for one or more specific users** -- `POST
+    /integrations/crunchyroll/approve`: pick a series already on record
+    (combobox) OR paste a Crunchyroll URL (+ optional name), then check
+    any number of users; `executemany` INSERT ... ON CONFLICT DO UPDATE
+    (so re-approving just refreshes the stored name, never errors).
+  - **Remove from just one user** -- the per-user chip's `×` -> `POST
+    /integrations/crunchyroll/remove_one`.
+
+  The URL/known-series resolution branch was factored out of
+  `add_show()` into a shared `_resolve_series_from_form(conn, form) ->
+  (series_id, name, error)` helper, now used by both the per-user card
+  and the new cross-user approve route -- `add_show()`'s own behavior is
+  unchanged (its 9 existing tests stay green). Small neutral `.chip` /
+  `.chip-checks` / `.linklike` CSS added to `dashboard/static/css/app.css`
+  (theme-aware via existing vars). 13 new tests in
+  `tests/test_dashboard.py` (nav item present/active, admin-required on
+  page + all three routes, empty state, lists every series with all its
+  users, approve for multiple users via existing-id and via URL+name, no
+  users selected rejected, invalid URL rejected, nonexistent user id
+  skipped, remove-all clears one series and leaves others, remove-all
+  no-op path, remove-one leaves the other user, re-approve refreshes the
+  name). Visual render confirmed in the local dev preview.
+
+  **Not yet deployed** -- rides the same next `dashboard` rebuild as the
+  already-coded follow-up items (1-5, 10, 13); no interception profile
+  or `controller` change involved.
 - The domain/user assignment UX redesign (previous round's entry, still
-  open) and config export/import (still open).
+  open). ~~config export/import~~ -- **CLOSED 2026-09-10 (project owner):
+  already delivered by the backup/restore `.zip` feature** (see the
+  struck-through line at 2026-09-07's "Configuration export/import
+  (backup/restore) -- built" and `dashboard/dashboard.py`'s
+  `download_backup()` / `restore_backup()` routes + `common/backup.py`).
+  Nothing separate to build.
 
 ---
 

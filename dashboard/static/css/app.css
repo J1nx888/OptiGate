@@ -209,6 +209,44 @@ html.sidebar-collapsed .main { margin-left: 60px; }
 .combobox-result:hover { background: var(--surface-alt); }
 .combobox-empty { padding: .5rem .6rem; font-size: .82rem; color: var(--text-muted); font-style: italic; }
 
+/* ---- Chips: small inline labels. Used on the Integrations page for a
+   show's "approved for" user list (many per table cell) and the
+   multi-user approve picker. A lighter-weight, neutral sibling of
+   .combobox-tag (which is brand-filled and meant to appear a few at a
+   time). ---- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  padding: .2rem .5rem;
+  margin: .15rem .25rem .15rem 0;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  font-size: .8rem;
+  white-space: nowrap;
+}
+.chip input[type="checkbox"] { margin: 0; }
+.chip .linklike {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: .95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.chip .linklike.danger { color: var(--danger); }
+.chip-checks {
+  border: none;
+  padding: 0;
+  margin: .2rem 0 .4rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.chip-checks legend { padding: 0; margin-right: .4rem; float: none; }
+
 h1 { font-size: 1.4rem; margin: 0 0 1rem; }
 h2 {
   font-size: 1rem;
