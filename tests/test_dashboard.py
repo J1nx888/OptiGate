@@ -816,6 +816,19 @@ def test_html_pages_are_sent_no_store_but_static_assets_are_not(client):
     assert "no-store" not in css.headers.get("Cache-Control", "")
 
 
+def test_service_worker_is_revalidated_and_never_caches_navigations(client):
+    resp = client.get("/sw.js")
+    assert resp.status_code == 200
+    assert "no-cache" in resp.headers.get("Cache-Control", "")
+    body = resp.get_data(as_text=True)
+    # bumped cache version so browsers force-update off any older revision
+    assert 'CACHE = "pp-static-v3"' in body
+    # the fetch handler must only ever respondWith for /static/ -- a
+    # blanket cache-first would let a stale page (finding #5) persist
+    assert 'url.pathname.startsWith("/static/")' in body
+    assert body.count("event.respondWith") == 1
+
+
 def test_report_page_shows_which_device_a_blocked_row_came_from(client, db_conn):
     """Real live-testing feedback (RoadMap.md's dated entry): a blocked
     row for an unauthenticated device showed "(unauthenticated)" as its

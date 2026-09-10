@@ -19,7 +19,16 @@
 // and only falls back to whatever's cached if the network request itself
 // fails, so there's no scenario where a real update goes unseen while the
 // network is actually up.
-const CACHE = "pp-static-v2";
+// Bumped v2 -> v3 (2026-09-10): force every browser to fetch this file,
+// install this worker (skipWaiting below makes it active immediately),
+// and -- via the activate handler -- delete every older cache. Some
+// browsers were still running a much earlier revision of this worker
+// that cache-first'd whole PAGES, so a stale /report (missing a column
+// that has in fact always been there) survived even Ctrl+Shift+R: the
+// old worker kept serving its own cache and stayed the active worker
+// until every tab closed. This revision, once active, only ever touches
+// /static/ (see the fetch handler) and never a navigation.
+const CACHE = "pp-static-v3";
 const STATIC_ASSETS = [
   "/static/css/app.css",
   "/static/vendor/chart.umd.min.js",
