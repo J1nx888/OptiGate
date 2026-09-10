@@ -7860,6 +7860,12 @@ rebuild into the next deployment window** (project owner's call,
 | Item | Change | Containers to rebuild | How to confirm after |
 |---|---|---|---|
 | 13 | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (commit `b7020e2`) | `dashboard` **and** `controller` | rebuild both, restart `dashboard`; then click "Sync now" on the YouTube category and confirm `ggpht.cn` now lands in `category_domains` |
+| Integrations page | New "Integrations" nav + Crunchyroll cross-user management page (commit `855d1c5`) | `dashboard` | open `/integrations`, confirm the cross-user shows table + approve/remove-all/remove-one all work |
+| "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report-page reason labels / AdGuard-401 self-diagnosing message -- all coded + pushed on 2026-09-08..09, never deployed | `dashboard` | spot-check each on the live dashboard after the rebuild |
+
+All of the `dashboard`-only rows above go live in **one** `dashboard`
+rebuild + restart; item 13 also needs `controller` rebuilt (rides the
+interception window with items 7/17/21).
 
 **No deploy needed:** item 16 (rebuild alone was the fix, done), and
 the documentation commits (`341736d`, `b2011bb` -- markdown only,
