@@ -85,6 +85,24 @@ def _reject_cross_origin_writes():
     return None
 
 
+@app.after_request
+def _no_store_html(resp):
+    """Every rendered dashboard page must always come fresh from the
+    server -- this is an admin tool that shows a child's live allow/block
+    state, and a browser serving a heuristically-cached copy is actively
+    misleading (same reasoning as sw.js's comment, which enforces this
+    for /static/ but nothing enforced it for the HTML pages -- a stale
+    cached /report was the "the Report page has no Status column" report,
+    2026-09-10, when the column had in fact been there all along).
+    Scoped to text/html so CSS/JS/JSON/CSV/image responses keep their
+    own caching."""
+    ctype = resp.headers.get("Content-Type", "")
+    if ctype.startswith("text/html"):
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
 def get_db():
     # Fixed 2026-09-02, a real efficiency gap found by code review:
     # this used to also call db.init_db(conn) here -- re-executing the

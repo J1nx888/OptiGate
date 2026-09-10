@@ -801,6 +801,19 @@ def test_report_page_lists_logged_rows(client, db_conn):
     resp = client.get("/report", headers=_auth_header())
     assert resp.status_code == 200
     assert b"example.com" in resp.data
+    # RoadMap finding #5 (2026-09-10): the Report page had a Status/Result
+    # column all along; the owner's browser was serving a stale cached
+    # copy. Every HTML page is now sent no-store so that can't happen.
+    assert "no-store" in resp.headers.get("Cache-Control", "")
+    assert b"<th>Result</th>" in resp.data
+
+
+def test_html_pages_are_sent_no_store_but_static_assets_are_not(client):
+    for path in ("/report", "/devices", "/users", "/settings"):
+        cc = client.get(path, headers=_auth_header()).headers.get("Cache-Control", "")
+        assert "no-store" in cc, f"{path} should be no-store, got {cc!r}"
+    css = client.get("/static/css/app.css")
+    assert "no-store" not in css.headers.get("Cache-Control", "")
 
 
 def test_report_page_shows_which_device_a_blocked_row_came_from(client, db_conn):
