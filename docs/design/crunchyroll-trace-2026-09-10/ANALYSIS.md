@@ -111,7 +111,7 @@ a direct CMS API probe with a fresh anonymous token:
 | `GET /personalization/v2/personalization?…` | recs | no |
 | `GET /accounts/v1/me` | account | no |
 | `GET /subs/v2/products/<sku>` | subscription | no |
-| *(not captured — bump failed)* `…/playback/…` or `…/streams` | manifest + DRM | expected YES |
+| `GET /playback/v{1,2,3}/<MEDIA_ID>/web/<platform>/play` | **THE playback / manifest+DRM call** | **YES — media id in path** |
 
 ### `/content/v2/cms/objects/<id>` response shape (live probe, Dr. STONE `GYEXQKJG6`)
 
@@ -135,7 +135,32 @@ panel.episode_metadata.season_id: GYX0C4DGQ
 ```
 → the panel is an **episode** with `episode_metadata.series_id`. And the
 **series id is already in the request URL path** — so this endpoint can be
-gated with a pure path match, no API round-trip.
+gated with a pure path match, no API round-trip. Note the panel `id`
+(`G14U4E83J`) is the **media id** the playback call below uses.
+
+### `/playback/v{1,2,3}/<mediaId>/web/<platform>/play` (direct probe, 2026-09-10)
+
+Confirmed by probe: every variant
+(`/playback/v3/<id>/web/firefox/play`, `/playback/v2/<id>/web/firefox/play`,
+`/playback/v1/<id>/web/firefox/play`, `…/console/switch/play`, with/without
+`?queue=false`) returns a real playback-service JSON body
+(`{"error": "the current subscription does not have access to this
+content"}` / `{"error": …}` for the anon token — a 200 for a real
+subscriber returns the DASH/HLS manifest url + DRM `token` + `versions`).
+So the stable shape is:
+
+```
+GET https://www.crunchyroll.com/playback/v<N>/<MEDIA_ID>/web/<platform>/play
+```
+
+- `<MEDIA_ID>` = the episode/movie object id (same id `up_next` returns and
+  `cms/objects` resolves).
+- `<platform>` observed: `web/firefox`, `web/chrome`, also `console/switch`.
+- Older `/content/v2/cms/videos/<id>/streams` now 404s; `streams_link` /
+  `__links__` have been removed from the `cms/objects` episode object.
+
+This is the unambiguous enforcement point: resolve `<MEDIA_ID>` → parent
+series → `matching.user_has_show()`.
 
 ## Redesign direction (for the dedicated session)
 
@@ -162,18 +187,29 @@ Then, in `common/cr_urls.py` + `proxy/authz_helper.py` +
    (breaks the catalogue UI) or allowed (only gate the play path).
    Leaning: gate `up_next` + the playback/streams call; leave plain
    `cms/objects` browse fetches allowed.
-3. **Drop the blanket `^/content/v[0-9]+/` and `^/playback/v[0-9]+/`
+3. **New classifier shape `PLAYBACK`** — regex
+   `^https://www\.crunchyroll\.com/playback/v\d+/([A-Za-z0-9]+)/`
+   → media id in group 1 → `series_resolve.resolve_series_ids([id])` →
+   `matching.user_has_show()`. This is the hard gate: no manifest, no
+   video. Fail closed on resolution failure (same as v1's contract).
+4. **Drop the blanket `^/content/v[0-9]+/` and `^/playback/v[0-9]+/`
    path rules** for domain 27. Replace with narrow allows for the
    genuinely id-free endpoints (`/content/v2/discover/browse`,
    `/content/v2/discover/*/history`, `/content/v2/*/watchlist`,
    `/content/v2/discover/*/…` personalised rows, `/f/v1/`,
    `/personalization/v2/`, `/subs/`, `/accounts/`, `/auth/`,
-   `/config-delta/`, static). Everything else on `crunchyroll.com` →
-   deny-by-default, so an unrecognised playback shape fails closed.
-4. **Capture the real `/playback/` or `/content/v2/cms/videos/<id>/streams`
-   shape** in a session where the bump works, and add a `PLAYBACK` /
-   `STREAMS` classifier shape that resolves `<id>` → series and checks.
-   This is the unambiguous "give me the video" gate.
+   `/config-delta/`, `/metal/v1/`, static). Everything else on
+   `crunchyroll.com` → deny-by-default, so an unrecognised playback shape
+   fails closed.
 5. Tests in `tests/test_cr_urls.py` + `tests/test_helpers_protocol.py`
-   against every shape above, plus the "browse a non-approved show's card
-   without playing" case whichever way it's decided.
+   against every shape above (`up_next/<series>`, `cms/objects/<ids>`,
+   `playback/vN/<media>/web/<platform>/play`, and the id-free browse
+   endpoints), plus the "browse a non-approved show's card without
+   playing" case whichever way #2 is decided.
+
+**Coverage note:** with `up_next` + `cms/objects` + `playback` all gated
+and the blanket path rules gone, a non-approved series has no path to a
+manifest: the player can't get `up_next` data, can't fetch the episode
+object, and the `playback` call itself is denied. The `playback` gate
+alone is sufficient for correctness; the other two are defence-in-depth
++ a cleaner UX (deny at series-open, not at press-play).
