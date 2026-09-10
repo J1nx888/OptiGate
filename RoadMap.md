@@ -4967,6 +4967,30 @@ regressions.
   `resolve_device()`), so the change itself is mechanical, but those are
   live, traffic-decision-critical-path files deserving their own
   dedicated, carefully-tested pass rather than a rushed addition.
+
+  **DONE (2026-09-10).** `proxy/authz_helper.py` -- all 12 `log_access()`
+  calls in `decide()` now pass `ip_address=client_ip`; `_decide_crunchyroll()`
+  gained a `client_ip` param (threaded from `decide()`) so its own 5 calls
+  do too. `proxy/sni_helper.py` -- `handle_splice()`'s 3 inline calls and
+  `_log_denial()` (also given a `client_ip` param, passed by its one
+  caller) now pass it; `handle_bump()`/`handle_trusted()` never log,
+  `handle_block_page()` no longer calls `log_access()` at all. Purely
+  additive -- `ip_address` is an existing optional kwarg and is NOT part
+  of `log_access()`'s dedupe key, so no decision or dedupe behavior
+  changes; the column just stops being NULL for Squid-tier rows. Every
+  writer now passes it (block_page_server.py and adguard_report_sync.py
+  already did); the stale "not yet wired into every call site" notes in
+  `common/logging_util.py` and `common/db.py`'s schema comment are
+  updated. 8 new tests in `tests/test_helpers_protocol.py` (SNI tier:
+  unresolved-identity denial, outside-LAN, allowed unconfigured domain,
+  domain-not-assigned; HTTP tier: outside-LAN, allowed unconfigured
+  domain, bump domain-not-assigned, and the `_decide_crunchyroll`
+  threaded path via an unapproved series page). Full suite green.
+  **Not yet deployed** -- needs `docker compose build proxy` + restart.
+  `proxy` is a base service (always up), so this can ship any time, but
+  the effect is only observable once interception is routing traffic
+  through Squid again -- so it's simplest to fold into the next
+  interception window alongside items 7/17/21/13-controller.
 - **"Third Party Integration" nav section** (project owner's own
   wording, new request) -- a new left-nav item, reserved for future
   integrations (YouTube, Discord, etc. -- named explicitly, not built),
@@ -7862,10 +7886,12 @@ rebuild into the next deployment window** (project owner's call,
 | 13 | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (commit `b7020e2`) | `dashboard` **and** `controller` | rebuild both, restart `dashboard`; then click "Sync now" on the YouTube category and confirm `ggpht.cn` now lands in `category_domains` |
 | Integrations page | New "Integrations" nav + Crunchyroll cross-user management page (commit `855d1c5`) | `dashboard` | open `/integrations`, confirm the cross-user shows table + approve/remove-all/remove-one all work |
 | "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report-page reason labels / AdGuard-401 self-diagnosing message -- all coded + pushed on 2026-09-08..09, never deployed | `dashboard` | spot-check each on the live dashboard after the rebuild |
+| `ip_address` pass | `authz_helper.py`/`sni_helper.py` now pass `ip_address` to every `log_access()` (commit pending) | `proxy` | rebuild + restart `proxy`; during interception, confirm new Report-page rows for Squid-tier decisions carry a source IP |
 
 All of the `dashboard`-only rows above go live in **one** `dashboard`
-rebuild + restart; item 13 also needs `controller` rebuilt (rides the
-interception window with items 7/17/21).
+rebuild + restart; item 13 also needs `controller` rebuilt and the
+`ip_address` pass needs `proxy` rebuilt -- both ride the interception
+window with items 7/17/21.
 
 **No deploy needed:** item 16 (rebuild alone was the fix, done), and
 the documentation commits (`341736d`, `b2011bb` -- markdown only,

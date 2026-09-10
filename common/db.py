@@ -556,9 +556,10 @@ CREATE TABLE IF NOT EXISTS access_log (
     -- all to track it down by, which is exactly the case where "add it
     -- or keep it offline" matters most. Populated best-effort (see
     -- common/logging_util.py's log_access() -- optional kwarg, every
-    -- existing caller keeps working unchanged); not currently wired into
-    -- every log_access() call site (see that module's own comment on
-    -- which ones are covered so far).
+    -- existing caller keeps working unchanged). As of 2026-09-10 every
+    -- writer passes it: block_page_server.py, adguard_report_sync.py, and
+    -- all of proxy/authz_helper.py's + proxy/sni_helper.py's call sites
+    -- (RoadMap follow-up). Still NULL for rows written before that date.
     ip_address  TEXT
 );
 

@@ -543,3 +543,89 @@ def test_authz_crunchyroll_other_shape_with_no_path_rules_denies_beyond_root(con
     _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
     assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/") is True
     assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/some-other-page") is False
+
+
+# ============================================================
+# ip_address capture on every Squid-helper log_access() call site
+# (RoadMap follow-up, 2026-09-10) -- the raw client IP is already a
+# parameter of decide()/handle_splice(); these confirm it now reaches
+# the access_log row, on both the SNI tier and the HTTP tier, including
+# the branch threaded through _decide_crunchyroll().
+# ============================================================
+
+_CLIENT_IP = "192.168.1.77"
+
+
+def _last_log(conn):
+    return conn.execute("SELECT * FROM access_log ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def test_sni_splice_records_client_ip_on_an_unresolved_identity_denial(conn):
+    _add_domain(conn, r"example\.com", mode="splice")
+    assert sni_helper.handle_splice(conn, _CLIENT_IP, "example.com") is False
+    assert _last_log(conn)["ip_address"] == _CLIENT_IP
+
+
+def test_sni_splice_records_client_ip_on_outside_lan(conn):
+    db.set_setting(conn, "local_network", "192.168.1.0/24")
+    conn.commit()
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "10.0.0.9")
+    _add_domain(conn, r"example\.com", mode="splice")
+    assert sni_helper.handle_splice(conn, "10.0.0.9", "example.com") is False
+    assert _last_log(conn)["ip_address"] == "10.0.0.9"
+
+
+def test_sni_splice_records_client_ip_on_an_allowed_unconfigured_domain(conn):
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], _CLIENT_IP)
+    assert sni_helper.handle_splice(conn, _CLIENT_IP, "brand-new.example") is True
+    row = _last_log(conn)
+    assert row["allowed"] == 1 and row["ip_address"] == _CLIENT_IP
+
+
+def test_sni_splice_records_client_ip_on_a_domain_not_assigned_denial(conn):
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], _CLIENT_IP)
+    _add_domain(conn, r"example\.com", mode="splice", is_global=0)
+    assert sni_helper.handle_splice(conn, _CLIENT_IP, "example.com") is False
+    assert _last_log(conn)["ip_address"] == _CLIENT_IP
+
+
+def test_authz_records_client_ip_on_outside_lan(conn):
+    db.set_setting(conn, "local_network", "192.168.1.0/24")
+    conn.commit()
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "10.0.0.1")
+    assert authz_helper.decide(conn, "10.0.0.1", "example.com:443", "/") is False
+    assert _last_log(conn)["ip_address"] == "10.0.0.1"
+
+
+def test_authz_records_client_ip_on_an_allowed_unconfigured_domain(conn):
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], _CLIENT_IP)
+    assert authz_helper.decide(conn, _CLIENT_IP, "unknown.example:443", "/") is True
+    row = _last_log(conn)
+    assert row["allowed"] == 1 and row["ip_address"] == _CLIENT_IP
+
+
+def test_authz_records_client_ip_on_a_bump_domain_not_assigned_denial(conn):
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], _CLIENT_IP)
+    _add_domain(conn, r"example\.com", mode="bump", is_global=0)
+    assert authz_helper.decide(conn, _CLIENT_IP, "example.com:443", "/") is False
+    assert _last_log(conn)["ip_address"] == _CLIENT_IP
+
+
+def test_authz_records_client_ip_through_decide_crunchyroll(conn):
+    """The one branch where client_ip has to be threaded into a helper --
+    _decide_crunchyroll() got a new param. A series-page hit for an
+    unapproved show must still stamp the row with the client IP."""
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], _CLIENT_IP)
+    _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    path = "/series/GYE5K0XVR/ace-attorney"
+    assert authz_helper.decide(conn, _CLIENT_IP, "www.crunchyroll.com:443", path) is False
+    row = _last_log(conn)
+    assert row["reason"] == "show_not_approved"
+    assert row["ip_address"] == _CLIENT_IP

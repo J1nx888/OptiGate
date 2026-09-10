@@ -114,7 +114,7 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
     if not matching.ip_in_configured_lan(conn, client_ip):
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
-            path=path, allowed=False, reason="outside_lan", device_id=device_id,
+            path=path, allowed=False, reason="outside_lan", device_id=device_id, ip_address=client_ip,
         )
         return False
 
@@ -127,7 +127,7 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
         # not re-deny it just because it isn't mode='bump'.
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
-            path=path, allowed=True, reason="unconfigured_domain", device_id=device_id,
+            path=path, allowed=True, reason="unconfigured_domain", device_id=device_id, ip_address=client_ip,
         )
         return True
 
@@ -146,7 +146,7 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
         allowed = reason is not None
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
-            path=path, allowed=allowed, reason=reason or "domain_not_assigned", device_id=device_id,
+            path=path, allowed=allowed, reason=reason or "domain_not_assigned", device_id=device_id, ip_address=client_ip,
         )
         return allowed
 
@@ -160,7 +160,7 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
     if reason is None:
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
-            path=path, allowed=False, reason="domain_not_assigned", device_id=device_id,
+            path=path, allowed=False, reason="domain_not_assigned", device_id=device_id, ip_address=client_ip,
         )
         return False
 
@@ -173,21 +173,21 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
             # crashing on a None user_id below.
             logging_util.log_access(
                 conn, user_id=user_id, username=username, domain=hostname,
-                path=path, allowed=False, reason="show_requires_user", device_id=device_id,
+                path=path, allowed=False, reason="show_requires_user", device_id=device_id, ip_address=client_ip,
             )
             return False
-        return _decide_crunchyroll(conn, user, hostname, path, domain)
+        return _decide_crunchyroll(conn, user, hostname, path, domain, client_ip)
 
     if not _path_allowed_or_bare_root(conn, domain["id"], path):
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
-            path=path, allowed=False, reason="path_not_allowed", device_id=device_id,
+            path=path, allowed=False, reason="path_not_allowed", device_id=device_id, ip_address=client_ip,
         )
         return False
 
     logging_util.log_access(
         conn, user_id=user_id, username=username, domain=hostname,
-        path=path, allowed=True, reason=reason, device_id=device_id,
+        path=path, allowed=True, reason=reason, device_id=device_id, ip_address=client_ip,
     )
     return True
 
@@ -213,7 +213,7 @@ def _path_allowed_or_bare_root(conn, domain_id: int, path: str) -> bool:
     return path == "/"
 
 
-def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
+def _decide_crunchyroll(conn, user, hostname: str, path: str, domain, client_ip: str | None = None) -> bool:
     username = user["username"]
     url = f"https://{hostname}{path}"
     request = cr_urls.classify(url)
@@ -223,7 +223,7 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
 
     if request.kind is cr_urls.RequestKind.BLOCKED_SHAPE:
         logging_util.log_access(
-            conn, user_id=user["id"], username=username, domain=hostname,
+            conn, user_id=user["id"], username=username, domain=hostname, ip_address=client_ip,
             path=path, allowed=False, reason="blocked_shape",
         )
         return False
@@ -241,7 +241,7 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
         if _path_allowed_or_bare_root(conn, domain["id"], path):
             return True
         logging_util.log_access(
-            conn, user_id=user["id"], username=username, domain=hostname,
+            conn, user_id=user["id"], username=username, domain=hostname, ip_address=client_ip,
             path=path, allowed=False, reason="path_not_allowed",
         )
         return False
@@ -251,7 +251,7 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
         for series_id in request.ids:
             show_ok = matching.user_has_show(conn, user["id"], series_id)
             logging_util.log_access(
-                conn, user_id=user["id"], username=username, domain=hostname,
+                conn, user_id=user["id"], username=username, domain=hostname, ip_address=client_ip,
                 path=path, allowed=show_ok,
                 reason="show_approved" if show_ok else "show_not_approved",
                 series_id=series_id,
@@ -264,7 +264,7 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
     resolved = series_resolve.resolve_series_ids(conn, request.ids)
     if resolved is None:
         logging_util.log_access(
-            conn, user_id=user["id"], username=username, domain=hostname,
+            conn, user_id=user["id"], username=username, domain=hostname, ip_address=client_ip,
             path=path, allowed=False, reason="resolution_failed",
         )
         return False
@@ -274,7 +274,7 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain) -> bool:
         series_id = resolved.get(object_id)
         show_ok = series_id is not None and matching.user_has_show(conn, user["id"], series_id)
         logging_util.log_access(
-            conn, user_id=user["id"], username=username, domain=hostname,
+            conn, user_id=user["id"], username=username, domain=hostname, ip_address=client_ip,
             path=path, allowed=show_ok,
             reason="show_approved" if show_ok else "show_not_approved",
             series_id=series_id,

@@ -57,12 +57,13 @@ def log_access(
     source IP, independent of whether device_id resolved to anything --
     real live-testing feedback was that a row for a genuinely never-seen
     device gave an admin nothing to track it down by. Optional and
-    defaults to None so every existing caller keeps working unchanged;
-    not yet threaded through every call site (see common/db.py's own
-    schema comment for which ones currently pass it). Same "descriptive
-    metadata on the row, not a new dedupe dimension" treatment as
-    device_id -- a device's IP moving between requests within the dedupe
-    window still collapses the same way it always has.
+    defaults to None so every existing caller keeps working unchanged.
+    As of 2026-09-10 every writer passes it: dashboard/block_page_server.py,
+    dashboard/adguard_report_sync.py, and (RoadMap follow-up, this date)
+    all of proxy/authz_helper.py's and proxy/sni_helper.py's call sites.
+    Same "descriptive metadata on the row, not a new dedupe dimension"
+    treatment as device_id -- a device's IP moving between requests within
+    the dedupe window still collapses the same way it always has.
     """
     cutoff_iso = iso_secs_ago(DEDUPE_WINDOW_SECONDS)
     # series_id is part of the dedupe key (SQLite's `IS` is null-safe, so two
