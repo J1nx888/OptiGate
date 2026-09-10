@@ -97,6 +97,18 @@ def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
         # is defensive, not something normal operation reaches.
         return False
 
+    # Network-tier check first: a request whose source IP is not on the
+    # configured LAN is refused regardless of whether it maps to a known
+    # device. Deliberately BEFORE identity resolution (2026-09-10): since
+    # common/identity.record_binding() now rejects off-LAN IPs at
+    # discovery time, an off-LAN client no longer has a device_bindings
+    # row to resolve -- but it must still be denied and logged here as
+    # `outside_lan`, exactly as before, so this check can't depend on a
+    # resolved identity.
+    if not matching.ip_in_configured_lan(conn, client_ip):
+        _log_denial(conn, sni, "outside_lan", client_ip=client_ip)
+        return False
+
     # Resolve the DEVICE first -- see authz_helper.decide()'s own comment
     # on why (a group/device-only assignment has no `users` row at all,
     # but is still a real, enforceable identity).
@@ -106,13 +118,6 @@ def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
         return False
     user = device_identity.resolve_user_for_device(conn, device)
     user_id, username, device_id = device_identity.log_identity_fields(device, user)
-
-    if not matching.ip_in_configured_lan(conn, client_ip):
-        logging_util.log_access(
-            conn, user_id=user_id, username=username, domain=sni,
-            path=None, allowed=False, reason="outside_lan", device_id=device_id, ip_address=client_ip,
-        )
-        return False
 
     if domain is None:
         # Fixed 2026-09-08, real gap found live: a domain with no
