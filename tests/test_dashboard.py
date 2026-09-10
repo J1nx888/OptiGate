@@ -1287,25 +1287,44 @@ def _approve_direct(db_conn, user_id, series_id="GYE5K0XVR", name="Ace Attorney"
     db_conn.commit()
 
 
-def test_integrations_nav_item_present_and_active(client):
-    resp = client.get("/integrations", headers=_auth_header())
+def test_integrations_nav_is_a_collapsible_group(client):
+    resp = client.get("/integrations/crunchyroll", headers=_auth_header())
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'href="/integrations"' in body
-    assert "Third-party integrations" in body
-    # planned integrations named, per the RoadMap ask
-    assert "YouTube" in body and "Discord" in body
+    # sidebar group with the three service sub-links
+    assert "data-sidebar-group" in body
+    assert 'href="/integrations/crunchyroll"' in body
+    assert 'href="/integrations/youtube"' in body
+    assert 'href="/integrations/discord"' in body
+    # active child pre-opens the group
+    assert 'class="sidebar-group open"' in body
+
+
+def test_integrations_index_redirects_to_crunchyroll(client):
+    resp = client.get("/integrations", headers=_auth_header())
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/integrations/crunchyroll")
+
+
+def test_integrations_youtube_and_discord_are_planned_placeholders(client):
+    for path in ("/integrations/youtube", "/integrations/discord"):
+        body = client.get(path, headers=_auth_header()).get_data(as_text=True)
+        assert "Planned" in body
+        assert "No Crunchyroll shows" not in body  # Crunchyroll content stays on its own page
 
 
 def test_integrations_requires_admin(client):
     assert client.get("/integrations").status_code == 401
+    assert client.get("/integrations/crunchyroll").status_code == 401
+    assert client.get("/integrations/youtube").status_code == 401
+    assert client.get("/integrations/discord").status_code == 401
     assert client.post("/integrations/crunchyroll/approve", data={}).status_code == 401
     assert client.post("/integrations/crunchyroll/remove_all", data={}).status_code == 401
     assert client.post("/integrations/crunchyroll/remove_one", data={}).status_code == 401
 
 
 def test_integrations_empty_state(client, db_conn):
-    resp = client.get("/integrations", headers=_auth_header())
+    resp = client.get("/integrations/crunchyroll", headers=_auth_header())
     assert "No Crunchyroll shows approved for anyone yet." in resp.get_data(as_text=True)
 
 
@@ -1315,7 +1334,7 @@ def test_integrations_lists_every_series_with_all_its_users(client, db_conn):
     _approve_direct(db_conn, kids["kid2"], "GYE5K0XVR", "Ace Attorney")
     _approve_direct(db_conn, kids["kid3"], "G6M0K1P2Q", "Naruto")
 
-    body = client.get("/integrations", headers=_auth_header()).get_data(as_text=True)
+    body = client.get("/integrations/crunchyroll", headers=_auth_header()).get_data(as_text=True)
     assert "Ace Attorney" in body and "GYE5K0XVR" in body
     assert "Naruto" in body and "G6M0K1P2Q" in body
     # kid1 + kid2 both shown against Ace Attorney
@@ -3398,6 +3417,66 @@ def test_pending_devices_are_sorted_ahead_of_already_authenticated_ones(client, 
     resp = client.get("/devices", headers=_auth_header())
     body = resp.data.decode()
     assert body.index("aa:bb:cc:dd:ee:45") < body.index("aa:bb:cc:dd:ee:44")
+
+
+def _bind(db_conn, mac, ip, last_seen="2026-09-10T12:00:00Z"):
+    db_conn.execute(
+        "INSERT INTO device_bindings (device_id, mac_address, ipv4_address, first_seen_at, "
+        "last_seen_at, source, active) SELECT id, mac_address, ?, ?, ?, 'snapshot', 1 "
+        "FROM devices WHERE mac_address = ?",
+        (ip, last_seen, last_seen, mac),
+    )
+    db_conn.commit()
+
+
+def test_devices_roster_shows_the_current_ip_column(client, db_conn):
+    # RoadMap 2026-09-10 finding #1: the roster had no IP column, so a
+    # device could only be found by MAC/label.
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:70"}, headers=_auth_header())
+    _bind(db_conn, "aa:bb:cc:dd:ee:70", "192.168.1.123")
+    body = client.get("/devices", headers=_auth_header()).data.decode()
+    assert "Current IP" in body
+    assert "192.168.1.123" in body
+
+
+def test_devices_search_matches_on_ip(client, db_conn):
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:71"}, headers=_auth_header())
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:72"}, headers=_auth_header())
+    _bind(db_conn, "aa:bb:cc:dd:ee:71", "192.168.1.201")
+    _bind(db_conn, "aa:bb:cc:dd:ee:72", "192.168.1.202")
+    body = client.get("/devices?q=192.168.1.201", headers=_auth_header()).data.decode()
+    assert "aa:bb:cc:dd:ee:71" in body
+    assert "aa:bb:cc:dd:ee:72" not in body
+
+
+def test_devices_roster_and_pending_tables_are_sortable(client, db_conn):
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:73")
+    body = client.get("/devices", headers=_auth_header()).data.decode()
+    assert body.count("data-sortable") >= 2
+    assert 'data-sort="ip"' in body
+
+
+def test_devices_off_lan_docker_bridge_ip_is_hidden(client, db_conn):
+    # RoadMap 2026-09-10 finding #3: the controller's discovery loop
+    # recorded 172.17.x Docker-bridge addresses as devices. Until the
+    # controller-side fix, the dashboard hides any device whose only
+    # bindings are outside the configured local_network.
+    client.post("/devices/add", data={"mac_address": "02:42:AC:11:00:02"}, headers=_auth_header())
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:74"}, headers=_auth_header())
+    _bind(db_conn, "02:42:ac:11:00:02", "172.17.0.2")
+    _bind(db_conn, "aa:bb:cc:dd:ee:74", "192.168.1.130")
+    body = client.get("/devices", headers=_auth_header()).data.decode()
+    assert "aa:bb:cc:dd:ee:74" in body
+    assert "02:42:ac:11:00:02" not in body
+    assert "172.17.0.2" not in body
+
+
+def test_devices_with_no_binding_at_all_still_show(client, db_conn):
+    # A manually-added device that has never been seen on the network has
+    # no bindings -- the off-LAN filter must not hide it.
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:75"}, headers=_auth_header())
+    body = client.get("/devices", headers=_auth_header()).data.decode()
+    assert "aa:bb:cc:dd:ee:75" in body
 
 
 def test_devices_page_does_not_treat_a_group_ignored_device_as_pending(client, db_conn):

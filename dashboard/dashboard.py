@@ -340,7 +340,7 @@ try { if (localStorage.getItem("og_sidebar_collapsed") === "1") document.documen
 </script>
 </head>
 <body>
-{% set page_titles = {'report': 'Report', 'users': 'Users', 'domains': 'Domains', 'categories': 'Categories', 'schedules': 'Schedules', 'devices': 'Devices', 'integrations': 'Integrations', 'health': 'Health', 'events': 'Events', 'settings': 'Settings'} %}
+{% set page_titles = {'report': 'Report', 'users': 'Users', 'domains': 'Domains', 'categories': 'Categories', 'schedules': 'Schedules', 'devices': 'Devices', 'integrations': 'Integrations', 'integrations_crunchyroll': 'Crunchyroll', 'integrations_youtube': 'YouTube', 'integrations_discord': 'Discord', 'health': 'Health', 'events': 'Events', 'settings': 'Settings'} %}
 <div class="app-shell">
   <nav class="sidebar">
     <a class="sidebar-brand" href="{{ url_for('report') }}">
@@ -372,10 +372,19 @@ try { if (localStorage.getItem("og_sidebar_collapsed") === "1") document.documen
         <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         <span class="sidebar-label">Devices</span>
       </a>
-      <a class="sidebar-item {{ 'active' if active=='integrations' else '' }}" href="{{ url_for('integrations') }}" title="Integrations">
-        <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v4a2 2 0 0 1-4 0V3"/><path d="M4 8h16a1 1 0 0 1 1 1v3a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5V9a1 1 0 0 1 1-1z"/><path d="M12 17v4"/></svg>
-        <span class="sidebar-label">Integrations</span>
-      </a>
+      {% set integ_active = active.startswith('integrations') %}
+      <div class="sidebar-group {{ 'open' if integ_active else '' }}" data-sidebar-group>
+        <button type="button" class="sidebar-item sidebar-group-toggle {{ 'active' if integ_active else '' }}" data-sidebar-group-toggle title="Integrations">
+          <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v4a2 2 0 0 1-4 0V3"/><path d="M4 8h16a1 1 0 0 1 1 1v3a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5V9a1 1 0 0 1 1-1z"/><path d="M12 17v4"/></svg>
+          <span class="sidebar-label">Integrations</span>
+          <svg class="sidebar-caret" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <div class="sidebar-subitems">
+          <a class="sidebar-subitem {{ 'active' if active=='integrations_crunchyroll' else '' }}" href="{{ url_for('integrations_crunchyroll') }}">Crunchyroll</a>
+          <a class="sidebar-subitem {{ 'active' if active=='integrations_youtube' else '' }}" href="{{ url_for('integrations_youtube') }}">YouTube</a>
+          <a class="sidebar-subitem {{ 'active' if active=='integrations_discord' else '' }}" href="{{ url_for('integrations_discord') }}">Discord</a>
+        </div>
+      </div>
       <a class="sidebar-item {{ 'active' if active=='health' else '' }}" href="{{ url_for('health_page') }}" title="Health">
         <svg class="sidebar-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
         <span class="sidebar-label">Health{% if interception_down %} <span class="badge blocked">!</span>{% endif %}</span>
@@ -438,6 +447,67 @@ document.addEventListener("input", function (event) {
     row.style.display = (!tableTerm || row.textContent.toLowerCase().indexOf(tableTerm) !== -1) ? "" : "none";
   }
 });
+
+// Client-side column sort for any <table data-sortable>. Click a
+// <th data-sort[="ip|date|num"]> to sort the data rows (rows with no
+// <th>) by that column; click again to reverse. Type-aware: "ip" sorts
+// 192.168.1.9 before 192.168.1.12, "date" parses timestamps, "num"
+// parses numbers, default is case-insensitive text. Non-values (an
+// em-dash, "Never", empty) always sort to the bottom regardless of
+// direction. In-page only -- fine for the Devices roster, whose page
+// size caps well above a home LAN's device count; combine with the
+// per-page picker if a page is ever truncated.
+(function () {
+  function cellKey(row, idx, kind) {
+    var raw = ((row.cells[idx] && row.cells[idx].textContent) || "").trim();
+    var missing = !raw || raw === "—" || raw === "-" || raw.toLowerCase() === "never";
+    if (kind === "ip") {
+      var m = raw.match(/([0-9]+)[.]([0-9]+)[.]([0-9]+)[.]([0-9]+)/);
+      var v = m ? ((+m[1]) * 16777216 + (+m[2]) * 65536 + (+m[3]) * 256 + (+m[4])) : NaN;
+      return { missing: missing || isNaN(v), n: v };
+    }
+    if (kind === "date") {
+      var t = Date.parse(raw);
+      return { missing: missing || isNaN(t), n: t };
+    }
+    if (kind === "num") {
+      var f = parseFloat(raw.replace(/[^0-9.-]/g, ""));
+      return { missing: missing || isNaN(f), n: f };
+    }
+    return { missing: missing, s: raw.toLowerCase() };
+  }
+  document.addEventListener("click", function (event) {
+    var th = event.target.closest("th[data-sort]");
+    if (!th) return;
+    var table = th.closest("table[data-sortable]");
+    if (!table) return;
+    var headerRow = th.parentNode;
+    var idx = Array.prototype.indexOf.call(headerRow.cells, th);
+    var kind = th.getAttribute("data-sort") || "";
+    var asc = th.getAttribute("data-sort-dir") !== "asc";
+    Array.prototype.forEach.call(headerRow.cells, function (c) {
+      c.removeAttribute("data-sort-dir");
+      if (c.dataset && c.dataset.sortLabel !== undefined) c.textContent = c.dataset.sortLabel;
+    });
+    if (th.dataset.sortLabel === undefined) th.dataset.sortLabel = th.textContent;
+    th.setAttribute("data-sort-dir", asc ? "asc" : "desc");
+    th.textContent = th.dataset.sortLabel + (asc ? " ▲" : " ▼");
+    var body = [];
+    Array.prototype.forEach.call(table.rows, function (r) {
+      if (!r.querySelector("th") && r.cells.length > 1) body.push(r);
+    });
+    body.sort(function (a, b) {
+      var ka = cellKey(a, idx, kind), kb = cellKey(b, idx, kind);
+      if (ka.missing && kb.missing) return 0;
+      if (ka.missing) return 1;
+      if (kb.missing) return -1;
+      var cmp = ("s" in ka) ? ka.s.localeCompare(kb.s) : (ka.n - kb.n);
+      return asc ? cmp : -cmp;
+    });
+    var parent = body.length ? body[0].parentNode : null;
+    if (parent) body.forEach(function (r) { parent.appendChild(r); });
+  });
+})();
 
 // Combobox picker -- type-to-reveal search that replaces a full checkbox/
 // radio list with a dropdown of only the entities that match what's
@@ -602,6 +672,27 @@ document.addEventListener("input", function (event) {
   toggle.addEventListener("click", function () {
     var collapsed = document.documentElement.classList.toggle("sidebar-collapsed");
     try { localStorage.setItem("og_sidebar_collapsed", collapsed ? "1" : "0"); } catch (e) {}
+  });
+})();
+
+// Collapsible sidebar nav groups. The server pre-opens the group whose
+// child page is active; clicking the group header toggles it, and that
+// choice persists per-browser (a display preference). localStorage key
+// per group so more groups can be added without new code.
+(function () {
+  document.querySelectorAll("[data-sidebar-group]").forEach(function (group) {
+    var toggle = group.querySelector("[data-sidebar-group-toggle]");
+    if (!toggle) return;
+    var key = "og_sidebar_group_" + (toggle.getAttribute("title") || "").toLowerCase();
+    try {
+      var saved = localStorage.getItem(key);
+      if (saved === "1") group.classList.add("open");
+      else if (saved === "0" && !group.querySelector(".sidebar-subitem.active")) group.classList.remove("open");
+    } catch (e) {}
+    toggle.addEventListener("click", function () {
+      var open = group.classList.toggle("open");
+      try { localStorage.setItem(key, open ? "1" : "0"); } catch (e) {}
+    });
   });
 })();
 </script>
@@ -1808,16 +1899,11 @@ def parse_series_url(url: str) -> tuple[str | None, str]:
 
 INTEGRATIONS_BODY = """
 <div class="card">
-<h2>Third-party integrations</h2>
+<h2>Crunchyroll</h2>
 <p class="hint">
-  Cross-account management for external services. Approvals still live
-  per-user (each kid's own page is the per-person view) -- this page is
-  the household-wide counterpart: every approval in one table, and
-  one-click add/remove across users.
-</p>
-<p class="hint" style="margin-top:.4rem;">
-  <strong>Live now:</strong> Crunchyroll.
-  <strong>Planned:</strong> YouTube (channel/creator whitelist), Discord.
+  Household-wide view of per-user show approvals. Each kid's own page is
+  the per-person view; this is the cross-account counterpart -- every
+  approval in one table, with one-click add/remove across users.
 </p>
 </div>
 
@@ -1891,9 +1977,45 @@ INTEGRATIONS_BODY = """
 """
 
 
+_INTEGRATION_PLACEHOLDER_BODY = """
+<div class="card">
+<h2>{{ name }}</h2>
+<p class="hint">{{ blurb }}</p>
+<p class="hint" style="margin-top:.5rem;"><span class="badge pending">Planned</span> &mdash; not available yet. Tracked in the project RoadMap.</p>
+</div>
+"""
+
+
 @app.route("/integrations")
 @require_admin
 def integrations():
+    # Kept so old links and `url_for('integrations')` still resolve; the
+    # section is now a sidebar group of per-service sub-pages.
+    return redirect(url_for("integrations_crunchyroll"))
+
+
+@app.route("/integrations/youtube")
+@require_admin
+def integrations_youtube():
+    return render("integrations_youtube", render_template_string(
+        _INTEGRATION_PLACEHOLDER_BODY, name="YouTube",
+        blurb="Per-channel / per-creator allow-listing, scoped to a user or "
+              "a device -- the same model as the Crunchyroll show whitelist.",
+    ))
+
+
+@app.route("/integrations/discord")
+@require_admin
+def integrations_discord():
+    return render("integrations_discord", render_template_string(
+        _INTEGRATION_PLACEHOLDER_BODY, name="Discord",
+        blurb="Server / channel controls for Discord.",
+    ))
+
+
+@app.route("/integrations/crunchyroll")
+@require_admin
+def integrations_crunchyroll():
     conn = get_db()
     rows = conn.execute(
         "SELECT us.series_id, us.series_name, u.id AS user_id, u.display_name "
@@ -1921,7 +2043,7 @@ def integrations():
         known_series=_entity_combo(known_series, lambda s: s["series_name"]),
         users=users,
     )
-    return render("integrations", body)
+    return render("integrations_crunchyroll", body)
 
 
 @app.route("/integrations/crunchyroll/approve", methods=["POST"])
@@ -1934,21 +2056,21 @@ def approve_show_for_users():
     conn = get_db()
     user_ids = request.form.getlist("user_ids")
     if not user_ids:
-        return flash_redirect("integrations", "Pick at least one user to approve the show for.", error=True)
+        return flash_redirect("integrations_crunchyroll", "Pick at least one user to approve the show for.", error=True)
     series_id, name, error = _resolve_series_from_form(conn, request.form)
     if error is not None:
-        return flash_redirect("integrations", error, error=True)
+        return flash_redirect("integrations_crunchyroll", error, error=True)
     valid = {str(r["id"]) for r in conn.execute("SELECT id FROM users").fetchall()}
     targets = [uid for uid in user_ids if uid in valid]
     if not targets:
-        return flash_redirect("integrations", "None of those users exist anymore.", error=True)
+        return flash_redirect("integrations_crunchyroll", "None of those users exist anymore.", error=True)
     conn.executemany(
         "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?,?,?) "
         "ON CONFLICT(user_id, series_id) DO UPDATE SET series_name = excluded.series_name",
         [(uid, series_id, name) for uid in targets],
     )
     conn.commit()
-    return flash_redirect("integrations", f"Approved {name} for {len(targets)} user(s).")
+    return flash_redirect("integrations_crunchyroll", f"Approved {name} for {len(targets)} user(s).")
 
 
 @app.route("/integrations/crunchyroll/remove_all", methods=["POST"])
@@ -1959,8 +2081,8 @@ def remove_show_from_all_users():
     cur = conn.execute("DELETE FROM user_shows WHERE series_id = ?", (series_id,))
     conn.commit()
     if cur.rowcount:
-        return flash_redirect("integrations", f"Removed the show from {cur.rowcount} user(s).")
-    return flash_redirect("integrations", "That show wasn't approved for anyone.", error=True)
+        return flash_redirect("integrations_crunchyroll", f"Removed the show from {cur.rowcount} user(s).")
+    return flash_redirect("integrations_crunchyroll", "That show wasn't approved for anyone.", error=True)
 
 
 @app.route("/integrations/crunchyroll/remove_one", methods=["POST"])
@@ -1972,7 +2094,7 @@ def remove_show_from_one_user():
         (request.form.get("user_id", ""), request.form.get("series_id", "")),
     )
     conn.commit()
-    return flash_redirect("integrations", "Removed.")
+    return flash_redirect("integrations_crunchyroll", "Removed.")
 
 
 # ==========================================================
@@ -3148,8 +3270,8 @@ DEVICES_BODY = """
   to assign it to a kid or group directly instead of waiting on a login.
 </p>
 <div class="table-scroll">
-<table>
-  <tr><th>MAC address</th><th>Current IP</th><th>First seen</th><th>Last seen</th><th>Seen via</th><th>Login attempts</th><th></th></tr>
+<table data-sortable>
+  <tr><th data-sort>MAC address</th><th data-sort="ip">Current IP</th><th data-sort="date">First seen</th><th data-sort="date">Last seen</th><th data-sort>Seen via</th><th data-sort="num">Login attempts</th><th></th></tr>
   {% for d in pending_devices %}
   <tr>
     <td><code>{{ d.mac_address }}</code></td>
@@ -3301,7 +3423,7 @@ DEVICES_BODY = """
 <form method="get" action="{{ url_for('devices') }}" class="inline" style="margin-bottom:.3rem; gap:.4rem;">
   <input type="hidden" name="page" value="1">
   <input type="hidden" name="per_page" value="{{ per_page }}">
-  <input type="search" name="q" value="{{ search }}" placeholder="Search MAC, label, assigned kid/group&hellip;" style="width:100%; max-width:280px;">
+  <input type="search" name="q" value="{{ search }}" placeholder="Search MAC, IP, label, assigned kid/group&hellip;" style="width:100%; max-width:280px;">
   <button class="btn small" type="submit">Search</button>
   {% if search %}<a class="btn small" href="{{ url_for('devices', per_page=per_page) }}">Clear</a>{% endif %}
 </form>
@@ -3331,13 +3453,14 @@ DEVICES_BODY = """
 </div>
 {% endif %}
 <div class="table-scroll">
-<table id="devicesTable">
-  <tr><th>{% if devices %}<input type="checkbox" id="deviceSelectAll" title="Select all">{% endif %}</th><th>MAC address</th><th>Label</th><th>Assigned to</th><th>Status</th><th>SSL-Bump</th><th>Bypass login</th><th>Last seen</th><th></th></tr>
+<table id="devicesTable" data-sortable>
+  <tr><th>{% if devices %}<input type="checkbox" id="deviceSelectAll" title="Select all">{% endif %}</th><th data-sort>MAC address</th><th data-sort="ip">Current IP</th><th data-sort>Label</th><th data-sort>Assigned to</th><th data-sort>Status</th><th data-sort>SSL-Bump</th><th data-sort>Bypass login</th><th data-sort="date">Last seen</th><th></th></tr>
   {% for d in devices %}
   {% set effective_ignored = d.ignored or d.group_ignored %}
   <tr>
     <td><input type="checkbox" class="bulk-device-check" value="{{ d.id }}"></td>
     <td><code>{{ d.mac_address }}</code></td>
+    <td>{{ d.current_ip or '&mdash;' }}</td>
     <td>{{ d.label or '' }}</td>
     <td>
       {% if effective_ignored %}<span class="badge pending" title="{{ 'This device is in an Ignore-mode group' if d.group_ignored and not d.ignored else '' }}">Ignored</span>
@@ -3353,7 +3476,7 @@ DEVICES_BODY = """
     </td>
     <td>{% if d.bump_enabled %}<span class="badge mode-bump">yes</span>{% else %}<span class="badge mode-splice">no</span>{% endif %}</td>
     <td>{% if d.bypass_login %}<span class="badge pending">yes</span>{% else %}&mdash;{% endif %}</td>
-    <td>{{ d.last_seen_at or 'Never' }}</td>
+    <td>{{ d.network_last_seen or 'Never' }}</td>
     <td>
       <a class="btn small" href="{{ url_for('device_detail', device_id=d.id) }}">Manage</a>
       <a class="btn small" href="{{ url_for('domains', device_id=d.id) }}">Domains</a>
@@ -3397,7 +3520,7 @@ DEVICES_BODY = """
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="9"><em>{% if search %}No devices match &ldquo;{{ search }}&rdquo;.{% else %}No devices tracked yet.{% endif %}</em></td></tr>
+  <tr><td colspan="10"><em>{% if search %}No devices match &ldquo;{{ search }}&rdquo;.{% else %}No devices tracked yet.{% endif %}</em></td></tr>
   {% endfor %}
 </table>
 </div>
@@ -5221,6 +5344,40 @@ def _failed_login_attempts(conn, mac_address: str) -> dict | None:
     return {"count": row["c"], "last_attempt": row["last_ts"]}
 
 
+def _out_of_lan_device_ids(conn) -> set:
+    """Device ids whose only network bindings sit outside the configured
+    `local_network` (e.g. a 172.17.x Docker-bridge address the
+    controller's discovery loop picked up off the docker0 interface).
+    These are hidden from the Devices page as a stopgap -- the real fix
+    is discovery rejecting non-LAN IPs at record time, controller-side
+    (RoadMap.md's 2026-09-10 findings, #3). A device with no bindings at
+    all, or with at least one in-LAN binding, is never in this set.
+    Returns an empty set when `local_network` is unset (LAN check
+    disabled), so nothing is hidden in that case."""
+    import ipaddress
+
+    raw = (db.get_setting(conn, "local_network") or "").strip()
+    nets = []
+    for cidr in raw.split():
+        try:
+            nets.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            pass
+    if not nets:
+        return set()
+    has_lan_binding: dict = {}
+    for b in conn.execute("SELECT device_id, ipv4_address FROM device_bindings").fetchall():
+        did = b["device_id"]
+        if did is None:
+            continue
+        try:
+            ip = ipaddress.ip_address(b["ipv4_address"])
+        except (ValueError, TypeError):
+            continue
+        has_lan_binding[did] = has_lan_binding.get(did, False) or any(ip in n for n in nets)
+    return {did for did, ok in has_lan_binding.items() if not ok}
+
+
 _DEVICE_LIST_SELECT = (
     "SELECT d.*, u.display_name, g.name AS group_name, COALESCE(g.ignored, 0) AS group_ignored, "
     # Fixed 2026-09-08 (real bug found live, RoadMap.md's dated entry):
@@ -5265,26 +5422,35 @@ def devices():
     independent query rather than a Python filter over the (now only
     partial) paginated list the way it used to be."""
     conn = get_db()
-    pending_devices = conn.execute(
+    # RoadMap 2026-09-10 finding #3: hide devices whose only bindings are
+    # off-LAN (Docker-bridge 172.17.x etc. the discovery loop shouldn't
+    # have recorded). Stopgap until the controller-side fix lands.
+    hidden_ids = _out_of_lan_device_ids(conn)
+    hidden_clause = ""
+    hidden_params: list = []
+    if hidden_ids:
+        hidden_clause = "d.id NOT IN (%s)" % ",".join("?" * len(hidden_ids))
+        hidden_params = list(hidden_ids)
+    # "Dismiss" (2026-09-08): pending_dismissed_at hides a device from
+    # this card ONLY until something genuinely newer happens to it -- a
+    # fresh network sighting, or a new captive-portal login attempt --
+    # at which point it reappears on its own. Nothing ever resets the
+    # column to NULL; this comparison is what makes a dismissal
+    # self-expiring instead of permanent. Deliberately does NOT affect
+    # the main roster's own `pending`/"Awaiting login" badge -- dismissal
+    # only declutters this summary card.
+    pending_sql = (
         _DEVICE_LIST_SELECT + "WHERE d.ignored = 0 AND COALESCE(g.ignored, 0) = 0 "
         "AND d.bypass_login = 0 AND d.is_authenticated = 0 "
-        # "Dismiss" (2026-09-08, project owner's explicit request):
-        # pending_dismissed_at hides a device from this card ONLY until
-        # something genuinely newer happens to it -- a fresh network
-        # sighting, or a new captive-portal login attempt -- at which
-        # point it reappears on its own. Nothing ever resets the column
-        # back to NULL; this comparison is what makes a dismissal
-        # self-expiring instead of permanent. Deliberately does NOT
-        # affect the main roster's own `pending`/"Awaiting login" badge
-        # above -- dismissal only declutters this summary card, it
-        # doesn't change what the device's real state actually is.
-        "AND (d.pending_dismissed_at IS NULL "
+        + ("AND " + hidden_clause + " " if hidden_clause else "")
+        + "AND (d.pending_dismissed_at IS NULL "
         "     OR EXISTS (SELECT 1 FROM device_bindings b WHERE b.mac_address = d.mac_address "
         "                AND b.last_seen_at > d.pending_dismissed_at) "
         "     OR EXISTS (SELECT 1 FROM system_events e WHERE e.source = 'captive_portal_login' "
         "                AND e.detail = d.mac_address AND e.ts > d.pending_dismissed_at)) "
         "ORDER BY d.created_at DESC"
-    ).fetchall()
+    )
+    pending_devices = conn.execute(pending_sql, hidden_params).fetchall()
     # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
     # 2026-09-07 pagination work, project owner's explicit request): now
     # that the main roster only renders one page at a time, the old
@@ -5295,12 +5461,20 @@ def devices():
     # does NOT filter pending_devices above -- that card is intentionally
     # every pending device regardless of what's searched for below.
     search = (request.args.get("q") or "").strip()
-    where_sql = ""
+    clauses: list = []
     where_params: list = []
     if search:
         like = f"%{search}%"
-        where_sql = "WHERE (d.mac_address LIKE ? OR d.label LIKE ? OR u.display_name LIKE ? OR g.name LIKE ?) "
-        where_params = [like, like, like, like]
+        clauses.append(
+            "(d.mac_address LIKE ? OR d.label LIKE ? OR u.display_name LIKE ? OR g.name LIKE ? "
+            "OR EXISTS (SELECT 1 FROM device_bindings b WHERE b.mac_address = d.mac_address "
+            "AND b.ipv4_address LIKE ?))"
+        )
+        where_params += [like, like, like, like, like]
+    if hidden_clause:
+        clauses.append(hidden_clause)
+        where_params += hidden_params
+    where_sql = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
     device_count = conn.execute(
         "SELECT COUNT(*) AS c FROM devices d "
         "LEFT JOIN users u ON u.id = d.user_id LEFT JOIN groups g ON g.id = d.group_id " + where_sql,

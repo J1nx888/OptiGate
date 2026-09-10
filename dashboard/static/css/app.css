@@ -140,6 +140,23 @@ html.sidebar-collapsed .sidebar { width: 60px; }
 .sidebar-icon { flex-shrink: 0; }
 .sidebar-label { overflow: hidden; text-overflow: ellipsis; }
 html.sidebar-collapsed .sidebar-label { display: none; }
+
+/* Collapsible nav group (Integrations -> Crunchyroll/YouTube/Discord) */
+.sidebar-group { display: flex; flex-direction: column; }
+.sidebar-group-toggle .sidebar-caret { flex-shrink: 0; margin-left: auto; transition: transform .15s ease; }
+.sidebar-group.open .sidebar-group-toggle .sidebar-caret { transform: rotate(90deg); }
+.sidebar-subitems { display: none; flex-direction: column; gap: .1rem; padding: .1rem 0 .1rem .95rem; }
+.sidebar-group.open .sidebar-subitems { display: flex; }
+.sidebar-subitem {
+  display: block; padding: .4rem .75rem; border-radius: var(--radius-sm);
+  color: var(--text-muted); text-decoration: none; font-weight: 600; font-size: .84rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-left: 2px solid var(--border);
+}
+.sidebar-subitem:hover { background: var(--surface-alt); color: var(--text); }
+.sidebar-subitem.active { background: var(--surface-alt); color: var(--brand); border-left-color: var(--brand); }
+html.sidebar-collapsed .sidebar-caret { display: none; }
+html.sidebar-collapsed .sidebar-subitems { display: none !important; }
 html.sidebar-collapsed .sidebar-brand { justify-content: center; padding: 1rem .5rem; }
 html.sidebar-collapsed .sidebar-collapse-btn svg { transform: rotate(180deg); }
 
@@ -324,6 +341,10 @@ thead th {
 tbody tr { border-bottom: 1px solid var(--border); }
 tbody tr:last-child { border-bottom: none; }
 tbody tr:hover { background: var(--surface-alt); }
+
+table[data-sortable] th[data-sort] { cursor: pointer; user-select: none; }
+table[data-sortable] th[data-sort]:hover { color: var(--text); }
+table[data-sortable] th[data-sort][data-sort-dir] { color: var(--text); }
 td em { color: var(--text-muted); }
 
 /* ---- Forms ---- */

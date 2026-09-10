@@ -8234,6 +8234,43 @@ redesign in a dedicated session, not a live quick-patch**.
    - **Firefox setup friction** -- manual proxy + CA import per device;
      document it, or ship a Firefox `policies.json` / autoconfig.
 
+### Dashboard feedback batch (2026-09-10, from interception-window use)
+
+Project owner's testing turned up five dashboard items. All
+dashboard-only; done except the controller half of #3.
+
+1. **DONE -- Devices roster now has a "Current IP" column** (the value
+   was already computed by the list query, just never rendered in the
+   main table -- only the pending card). Also fixed a latent bug: the
+   roster's "Last seen" read `devices.last_seen_at`, which nothing
+   populates, so it always said "Never" -- now reads the binding's
+   `network_last_seen`. Search box (`?q=`) now matches on IP too.
+2. **DONE -- "Integrations" is a collapsible sidebar group** ->
+   `/integrations/crunchyroll` (the existing cross-user page moved
+   here), `/integrations/youtube`, `/integrations/discord` (both
+   "Planned" placeholders). `/integrations` 302-redirects to
+   `/integrations/crunchyroll`; the group auto-opens when a child is
+   active and its open/closed state persists per-browser.
+3. **Docker-bridge IPs (172.17.x) shown as devices.** DASHBOARD STOPGAP
+   DONE -- `_out_of_lan_device_ids()` hides any device whose only
+   bindings are outside the `local_network` setting, from both the
+   roster and the pending card. **Still pending (controller):**
+   `controller/discovery.py` + `rtnetlink_listener` / `identity.record_binding`
+   must reject non-LAN IPs at record time so the junk rows stop being
+   created, plus a one-time purge of the existing ones. Rides the next
+   interception window.
+4. **"Missing" device 192.168.1.12 -- was not actually missing.** It's
+   a PREAUTH device that renders in the pending card and the roster;
+   the owner couldn't find it because the roster had no IP column and
+   search didn't match IP. Closed by #1.
+5. **DONE -- both device tables are sortable by any column.** Reusable
+   `<table data-sortable>` + `<th data-sort[="ip|date|num"]>` client-side
+   engine in `BASE` (IP-aware so `.9` sorts before `.12`; non-values sink
+   to the bottom; click toggles asc/desc with a ▲/▼ marker). Applied to
+   the pending "awaiting login" table and the main roster. In-page sort;
+   fine for a home LAN's device count, pair with the per-page picker if
+   a page is ever truncated.
+
 ---
 
 ## Cross-cutting: security-by-design
