@@ -6618,7 +6618,8 @@ REPORT_BODY = """
   <tr><th>Time (UTC)</th><th>User</th><th>Device</th><th>Domain</th><th>Show / Path</th><th>Result</th><th></th></tr>
   {% for row in rows %}
   <tr>
-    <td>{{ row.ts }}</td>
+    {% set _ts = row.ts or '' %}
+    <td class="nowrap">{{ _ts[:10] }}<br><span class="hint" style="font-size:.85em;">{{ _ts[11:19] }}</span></td>
     <td>{{ row.username }}</td>
     <td>
       {% if row.device_id %}
@@ -6629,8 +6630,9 @@ REPORT_BODY = """
       <br><a class="hint" style="font-size:.8em;" href="{{ url_for('devices') }}">Not a known device -- add it?</a>
       {% else %}&mdash;{% endif %}
     </td>
-    <td><code>{{ row.domain }}</code></td>
-    <td>{{ row.series_name or row.series_id or row.path or '' }}</td>
+    <td><code class="cell-truncate cell-truncate-sm" title="{{ row.domain }}">{{ row.domain }}</code></td>
+    {% set sp = row.series_name or row.series_id or row.path or '' %}
+    <td>{% if sp %}<span class="cell-truncate" title="{{ sp }}">{{ sp }}</span>{% endif %}</td>
     <td>
       <span class="badge {{ 'allowed' if row.allowed else 'blocked' }}">{{ 'allowed' if row.allowed else 'blocked' }}</span>
       {% set label = reason_label(row.reason) %}

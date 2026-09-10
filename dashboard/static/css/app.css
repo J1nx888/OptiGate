@@ -346,6 +346,23 @@ table[data-sortable] th[data-sort] { cursor: pointer; user-select: none; }
 table[data-sortable] th[data-sort]:hover { color: var(--text); }
 table[data-sortable] th[data-sort][data-sort-dir] { color: var(--text); }
 td em { color: var(--text-muted); }
+td.nowrap { white-space: nowrap; }
+
+/* Clamp a long free-text cell value (a full URL with query string, a bare
+   domain that has no spaces to wrap on) so one row can't push the columns
+   to its right off the edge of .table-scroll and force a horizontal
+   scrollbar. The full value stays in the title attribute for hover, and
+   the cell text still selects/copies whole. `.cell-truncate-sm` is the
+   tighter cap for a column that only needs to show a domain. */
+.cell-truncate {
+  display: inline-block;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.cell-truncate-sm { max-width: 22ch; }
 
 /* ---- Forms ---- */
 form.inline { display: inline; }
