@@ -7947,9 +7947,18 @@ the built image / binary):
 - **Item 21** (above) -- conntrack flush on reclassification.
 - **Finding #4 fix (`89cf895`)** -- `optigate.home` from a known
   non-bypass device now shows the device-status page, not the login.
-- **Phase 4 captive portal** -- a never-seen device (Jacob's) hit the
-  portal, appeared in "Devices awaiting login", and a kid login granted
-  DNS access. First real end-to-end confirmation of the portal flow.
+- **Phase 4 captive portal** -- devices appeared in "Devices awaiting
+  login" and the portal served its login page to `unauthenticated_v4`
+  clients. NOT a clean end-to-end confirmation, though: the DB shows the
+  only jacob portal event in the window was a **failed** login
+  (16:52:32), and Jacob's tablet (`14:05:89:6f:16:65`, device 28) was
+  already `is_authenticated=1` / assigned to jacob since 2026-09-08, so
+  it had DNS access regardless of the portal. A genuine
+  never-seen-MAC -> portal -> successful-first-login run still needs a
+  real spare device next window. (A successful login leaves no
+  `system_events` row -- only failures do -- so "it worked on screen"
+  can't be confirmed from the logs either way; worth adding a
+  success event.)
 - **Schedule enforcement** -- "Shift mode now" from the dashboard
   actually flipped a device's access (tested against `youtube.com`).
 - **G1** (ARP mechanism covers every device incl. satellites) -- already
@@ -8237,6 +8246,53 @@ redesign in a dedicated session, not a live quick-patch**.
      consistency with the intercept tier?
    - **Firefox setup friction** -- manual proxy + CA import per device;
      document it, or ship a Firefox `policies.json` / autoconfig.
+
+9. **The Report page has no view of a DNS-tier device's ALLOWED
+   traffic** (owner noticed 2026-09-10: Jacob used his tablet during the
+   window, nothing showed on the Report page). Not a bug -- a coverage
+   gap. `access_log` (the Report page's source) is written by exactly
+   two things:
+   - the Squid helpers (`authz_helper`/`sni_helper`), which log every
+     allow AND deny -- but Squid only ever sees `bump_v4`
+     (SSL-Bump-enabled) devices;
+   - `adguard_report_sync.py` (item 25), which back-fills a
+     `dns_hard_deny` row ONLY when AdGuard actively hard-denies a domain
+     OptiGate manages for that user.
+
+   So a normal authenticated device that is not SSL-Bump-enabled and
+   does not hit a blocked category produces **zero** Report rows.
+   Confirmed against the DB: `access_log` has 0 rows ever for
+   `jacob` / device 28 / `192.168.1.10`; his only category exposure is
+   the 5 global-blocked ones, which he didn't hit. Item 25 built the
+   *blocked* half of DNS-tier Report visibility; the *allowed* half is
+   unbuilt.
+
+   **Fix options (design decision for the owner):**
+   - **Extend `adguard_report_sync.py`** to also back-fill *allowed*
+     rows from AdGuard's own query log, for IPs that resolve to a
+     managed device -- sampled and deduped (a full 1:1 mirror of
+     AdGuard's query log would be enormous; probably one row per
+     `(device, registrable-domain)` per N-minute bucket, `allowed=1`,
+     `reason="dns_tier_allowed"`). Reuses the poller, the watermark, and
+     `logging_util.log_access()` that already exist. Same
+     device/user attribution path (`device_identity.resolve_device`).
+     Needs a retention/pruning story so `access_log` doesn't grow
+     without bound, and a Report-page toggle to show/hide the DNS-tier
+     allowed rows (they'd otherwise swamp the far rarer, more
+     interesting proxy-tier and hard-deny rows).
+   - **Or** surface AdGuard's per-client query log directly in the
+     dashboard (an embedded/linked view filtered to a device's IP) --
+     less code, no `access_log` growth, but a second place to look and
+     no unified filtering/approval UX.
+   Leans toward the first, gated on the retention design.
+
+   Related, small: a successful captive-portal login currently writes
+   NO `system_events` row (only failures do) -- add a success event so
+   "a device logged in" is auditable and the portal flow can be
+   confirmed from the logs. And the `"Failed login attempt (username:
+   '')"` events are OS captive-portal *detection probes*, not real
+   attempts -- stop logging those as `error`-severity events (cosmetic
+   noise, already flagged).
 
 ### Dashboard feedback batch (2026-09-10, from interception-window use)
 
