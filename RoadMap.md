@@ -7882,18 +7882,30 @@ is actively hitting a hard-deny over HTTPS).
 ### Deployment status of everything from this session (as of 2026-09-10)
 
 Production box (`pp-beelink`, hostname `optigate-MINI-S`) is at git
-`1312343`. Bark Home currently has the network; only the base services
-(`dashboard`/`proxy`/`adguard`) run. **Phase 1 of the interception-test
-prep ran 2026-09-10**: all three of `dashboard`/`controller`/`proxy`
-were rebuilt from `1312343`, and `dashboard` + `proxy` were recreated on
-the new images (the `up -d dashboard` also picked up the new `proxy`
-image via the dependency). `controller` is built but not started (it
-only runs under the `interception` profile). Verified in the running
-images: `dashboard` carries the Integrations code + the `blocklist_parser`
-v2fly fix; `proxy` carries the `ip_address` pass (12 sites in
-`authz_helper.py`, 4 in `sni_helper.py`); the `controller` image carries
-the v2fly fix too. Dashboard startup log clean (block-page :80, report
-poller, captive portal :3131, waitress :8787); proxy startup clean.
+`f5705a8`. **Interception is LIVE as of 2026-09-10 ~16:12** -- Bark Home
+was taken off the network and `docker compose --profile interception up
+-d` brought the full stack up (all 6 containers). Phase 1 prep (earlier
+this date) rebuilt `dashboard`/`controller`/`proxy` from `1312343` and
+recreated `dashboard` + `proxy`; the interception bring-up then started
+`controller` + `nftables-manager` + `arp-worker`.
+
+**Bring-up hit one real bug, now fixed (commit `f5705a8`):** the
+controller took its AdGuard credentials from `--adguard-username`/
+`--adguard-password` (compose, from `.env`), which had drifted stale
+after the AdGuard password was changed from the dashboard. The
+controller 401'd every cycle, tripping AdGuard's brute-force lockout,
+which cascaded to lock the dashboard out too. Fixed by making the
+controller read the `adguard_username`/`adguard_password` DB settings
+(the dashboard's single source of truth) -- see the "AdGuard/dashboard
+credential unification -- DONE" entry above. AdGuard was restarted to
+clear the lockout, the two flags were removed from `docker-compose.yml`,
+and `controller` was rebuilt (`f5705a8`) + recreated. Post-fix: zero
+`adguard_sync`/`adguard_discovery` errors, AdGuard `filtering/status`
+returns the OptiGate `$dnsrewrite` hard-deny rules with current
+per-client IP lists, `inet optigate` nftables table fully applied
+(item 7's `bump_v4` self-IP `return` rules present). One-time SQLite
+`database is locked` blip at bring-up (controller rtnetlink listener +
+nftables-manager health write) -- both auto-retry, no recurrence.
 
 **Live on production now** (base-service changes, no interception
 profile needed):
