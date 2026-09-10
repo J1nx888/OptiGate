@@ -7808,6 +7808,14 @@ end-to-end retest in the next supervised window:
 | 17 | AdGuard `$dnstype=HTTPS` ECH-strip rules | `controller` | Crunchyroll/Asurascans bump successfully; no `NONE_NONE/409` in Squid's `access.log` |
 | 21 | conntrack flush on device reclassification | `nftables-manager` | reclassify the Echo (`20:a1:71:9d:58:dc`) WITHOUT power-cycling; confirm the open voice connection is cut |
 
+**Committed + `git pull`ed to prod, but NOT yet built -- bundle the
+rebuild into the next deployment window** (project owner's call,
+2026-09-10):
+
+| Item | Change | Containers to rebuild | How to confirm after |
+|---|---|---|---|
+| 13 | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (commit `b7020e2`) | `dashboard` **and** `controller` | rebuild both, restart `dashboard`; then click "Sync now" on the YouTube category and confirm `ggpht.cn` now lands in `category_domains` |
+
 **No deploy needed:** item 16 (rebuild alone was the fix, done), and
 the documentation commits (`341736d`, `b2011bb` -- markdown only,
 `git pull`ed to prod).
