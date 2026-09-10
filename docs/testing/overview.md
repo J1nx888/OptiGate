@@ -150,6 +150,7 @@ Used throughout `tests/test_logging_dedupe.py`, `tests/test_seed_idempotent.py`,
 | `tests/test_cr_api.py` | 28 | `TokenManager` refresh/expiry, `SeriesResolver`'s retry-once-on-401, every `_read_json` error path (HTTP error, unreachable, timeout, malformed/non-dict JSON), every `series_id_of` fallback branch |
 | `tests/test_series_resolve.py` | 11 | The object-id -> series-id cache: positive/negative TTL, cache-hit short-circuiting, the S2.6 stale-on-error fallback |
 | `tests/test_squid_conf_regressions.py` | 7 | Config-text/structure regressions in `proxy/squid.conf.template` that a pure-logic unit test can't catch (see below), plus two 2026-08-30 regression guards keeping the deliberately-deferred `ssl_bump`/`http_access` catch-all flip (see `docs/security/overview.md` §3, RoadMap.md) from being silently re-flipped |
+| `tests/test_adguard_report_sync.py` | 15 | `dashboard/adguard_report_sync.py` (RoadMap.md item 25): `correlate_once()` back-fills `access_log` with `reason='dns_hard_deny'` rows from AdGuard's query log for HTTPS hard-denies that never reach a `log_access()` call; the `start()` background poll loop |
 
 The counts above are per-file spot checks for the files this doc discusses in
 detail, not a full table refresh -- this table predates several later
@@ -1032,6 +1033,71 @@ directly re-run and confirmed)**:
 
 Full suite as of this entry: **962 passed, 34 skipped** (Windows),
 `pytest --collect-only -q` reports **996 collected**.
+
+**2026-09-09, RoadMap.md follow-up items (items 7, 16-25 -- one session;
+the 2026-09-08 supervised-interception session's own test additions are
+not separately logged here, so this jumps from 962 to the current total
+below)**:
+
+- **Item 17 (ECH/HTTP-3 defeats SSL-Bump)**: 13 new tests in
+  `tests/test_controller_adguard_sync.py` for `_ech_strip_rule()` /
+  `build_ech_strip_rules()` -- rule shape, multiple client IPs, empty
+  when no bump domains / no authorized device, excludes a
+  non-bump-eligible / unauthenticated / unassigned / ignored device,
+  covers a device once assigned, ignores splice-mode domains, one rule
+  per bump domain, a `sync_once()` integration check. The
+  false-negative that nearly sank this (test scripts querying DNS before
+  AdGuard finished recompiling its rule engine) was a live-verification
+  bug, not a code bug -- root-caused on the smoke-test VM.
+- **Item 19a (AdGuard config permission race)**: 4 new tests in
+  `tests/test_adguard_config_sync.py` for `_with_permission_retry()` --
+  transient `PermissionError` recovers within budget on both read and
+  write, a persistent one still raises, a missing file fails
+  immediately with no retry delay.
+- **Item 19b (logout username-caching)**: rewrote the logout tests in
+  `tests/test_dashboard.py` -- page reachable with no credentials,
+  explains the real manual step, never inspects a `logout`/`logout`
+  credential, the sidebar link has nothing embedded.
+- **Item 21 (conntrack flush on reclassification)**: 8 new Go tests in
+  `phase3/nftables-manager/internal/nft/conntrack_test.go`, using a
+  PATH-injected fake `conntrack` shell script -- success / no-match /
+  real-failure / missing-binary for `FlushConntrackForSource`, and
+  `FlushConntrackForReclassifiedDevices` flushing exactly the right
+  IPs, ignoring bypass/authenticated additions, one error per failed IP
+  while still attempting each, a true no-op when nothing restrictive
+  changed. Run via the Beelink's `golang:1.25-bookworm` Docker toolchain
+  (no local Go), not part of the pytest count.
+- **Items 23/24 (quick-ignore, Shift mode now on User page)**: 19 new
+  tests in `tests/test_dashboard.py` -- per-row and pending-card quick
+  Ignore/Un-ignore, the bulk buttons moved to the main toolbar, the
+  quick toggle hidden for a group-ignored device; the User detail
+  page's "Shift mode now" / "Active override" cards, that they only
+  offer mode schedules already targeting the user, and that both
+  redirect back to `user_detail`.
+- **Item 7 (self-IP exception in bump_v4's redirect)**: 9 new Go tests
+  in `phase3/nftables-manager/internal/nft/fault_test.go` -- no
+  exception when `selfIP` is unset, both bump_v4 ports get the right
+  exception when set, it never leaks onto another source set, it sits
+  before the redirect it guards, and `SelfIPFromDashboardURL()` across
+  a plain URL / no-port / https / empty / hostname / malformed / IPv6.
+- **Item 22 follow-up (Ignore on the captive portal admin action)**: 6
+  new tests in `tests/test_captive_portal_server.py` -- sets `ignored`
+  and clears a prior user/group assignment, the button renders, a
+  wrong admin password is rejected.
+- **Item 25 (HTTPS hard-denies invisible on the Report page)**: 15 new
+  tests in `tests/test_adguard_report_sync.py` (new file) -- writes a
+  row for bump/splice/category hard-denies, ignores an ordinary allowed
+  lookup, ignores a domain this project doesn't manage even when the
+  answer IS the block IP, attributes to the resolved device/user, falls
+  back to the raw IP with no binding, advances the watermark and
+  doesn't re-log, skips malformed / answer-less entries; the `start()`
+  loop polls repeatedly, survives an `AdGuardError`, and stays idle
+  when `DASHBOARD_URL` isn't a plain IP.
+
+Full suite as of this entry: **1151 passed, 34 skipped** (Windows).
+The Go tests above (17 total across `conntrack_test.go` and
+`fault_test.go`) are separate -- run `go test ./...` under
+`phase3/nftables-manager/` for those.
 
 Run `pytest --collect-only -q` against `tests/` for a live,
 authoritative total rather than trusting the sum of this table --

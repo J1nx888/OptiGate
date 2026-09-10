@@ -113,6 +113,12 @@ NOTHING`) in `common/db.py`. Known keys actually written/read elsewhere:
   display -- not admin configuration, excluded from
   `common/backup.py`'s `SETTINGS_ALLOWLIST` for that reason (same as
   `cr_resolver_last_error` above).
+- `adguard_report_sync_watermark` -- the newest AdGuard querylog
+  timestamp `dashboard/adguard_report_sync.py`'s Report-page back-fill
+  poller has already scanned (added 2026-09-09, RoadMap.md item 25).
+  Bounds the work each poll to new entries; not admin configuration, not
+  in the backup allowlist. See `access_log.reason` (`dns_hard_deny`) in
+  the enum section below.
 
 ### `users`
 One row per proxy login (one per kid/person), independent of the dashboard
@@ -866,7 +872,20 @@ then):
 - `dns_tier_denied` -- `_log_block()`: every hit gets this one
   undifferentiated reason (the server only ever sees the `Host` header, not
   which `domains`/`devices` rule caused the DNS-tier redirect that landed
-  the browser here).
+  the browser here). Only fires for **plain HTTP** hits -- port 443 has
+  no listener here by design, so an HTTPS hard-deny never reached this
+  module at all until item 25 below.
+
+From `dashboard/adguard_report_sync.py` (Report-page back-fill poller,
+added 2026-09-09 -- RoadMap.md item 25):
+- `dns_hard_deny` -- `correlate_once()`: written for a DNS-tier hard-deny
+  observed in AdGuard's own query log (answer == the block-page IP, and
+  the queried name is a `mode='bump'`/`'splice'` domain or a managed
+  category domain). Closes the gap where an HTTPS hard-deny -- refused on
+  port 443 with nothing listening -- never reached any `log_access()`
+  call and so was invisible on the Report page. Attributed to the
+  querying IP's device/user via `device_identity.*`; `path` always NULL
+  (DNS has none).
 
 `CMS_OBJECTS`-kind Crunchyroll requests (pure metadata) are never logged at
 all -- they're allowed unconditionally and return before reaching any

@@ -84,6 +84,22 @@ nothing in `dashboard.py` calls `flask.session` — the key exists but is
 unused for auth; if Flask sessions are added later, this key is already
 provisioned correctly (random, DB-persisted, not re-generated per process).
 
+**Logout (`GET /logout`), reworked 2026-09-09 (RoadMap.md item 19b):**
+HTTP Basic Auth has no server-side session to revoke, so there is no
+true logout. The route used to point the nav link at
+`http://logout:logout@host/logout` to poison the browser's cached
+credential -- but several browsers cached `logout` as the *username* and
+kept resubmitting it, silently rejecting every subsequent login even
+with a correct password (confirmed live in `dashboard`'s own logs: every
+failed recovery attempt showed `username: 'logout'`). The link is now a
+plain `url_for('logout')` with nothing embedded, and the route is
+**deliberately not `@require_admin`** (someone who can't currently log
+in must still be able to reach it) -- it renders a small standalone page
+explaining the one honest step: close the browser, or clear its saved
+password for this site. The lower-risk fix was chosen over migrating to
+cookie sessions, which would have meant rewriting `require_admin` and
+every test's `_auth_header()`.
+
 ### `users.password_hash` — now consumed by the Phase 4 captive portal (2026-08-31)
 
 `add_user()` (`/users/add`) and `reset_password()` (`/users/reset-password`)
@@ -126,15 +142,21 @@ browser or an OS's own captive-portal prober should cache).
 `dashboard/captive_portal_server.py`'s login page also carries a
 collapsed admin action (a `<details>` disclosure -- see
 `docs/architecture/overview.md`) that grants strictly more than the kid
-login above: **Bypass** or **assign to a group**, either of which
-moves the requesting device out of `PREAUTH` entirely. It checks the
-SAME credentials as the dashboard's own HTTP-Basic admin login
+login above: **Bypass**, **Ignore** (added 2026-09-09, RoadMap.md item
+22), or **assign to a group** -- Bypass and assign-to-group move the
+requesting device out of `PREAUTH`; Ignore sets `ignored = 1` (and
+clears any user/group assignment), excluding the device from DNS
+interception entirely, which is what a device running its own
+DNS-hijack-detecting security software actually needs. All three check
+the SAME credentials as the dashboard's own HTTP-Basic admin login
 (`common/auth.py`'s `verify_admin_credentials()`, one shared check, not
-a second implementation), and **shares the kid-login form's own rate
+a second implementation), and **share the kid-login form's own rate
 limiter rather than a separate one** -- a deliberate choice, not an
 oversight: a lower, easier-to-exhaust budget on the higher-value target
 would be the wrong direction; sharing means an attacker's wrong
-guesses against either credential draw from the same pool.
+guesses against either credential draw from the same pool. Ignore does
+not widen the blast radius beyond what Bypass already established (same
+credential, same surface, same rate limiter).
 
 This does widen the practical blast radius of a leaked/guessed admin
 password beyond what existed before 2026-08-31: previously, admin
@@ -373,6 +395,42 @@ the AdGuard sync itself runs on its own interval (`--adguard-interval`,
 default 30s). A brand-new or just-renewed device is briefly unresolved
 by identity, not un-denied by policy — see `controller/adguard_sync.py`'s
 own `build_rules()` docstring.
+
+**ECH hardening (2026-09-09, RoadMap.md item 17):** the per-client
+bump-deny rule above only fires for a device that is NOT bump-eligible.
+For a device that IS, Squid does the refinement — but a Cloudflare-fronted
+site's HTTPS/SVCB DNS record can carry an ECH (`ech=`) parameter that
+makes Squid see only a generic placeholder SNI (`cloudflare-ech.com`),
+which fails Squid's own Host-header-forgery check and kills the
+connection before `sni_helper.py` runs. `adguard_sync.build_ech_strip_rules()`
+now adds a `$dnstype=HTTPS` rule per bump-mode domain, scoped to its
+*authorized* client IPs, so the HTTPS-type record is dropped and the
+client falls back to a plain A/AAAA lookup with a real, visible SNI that
+Squid can validate. Verified working on the exact production AdGuard
+version (v0.107.79).
+
+**Traffic to the box's own IP no longer detours through Squid
+(2026-09-09, RoadMap.md item 7):** `bump_v4`'s baseline redirect used to
+match on source IP and destination port only. A bump-eligible device's
+request to `optigate.home` (or to a hard-denied domain that AdGuard
+rewrites to the box's own IP for the friendly block page) was swept into
+Squid, whose Host-header-forgery check then killed it. `nftables-manager`'s
+`baselineRules()` now returns early for `bump_v4` traffic whose
+destination IP is the box's own LAN IP (learned from `-dashboard-url`
+/ `DASHBOARD_URL`, not a new setting), so that traffic reaches
+`block_page_server.py` directly. This is a correctness/UX fix, not a
+new exposure -- the box's own listeners were always the intended
+destination for that traffic.
+
+**HTTPS hard-denies are now visible on the Report page (2026-09-09,
+RoadMap.md item 25):** a hard-deny over HTTPS resolves to the block-page
+IP and is refused on port 443 (nothing listens there by design), so it
+never reached any `log_access()` call. `dashboard/adguard_report_sync.py`
+polls AdGuard's own query log and back-fills `access_log`
+(`reason='dns_hard_deny'`) for entries whose answer is the block-page IP
+*and* whose domain this project manages -- the "and" guards against
+misattributing an admin's own unrelated AdGuard rewrite. Recovers
+visibility only; the browser still just sees a refused connection.
 
 **A subtle failure mode this invariant depends on staying fail-closed**
 (found and fixed 2026-08-30): `adguard_sync.sync_once()` reads AdGuard's

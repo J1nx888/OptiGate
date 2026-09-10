@@ -52,10 +52,16 @@ proxy/         The Squid container (SSL-Bump tier)
 adguard/       The AdGuard Home container (DNS tier), thin wrapper + first-run bootstrap
 
 dashboard/     The Flask admin container
-  dashboard.py             every route + inline Jinja2 templates (single file, ~6500 lines)
-  captive_portal_server.py forced-enrollment login server (Phase 4)
-  block_page_server.py     kid-facing DNS-tier block page
-  Dockerfile               flattens common/*.py + dashboard.py into one /app directory
+  dashboard.py             every route + inline Jinja2 templates (single file, ~8000 lines);
+                            main() also starts the three background components below
+  captive_portal_server.py forced-enrollment login server (Phase 4); portal-side admin
+                            action offers Bypass / Ignore / assign-to-group
+  block_page_server.py     kid-facing DNS-tier block page (plain HTTP only, by design)
+  adguard_config_sync.py   keeps AdGuard's own admin password in sync with the dashboard's
+  adguard_report_sync.py   polls AdGuard's query log to back-fill the Report page with
+                            HTTPS DNS-tier hard-denies (RoadMap.md item 25)
+  Dockerfile               flattens common/*.py + the dashboard/*.py modules (COPYd by
+                            explicit name) into one /app directory
 
 controller/    Python control-plane container (the interception layer's brains,
                "interception" compose profile only) -- policy computation, AdGuard sync,
@@ -71,9 +77,10 @@ defaults/
                       Phase 8's starter categories)
   ai_sites_seed.py   the "AI" category's manually-curated starter domain list
 
-tests/         Tier-1 pytest suite (996 collected as of 2026-09-07; 962 passed /
-               34 skipped on Windows -- no Docker/network required, the skips are
-               AF_UNIX-only tests that run (and pass) on Linux)
+tests/         Tier-1 pytest suite (1151 passed / 34 skipped on Windows as of
+               2026-09-09 -- no Docker/network required, the skips are AF_UNIX-only
+               tests that run (and pass) on Linux). The Go components under phase3/
+               have their own `go test ./...` suites, not counted here.
 docs/          This documentation
 ```
 

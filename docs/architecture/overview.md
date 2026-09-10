@@ -116,9 +116,14 @@ controller/                   Python control-plane container (added 2026-08-30, 
                                 active_scan.nudge(); admin-configurable interval/on-off from
                                 the dashboard, re-read live, no restart needed)
   adguard_sync.py                build_rules()/build_splice_deny_rules()/
-                                build_category_deny_rules()/sync_category_subscriptions()/
-                                sync_safesearch() -- everything pushed to AdGuard's custom
-                                rules + native filter/SafeSearch settings (see §2's AdGuard bullet)
+                                build_category_deny_rules()/build_ech_strip_rules()/
+                                sync_category_subscriptions()/sync_safesearch() -- everything
+                                pushed to AdGuard's custom rules + native filter/SafeSearch
+                                settings (see §2's AdGuard bullet). build_ech_strip_rules()
+                                (2026-09-09, RoadMap.md item 17) adds a $dnstype=HTTPS rule per
+                                bump-mode domain, scoped to its authorized client IPs, so an
+                                ECH-carrying HTTPS/SVCB DNS record can't defeat SSL-Bump on a
+                                Cloudflare-fronted site (forces an A/AAAA + visible-SNI fallback)
   adguard_discovery.py           reads AdGuard's own query log to refresh device_bindings.last_seen_at
   health.py / readiness.py      interception_runtime health-column writer / worker+AdGuard
                                 startup readiness waits
@@ -136,13 +141,30 @@ proxy/                        Squid container
 
 dashboard/                    Flask container
   dashboard.py                  all routes: users, domains, categories, schedules, devices,
-                                groups, paths, shows, report, events, health, settings, /ca-cert
-  captive_portal_server.py      Phase 4: the forced-enrollment login server (see §9)
+                                groups, paths, shows, report, events, health, settings, /ca-cert.
+                                main() also starts the three background components below (each
+                                gated -- block_page_server + adguard_report_sync on DASHBOARD_URL,
+                                captive_portal_server unless CAPTIVE_PORTAL_DISABLED)
+  captive_portal_server.py      Phase 4: the forced-enrollment login server (see §9). Its
+                                portal-side admin action offers Bypass, Ignore (2026-09-09,
+                                RoadMap.md item 22), or assign-to-group for an admin at the
+                                gated device itself
   block_page_server.py          the kid-facing block page, run as its own process (see §9's
                                 network_mode: host note)
+  adguard_config_sync.py        keeps AdGuard's own admin password in sync with the dashboard's
+                                (one credential to remember); _with_permission_retry() (2026-09-09,
+                                RoadMap.md item 19a) retries a transient PermissionError around the
+                                AdGuardHome.yaml read/write
+  adguard_report_sync.py        (2026-09-09, RoadMap.md item 25) background poller: reads AdGuard's
+                                own query log and back-fills access_log with DNS-tier hard-denies
+                                that resolve to the block-page IP -- the ones a device hits over
+                                HTTPS, which never reach block_page_server.py (port 443 refuses)
+                                so were invisible on the Report page
   dev_server.py                  local-only launcher for manual/visual testing against a real
                                 browser without a full Docker stack -- not part of any image
-  Dockerfile                    python:3.12-slim + waitress
+  Dockerfile                    python:3.12-slim + waitress. COPYs its dashboard/*.py modules by
+                                explicit name (not a glob) -- a new module must be added to that
+                                line or the image can't import it
   requirements.txt              flask>=3.0, waitress>=3.0, tzdata>=2024.1 (Phase 8 -- see
                                 controller/requirements.txt's own comment on the same package)
 
@@ -173,7 +195,18 @@ docker-compose.yml             six services total. proxy/adguard/dashboard run b
 `phase3/arp-worker/Dockerfile` and `phase3/nftables-manager/Dockerfile`
 are plain multi-stage Go builds (compile static, run in a minimal
 runtime image -- nftables-manager's also installs the real `nft` CLI,
-since `knftables` shells out to it rather than using netlink directly).
+since `knftables` shells out to it rather than using netlink directly,
+plus `conntrack` (2026-09-09, RoadMap.md item 21): `internal/nft/conntrack.go`
+shells out to it to flush already-open connections when a device is
+reclassified to something more restrictive, since `ct mark` persists for
+a connection's whole lifetime and `nft` itself has no "delete a tracked
+connection" primitive). `nftables-manager`'s baseline redirect ruleset
+also carries a self-IP exception (2026-09-09, RoadMap.md item 7): a
+`bump_v4` device's traffic addressed to the box's own LAN IP returns
+before the Squid redirect, so `optigate.home` and AdGuard-rewritten
+hard-deny pages reach `block_page_server.py` directly instead of Squid's
+Host-header-forgery check -- the IP comes from `-dashboard-url`, reusing
+the existing `DASHBOARD_URL` value (`nft.SelfIPFromDashboardURL`).
 `controller/Dockerfile` flat-copies `common/*.py` alongside
 `controller/*.py`, same pattern as proxy/dashboard use for `common/`.
 Starting the interception profile for real requires

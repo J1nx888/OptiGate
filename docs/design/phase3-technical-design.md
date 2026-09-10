@@ -313,6 +313,39 @@ knftables_adapter.go`'s `ensureDockerUserException` for the permit rule
 this mark feeds and the full reasoning for why that (not a documented
 manual host prerequisite) is the fix.
 
+**Self-IP exception on the `bump_v4` redirect, 2026-09-09 (RoadMap.md
+items 7/18/20)**: the two `bump_v4` port-80/443 rules above match on
+source IP and destination port only. A bump-eligible device's request
+to `optigate.home` -- or to a hard-denied domain that AdGuard rewrites
+to the box's own IP for the friendly block page -- was therefore swept
+into Squid, whose own Host-header-forgery check then killed the
+connection before `sni_helper.py` ran. `baselineRules()` now emits, just
+before those two rules:
+
+```
+ip saddr @bump_v4 ip daddr <self-ip> tcp dport 80  return
+ip saddr @bump_v4 ip daddr <self-ip> tcp dport 443 return
+```
+
+so traffic addressed to the box itself skips the redirect and reaches
+`block_page_server.py` directly. `<self-ip>` is learned from the
+existing `DASHBOARD_URL` (`nft.SelfIPFromDashboardURL`, wired as a new
+`-dashboard-url` flag) -- not a new setting. Scoped to `bump_v4` only;
+`authenticated_v4`/`unauthenticated_v4`/`quarantine_v4` are untouched.
+When `DASHBOARD_URL` isn't a plain IP the two rules are simply omitted
+(pre-fix behavior).
+
+**Conntrack flush on reclassification, 2026-09-09 (RoadMap.md item
+21)**: `ct mark` above persists for a connection's whole lifetime, which
+is correct for a staying-authenticated device but meant reclassifying a
+device to something *more* restrictive never revoked an already-open
+connection. `internal/nft/conntrack.go` shells out to conntrack-tools'
+`conntrack -D -s <ip>` (a different kernel subsystem than `nft`, which
+has no "delete a tracked connection" primitive) for every IP newly
+added to `unauthenticated_v4`/`quarantine_v4` in a reconcile cycle --
+never for a device becoming *less* restricted. Best-effort and
+non-fatal; the `conntrack` package is added to the Dockerfile.
+
 The hard-deny invariant for `mode='bump'` domains on a device that
 *isn't* in `bump_v4` (e.g. a kid trying Crunchyroll on a DNS-only
 device) can't be enforced here — nftables has no domain visibility.

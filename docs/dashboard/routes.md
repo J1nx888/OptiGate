@@ -230,14 +230,18 @@ admin's next action is one edit + submit rather than starting from scratch:
 
 - `GET /` -> `index()` -- redirects to `report`.
 - `GET /logout` -> `logout()` -- **not a real server-side logout** (HTTP
-  Basic Auth has no session to revoke). The nav's Logout link points here
-  with a deliberately wrong credential embedded in the URL
-  (`http://logout:logout@host/logout`), overwriting whatever the browser
-  cached for this origin; `@require_admin` then 401s it like any other bad
-  credential, and the browser's own response to a 401 on a top-level
-  navigation is to show a fresh native sign-in prompt. The route body only
-  ever runs in the practically-impossible case the real credentials happen
-  to literally be `logout`/`logout`.
+  Basic Auth has no session to revoke), and **deliberately not
+  `@require_admin`** (reachable even when you can't currently log in).
+  Renders a small standalone `_LOGOUT_BODY` page (no dashboard chrome)
+  explaining the one honest manual step: close the browser, or clear its
+  saved password for this site. **Changed 2026-09-09 (RoadMap.md item
+  19b):** the nav link used to be
+  `http://logout:logout@host/logout` -- a deliberately wrong credential
+  embedded in the URL to poison the browser's cache -- but several
+  browsers cached `logout` as the *username* and kept resubmitting it,
+  silently defeating every subsequent login with a correct password.
+  The link is now a plain `url_for('logout')` with nothing embedded, and
+  the route no longer attempts any Basic-Auth trick.
 - `GET /sw.js` -> `service_worker()` -- serves the PWA service worker from
   the root path (not `/static/sw.js`), specifically so its default scope
   covers the whole app -- a service worker can only control paths at or
@@ -327,6 +331,17 @@ admin's next action is one edit + submit rather than starting from scratch:
   (`?page=`/`?per_page=`, same `_parse_pagination()`/
   `LIST_PAGE_SIZE_OPTIONS` shared with Categories/Devices/Domains) --
   a heavily-assigned kid's own site list only ever grows over time.
+  **Since 2026-09-09 (RoadMap.md item 24):** the "Active right now" area
+  gains an action, not just a read-out. `user_detail()` now also computes
+  `mode_schedules_for_user` (every `is_mode` schedule that already targets
+  this user -- globally or via `schedule_users`) and
+  `active_override_for_user`. When an override is active it shows an
+  "Active override" card with a Cancel button; otherwise, if any mode
+  schedule targets this user, it shows a "Shift mode now" card (no
+  target combobox -- the page already knows its one target, posted as a
+  hidden `target=user:<id>`) with the same schedule-picker/duration UI as
+  the Schedules page. Both post to `/schedules/override[/cancel]` with
+  `redirect_to=user_detail` so they return here.
   Renders `USER_DETAIL_BODY`. Redirects to
   `users` with an error flash if the user id doesn't exist.
 - `POST /shows/add` -> `add_show()` -- form fields `user_id`, plus EITHER
@@ -691,9 +706,16 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   that exact target (`_clear_overrides_for_target()`) -- only one
   override can be in effect per target at a time. Writes one row to
   `schedule_overrides` with `expires_at` computed from the duration.
+  **2026-09-09 (RoadMap.md item 24):** also accepts optional
+  `redirect_to`/`user_id` -- when posted from the User detail page
+  (`redirect_to=user_detail`), success and error both flash-redirect back
+  to `user_detail?user_id=<id>` instead of `schedules`. Same
+  `pause_device()`/`resume_device()` convention.
 - `POST /schedules/override/cancel` -> `cancel_schedule_override()` --
   form field `override_id`. Deletes the row immediately (not a soft
-  expiry) so the normal, clock-driven schedule resumes right away.
+  expiry) so the normal, clock-driven schedule resumes right away. Also
+  honours the same optional `redirect_to`/`user_id` pair (2026-09-09,
+  item 24).
 
 See `common/schedule_eval.py`'s `schedule_is_active_for_device()` for how
 an active override actually changes enforcement -- it's the one choke
@@ -727,6 +749,17 @@ this dashboard route never talks to either enforcement path directly.
   currently only `dashboard/block_page_server.py` passes it; Squid's own
   helpers are a tracked follow-up, not wired in yet (RoadMap.md's dated
   entry). Renders `REPORT_BODY`.
+  - **2026-09-09 (RoadMap.md item 25)**: rows with
+    `reason = 'dns_hard_deny'` are written by
+    `dashboard/adguard_report_sync.py`'s background poller, not by any
+    request handler. A hard-denied domain over HTTPS resolves (via
+    AdGuard `$dnsrewrite`) to the block-page IP; the browser's port-443
+    connection is refused (nothing listens there by design) so it never
+    reaches `block_page_server.py` and never gets logged the normal way.
+    The poller reads AdGuard's own query log and back-fills those,
+    attributed to the querying IP's device/user via the same
+    `device_identity.*` path the Squid helpers use, deduped by
+    `log_access()`'s own 5-minute window.
   - `?status=` (`blocked`/`allowed`) -- unchanged.
   - **Who/what filter, reworked 2026-08-31 (GH #9)**: the plain
     `<select name="user">` was replaced with the same shared combobox
@@ -1011,10 +1044,20 @@ text here still said "not built" until now).
   `_parse_device_assignment("ignored")` and the mirror image of
   `_batch_assign_devices_to_group()`'s own `ignored = 0` reset. Clearing
   it back to 0 just leaves the device Unassigned, no attempt to restore
-  a prior assignment. These are the Devices toolbar's "Manage" panel's
-  "Set to Ignore"/"Remove Ignore" buttons, alongside the pre-existing
-  group-assign form. Redirects to `devices` with an error flash if no
-  devices were selected.
+  a prior assignment. **Moved 2026-09-09 (RoadMap.md item 23):** the
+  "Ignore"/"Un-ignore" bulk buttons now live in the always-visible
+  top-level `#deviceBulkToolbar` (next to Enable/Disable/Delete), not
+  the collapsed "Manage" panel -- the group-assign form stays in the
+  panel. Same route/handler, only the button's location changed.
+  Redirects to `devices` with an error flash if no devices were selected.
+  **Also reused per-row (item 23):** each row in the main Devices table
+  and the "Devices awaiting login" card now has an inline Ignore button
+  (Un-ignore once ignored) that posts to this same route with a
+  single-element `device_ids` -- no separate backend route. Deliberately
+  hidden for a device that's only *effectively* ignored via its group
+  being in Ignore mode (`d.group_ignored` true, `d.ignored` still 0),
+  since toggling that device's own flag wouldn't change its
+  group-driven state.
 - `POST /devices/bulk-delete` -> `bulk_delete_devices()` (added
   2026-09-07, same live-testing feedback as above -- "lacks the ability
   to take bulk actions such as deleting multiple devices") -- form field
@@ -1427,6 +1470,17 @@ the project owner asked for, not only an operational-health trail.
   (bottom of file) calls `waitress.serve(app, host=..., port=..., threads=8)`
   -- `app.run()` is never invoked. `DASHBOARD_HOST` (default `127.0.0.1`)
   and `DASHBOARD_PORT` (default `8787`) control the bind address.
+- **`main()` also starts three background components** before `serve()`,
+  none of them Flask routes: `block_page_server.start()` (port 80, only
+  if `DASHBOARD_URL` is set), `adguard_report_sync.start()` (the
+  Report-page back-fill poller, added 2026-09-09 / RoadMap.md item 25,
+  same `DASHBOARD_URL` gate), and `captive_portal_server.start()` (port
+  3131, unless `CAPTIVE_PORTAL_DISABLED`). The captive portal's own
+  `/admin` POST handler (`captive_portal_server.py`, not a dashboard
+  route) offers Bypass / **Ignore** (added 2026-09-09 / RoadMap.md item
+  22) / assign-to-group for an admin standing at a gated device --
+  "Ignore" sets `ignored = 1` and clears any prior user/group
+  assignment, same semantics as `bulk_set_ignored_devices()`.
 
 ## How to add a new route/page
 

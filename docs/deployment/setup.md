@@ -135,7 +135,15 @@ below.
   `controller/adguard_sync.py`). Also `network_mode: host`. Has its own
   two volumes (`optigate_adguard_conf`, `optigate_adguard_work`) — separate from
   proxy/dashboard's shared one, since it isn't part of this project's own
-  application data.
+  application data. **Since 2026-09-09 (RoadMap.md item 19a)**,
+  `entrypoint.sh` runs a `_repair_loop()` background loop for the
+  container's whole lifetime that re-applies `chown root:13`/`chmod 660`
+  to `/opt/adguardhome/conf/AdGuardHome.yaml` every 5s — AdGuard was
+  confirmed to reset that file's ownership mid-uptime, which had been
+  silently breaking the dashboard's ability to keep the two admin
+  passwords in sync (`dashboard/adguard_config_sync.py`). To pick up
+  this fix, `adguard` must be **restarted**, not just rebuilt (the fix
+  lives in its startup script).
 - **`dashboard`** (container name `optigate-dashboard`, built from
   `dashboard/Dockerfile`) — the Flask web UI (`dashboard/dashboard.py`).
   Listens on port `8787`, run as the `proxy` user (Debian uid 13). Also
@@ -145,7 +153,13 @@ below.
   only accepts from within the same network namespace (see
   [Networking notes](#networking-notes)). `DASHBOARD_BIND` now feeds
   directly into `DASHBOARD_HOST`, the app's own listen address, instead
-  of a Docker port-publish mapping.
+  of a Docker port-publish mapping. `dashboard/Dockerfile` COPYs its
+  `dashboard/*.py` modules by explicit name (not a glob) — as of
+  2026-09-09 that list includes `adguard_report_sync.py` (the
+  Report-page back-fill poller, RoadMap.md item 25). `main()` also
+  starts `block_page_server.py` (port 80) and that poller when
+  `DASHBOARD_URL` is set, and `captive_portal_server.py` (port 3131)
+  unless `CAPTIVE_PORTAL_DISABLED`.
 
 `proxy` and `dashboard` mount the same named volume, **`optigate_config`**, at
 **`/config`** in each container. That's where the shared SQLite database
@@ -168,8 +182,14 @@ interception up -d`):**
   `phase3/nftables-manager/Dockerfile`) — reconciles the real kernel's
   `optigate` nftables table against the DB-computed
   `DesiredPolicy` blob. Needs `cap_add: [NET_ADMIN]` and
-  `network_mode: host`; the image also installs the real `nft` CLI,
-  since `knftables` shells out to it.
+  `network_mode: host`; the image installs the real `nft` CLI (since
+  `knftables` shells out to it) and, since 2026-09-09, `conntrack`
+  (RoadMap.md item 21: `internal/nft/conntrack.go` shells out to it to
+  flush already-open connections when a device is reclassified to a more
+  restrictive class). Its `command:` in `docker-compose.yml` now also
+  passes `-dashboard-url=${DASHBOARD_URL:-}` (RoadMap.md item 7 — used
+  only to learn the box's own LAN IP, so `bump_v4`'s Squid redirect can
+  skip traffic addressed to the box itself; not a separate setting).
 - **`controller`** (built from `controller/Dockerfile`) — Milestone 3's
   control loop: talks to `arp-worker` over a Unix socket on the shared
   `optigate_run` volume, reads/writes the shared `optigate_config` database, and
