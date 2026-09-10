@@ -7962,7 +7962,7 @@ the built image / binary):
 (`db84979`, `55cdce3`, `3f36233`, `5bf8def`); and every markdown-only
 commit `git pull`ed to prod as it landed (`341736d`, `b2011bb`,
 `cc43359`, `9e15503`, `af7cb37`, `1312343`, `1c31373`, `53fa544`,
-`cff3cd2`, `a4a378f`, plus this edit).
+`cff3cd2`, `a4a378f`, `c830606`, `ccfb8bc`, `81328ac`, plus this edit).
 
 ### One-pass interception-window runbook (2026-09-10)
 
