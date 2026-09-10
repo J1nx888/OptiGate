@@ -8146,20 +8146,34 @@ redesign in a dedicated session, not a live quick-patch**.
    known non-bypass device shows the device-status page. Closed.
 
 5. **~~Report page "Recent activity" -- no allowed/blocked Status
-   column~~ -- FIXED 2026-09-10 (`6da84c8`).** The `Result` column (with
-   the `allowed`/`blocked` badge) has been in `REPORT_BODY` since the
-   initial commit and prod renders it correctly (verified: `<th>Result</th>`
-   in the rendered HTML, badge computed style green/red and visible).
-   The owner's browser was serving a **heuristically-cached** copy of
-   `/report` from before -- no dashboard HTML response set any cache
-   header, so a plain reload could reuse a stale page. New
-   `@app.after_request` sends `Cache-Control: no-store, must-revalidate`
-   + `Pragma: no-cache` on every `text/html` response (CSS/JS/JSON/CSV/
-   images keep their own caching; `sw.js` already network-firsts
-   `/static/`). Matches the app's stated intent -- `sw.js`'s own comment:
-   "Every dashboard page ... always goes to the network, no exceptions"
-   -- which nothing enforced for the pages. Prod-verified: `/report`
-   and `/devices` now return `no-store`; `app.css` unaffected.
+   column~~ -- FIXED 2026-09-10 (`6da84c8` + `b49fee2`).** The `Result`
+   column (with the `allowed`/`blocked` badge) has been in `REPORT_BODY`
+   at **every commit** and prod serves it byte-perfect (verified: raw
+   `/report` HTML dump has `<th>Result</th>` + `<span class="badge
+   allowed">` on the exact rows in the owner's screenshot). The cause
+   was a **stale service worker**: an early revision of `sw.js`
+   cache-first'd whole pages, and that worker keeps serving its own
+   cache and stays the active worker until every tab closes -- so
+   `Ctrl+Shift+R` didn't dislodge it (the worker intercepts before the
+   network). Two-part fix:
+   - `6da84c8`: new `@app.after_request` sends `Cache-Control:
+     no-store, must-revalidate` + `Pragma: no-cache` on every
+     `text/html` response (CSS/JS/JSON/CSV/images keep their own
+     caching). Matches `sw.js`'s own comment -- "Every dashboard page
+     ... always goes to the network, no exceptions" -- which nothing
+     enforced for the pages.
+   - `b49fee2`: bumped `sw.js` `CACHE` `pp-static-v2` -> `pp-static-v3`.
+     The byte change forces every browser to re-fetch `sw.js` (served
+     `no-cache`), install this worker (`skipWaiting` -> active
+     immediately, `clients.claim` takes the open tab), and its
+     `activate` handler deletes every older cache incl. any pages a v1
+     worker stored. This revision only ever `respondWith`s for
+     `/static/`, never a navigation.
+
+   Prod-verified: `/sw.js` serves `pp-static-v3` with `no-cache`;
+   `/report` + `/devices` return `no-store`; `app.css` unaffected. A
+   browser still stuck after this needs a one-time DevTools ->
+   Application -> Service Workers -> Unregister + Clear site data.
 
 6. **`host_verify_strict` breaks spliced multi-IP CDN traffic** --
    upgraded from "noise" to a real blocker after the 2026-09-10 QUIC
