@@ -329,6 +329,55 @@ func TestBaselineRules_MarkForwardableTraffic(t *testing.T) {
 	}
 }
 
+// TestBaselineRules_DropsQUICForBumpDevices is a regression test for the
+// HTTPS-interception bypass found live 2026-09-10: a bump device played
+// non-whitelisted Crunchyroll because Chrome switched to HTTP-3 over
+// QUIC (udp/443) after its first TCP request and never came back, so
+// every per-domain/per-path/per-show rule Squid enforces was silently
+// skipped. baselineRules must drop udp/443 for bump_v4 so the browser
+// falls back to tcp/443 (which the redirect rule then bumps). Scoped to
+// bump_v4 only -- a DNS-tier device's QUIC is fine.
+func TestBaselineRules_DropsQUICForBumpDevices(t *testing.T) {
+	const want = "ip saddr @bump_v4 udp dport 443 drop"
+	found := false
+	for _, r := range baselineRules {
+		if r == want {
+			found = true
+		}
+		if strings.Contains(r, "udp dport 443") && strings.Contains(r, "drop") && !strings.Contains(r, "@bump_v4") {
+			t.Errorf("udp/443 drop leaked onto a non-bump_v4 rule: %q", r)
+		}
+	}
+	if !found {
+		t.Errorf("expected baselineRules to contain %q, it did not -- full ruleset: %v", want, baselineRules)
+	}
+}
+
+// TestBaselineRules_QUICDropComesAfterSelfIPReturn confirms the udp/443
+// self-IP carve-out (present only when selfIP is set) precedes the
+// udp/443 drop, exactly as the tcp rules are ordered -- a drop is
+// terminal, so a "return" for traffic to the box's own address is
+// useless after it.
+func TestBaselineRules_QUICDropComesAfterSelfIPReturn(t *testing.T) {
+	m := &Manager{selfIP: "192.168.1.250"}
+	rules := m.baselineRules()
+	returnIdx, dropIdx := -1, -1
+	for i, r := range rules {
+		switch r {
+		case "ip saddr @bump_v4 ip daddr 192.168.1.250 udp dport 443 return":
+			returnIdx = i
+		case "ip saddr @bump_v4 udp dport 443 drop":
+			dropIdx = i
+		}
+	}
+	if returnIdx == -1 || dropIdx == -1 {
+		t.Fatalf("expected both the udp/443 self-IP return and the udp/443 drop -- full ruleset: %v", rules)
+	}
+	if returnIdx >= dropIdx {
+		t.Errorf("udp/443 self-IP return (index %d) must come before the udp/443 drop (index %d)", returnIdx, dropIdx)
+	}
+}
+
 // TestBaselineRules_OmitsSelfIPExceptionWhenNotConfigured confirms a
 // Manager with no selfIP (every existing test's plain Manager{}, and the
 // package-level `baselineRules` var itself) gets exactly the pre-fix

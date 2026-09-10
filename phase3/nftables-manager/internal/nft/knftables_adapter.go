@@ -473,11 +473,32 @@ func (m *Manager) baselineRules() []string {
 		rules = append(rules,
 			fmt.Sprintf("ip saddr @bump_v4 ip daddr %s tcp dport 80 return", m.selfIP),
 			fmt.Sprintf("ip saddr @bump_v4 ip daddr %s tcp dport 443 return", m.selfIP),
+			// Symmetry with the two tcp returns above -- nothing on this
+			// box listens on udp/443, but keeping the self-IP carve-out
+			// on all three protocols/ports means the "traffic to the box
+			// itself never enters the interception path" invariant holds
+			// no matter what a client sends.
+			fmt.Sprintf("ip saddr @bump_v4 ip daddr %s udp dport 443 return", m.selfIP),
 		)
 	}
 	return append(rules,
 		"ip saddr @bump_v4 tcp dport 80 redirect to :3129",
 		"ip saddr @bump_v4 tcp dport 443 redirect to :3130",
+		// QUIC / HTTP-3 (udp/443) has no ssl-bump equivalent -- there is
+		// no forged-certificate MITM for it -- so a bump device left
+		// free to use it sends every HTTPS request over a path Squid
+		// can't see: per-domain, per-path and per-show rules, plus all
+		// Report-page logging, silently bypassed. Confirmed live
+		// 2026-09-10: a bump device played non-whitelisted Crunchyroll
+		// because Chrome moved to H3 after its first TCP request (via
+		// Cloudflare's Alt-Svc) and never came back to TCP. Dropping
+		// udp/443 makes the browser fall back to tcp/443, which the rule
+		// directly above redirects into Squid -- the standard fix every
+		// intercepting proxy uses, since QUIC can't be intercepted, only
+		// denied. Scoped to bump_v4 only: a DNS-tier (authenticated_v4)
+		// device's QUIC is already gated by AdGuard at resolution time
+		// and has no decryption expectation to defeat.
+		"ip saddr @bump_v4 udp dport 443 drop",
 		fmt.Sprintf("ip saddr @authenticated_v4 udp dport 53 redirect to :%d", port),
 		fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 53 redirect to :%d", port),
 		fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 853 redirect to :%d", port),
