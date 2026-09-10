@@ -8178,6 +8178,62 @@ redesign in a dedicated session, not a live quick-patch**.
    browsing, so `.30` should run with **SSL-Bump OFF** (DNS-tier only)
    outside of a supervised test.
 
+8. **FOLLOW-UP (design discussion, not decided) -- "two-browser split"
+   as an alternative to solving blockers (a)+(b)+(c).** Project owner's
+   idea, 2026-09-10: on a device that needs the show-whitelist, run
+   **two browsers**:
+   - **Chrome** -- no proxy configured, no CA installed. Transparent
+     intercept handles it. For any `mode='bump'` domain, Chrome's
+     intercepted connection is **denied outright** (a friendly "open
+     this in Firefox" block page) rather than attempted-and-broken.
+     Everything else (DNS-tier filtering, splice-mode domains) works
+     normally.
+   - **Firefox** -- explicit proxy pointed at OptiGate, OptiGate CA
+     imported into Firefox's **own** cert store (Android Chrome's
+     system-store limitation doesn't apply to Firefox). Bump-mode
+     domains are fully decrypted here and the show/path/`user_shows`
+     whitelist enforces.
+   This is the household's existing manual habit ("Firefox for
+   Crunchyroll, Chrome for everything else") made enforceable.
+
+   **Why it's attractive:** the explicit-proxy path uses `CONNECT`, so
+   it needs **no `host_verify_strict` relaxation** (blocker b gone for
+   that path), the browser **won't use QUIC through a proxy** (the
+   QUIC-drop and its thrash are irrelevant for that path), and Firefox
+   trusting the CA solves blocker (a) without touching Android's system
+   store. It also makes finding #7's selective per-domain bump much less
+   urgent -- an explicit-proxy Squid already only bumps what's
+   configured and cleanly splices/tunnels the rest.
+
+   **Design questions to work through (the "talk it out later"):**
+   - **Distinguishing the two paths in Squid.** Firefox arrives on a
+     LAN-bound explicit-proxy `http_port` (today `proxy/squid.conf.template`
+     only has a deliberately loopback-only, non-bump `http_port
+     127.0.0.1:3128` "URL-construction" placeholder -- a real LAN
+     ssl-bump proxy port would be new); Chrome arrives NAT-redirected on
+     the `intercept` ports `:3129`/`:3130`. Squid can branch `ssl_bump`
+     and `http_access` on `myportname` -- so: bump-mode domain +
+     intercept port -> `terminate` with the block page; bump-mode domain
+     + proxy port -> `bump` + `authz_allowed` as today.
+   - **Per-device mode.** This is a third device mode alongside
+     "DNS-only" and "full intercept-bump": *"intercept for everything,
+     but bump-mode domains only via the explicit proxy."* Needs a
+     `devices` flag / dashboard control and to flow through
+     `policy_class.py` + `controller/policy_state.py` +
+     nftables-manager. On a device where the CA *is* properly in the
+     system store, plain full intercept-bump still works and this mode
+     isn't needed.
+   - **Non-browser apps** hitting a bump domain (the Crunchyroll app,
+     etc.) get denied with no proxied recourse -- acceptable? (Likely
+     yes: the whole point is to force the supervised, decryptable path.)
+   - **The block page** must clearly say *which* other browser to use
+     and ideally deep-link it.
+   - **Proxy auth on the Firefox path** -- reintroduce `%LOGIN` for that
+     port for stronger per-user identity, or keep source-IP identity for
+     consistency with the intercept tier?
+   - **Firefox setup friction** -- manual proxy + CA import per device;
+     document it, or ship a Firefox `policies.json` / autoconfig.
+
 ---
 
 ## Cross-cutting: security-by-design
