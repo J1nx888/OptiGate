@@ -8030,6 +8030,94 @@ and the relevant `nft list ruleset` / `access.log` slice before tearing
 down, hand the network back to Bark Home, and file the specifics under
 the failing item rather than re-running blind.
 
+### Live interception test 2026-09-10 -- findings (NOT yet fixed)
+
+Bark Home taken off the network ~15:45; full `interception` stack brought
+up. What passed is recorded in the deployment-status section above (item
+13, `ip_address` pass, item 25 watermark, item 17/7 mechanisms present,
+controller AdGuard-cred bug found + fixed live as `f5705a8`). The
+following are **real defects/gaps surfaced by hands-on testing** on
+`192.168.1.30` ("Matthew's Lenovo Tablet", the one `bump_enabled`
+device). Per the project owner's standing rule these get a **proper
+redesign next session, not a live quick-patch** -- each needs a fresh
+traffic capture first.
+
+1. **Crunchyroll per-series whitelist is not enforcing.** Any anime
+   plays regardless of `user_shows` (repro: Black Clover `GRE50KV36`,
+   not on Matthew's list -- SPY x FAMILY `G4PH0WXVJ` / Dr. STONE
+   `GYEXQKJG6` are -- plays fine). Root cause: `common/cr_urls.py`'s
+   `classify()` regexes (`/series/<id>`, `/watch/<id>`,
+   `/playback/vN/...`, `/content/vN/cms/objects/<id>`) do not match any
+   URL shape current Crunchyroll web actually emits. Every logged
+   decision for `www.crunchyroll.com` is `reason='path_not_allowed'`
+   (the `RequestKind.OTHER` fallback) -- the `SERIES_PAGE`/`WATCH_PAGE`/
+   `PLAYBACK` branches that check `matching.user_has_show()` never run.
+   Compounding it: the seeded path allowlist for domain 27 has a blanket
+   `^/content/v[0-9]+/` rule (id 25) that allows the entire modern CR
+   API (`/content/v2/discover/...`, `/content/v2/cms/...`) with no
+   series check. Browsing *is* restricted (`/videos/popular`,
+   `/register`, `/reset-password` -> `TCP_DENIED/403`), but playback of
+   any title slips through -- and the actual video segments stream from
+   trusted/spliced CDN hosts (`gccrunchyroll.com`, `crunchyrollcdn.com`,
+   both `mode='trusted'`) that are never inspected. **Fix needs:** HAR
+   capture of an approved vs non-approved series playback on current CR
+   web; re-derive `cr_urls.classify()` + `series_resolve`; drop/narrow
+   the `^/content/v[0-9]+/` blanket path; decide whether any CDN host
+   must move off `trusted`; tests against the new shapes.
+
+2. **Asurascans bump is path-dependent and leaky.** A deep link to an
+   approved path bumps; the site root and any non-listed path are
+   *spliced through and allowed* instead of bumped-and-denied -- the
+   opposite of the deny-by-default goal. `domains` only has
+   `asurascans.com` (id 28, `mode='bump'`, `is_global=0`); no live
+   Squid/`access_log` traffic for it at all this session, which points
+   at Asura's rebrand to **`asuracomic.net`** (not in `domains`, so
+   default-splice/allow). **Fix needs:** confirm the current host(s),
+   add `asuracomic.net` as bump mode, and check why a `mode='bump'`
+   domain is falling to `ssl_bump splice` for some paths (should be
+   per-domain, not per-path -- `sni_helper.py bump` returning ERR?).
+
+3. **`optigate.home` unreachable for `bypass_login` devices.** Owner's
+   own read is almost certainly right: a bypass device gets `ct mark
+   0x1` and no `:5354` DNS redirect, so `optigate.home` (an AdGuard
+   rewrite) never resolves for it. Confirm and then either document as
+   intended or add a deliberate exception.
+
+4. **`optigate.home` from a known non-bypass device shows only a login
+   prompt, no device-status/troubleshooting info** (repro: Matthew's
+   Tablet, a resolved device + user). Expected: `block_page_server.py`'s
+   `_respond_device_info()` renders Label/MAC/user/mode. Something
+   upstream (HTTPS upgrade hitting the dead `:443` on the box IP? auth
+   state? the `bump_v4` self-IP `return` rule interacting with the
+   captive-portal redirect?) is routing it to the captive-portal login
+   instead. **Fix needs:** trace what `.30`'s `http://optigate.home/`
+   request actually hits.
+
+5. **Report page "Recent activity" table -- owner sees no allowed/blocked
+   Status column** (only Time, User, Device, Domain, Show/Path). The
+   deployed `REPORT_BODY` (line ~6426) *does* render a `Result` column
+   with an `allowed`/`blocked` badge, so this is most likely a stale
+   cached page (dashboard was restarted this date) or the `.badge`
+   CSS not rendering -- but treat as a possible regression until
+   confirmed with a hard refresh + a look at `.badge.allowed`/
+   `.badge.blocked` styling. If real, it's a fast dashboard fix.
+
+6. **Host-header-forgery alert noise on the bump device.** `.30`'s
+   `cache.log` logged 44 `SECURITY ALERT: Host header forgery detected`
+   in a few minutes for pinned/multi-IP CDN domains (`m.stripe.com`,
+   `safebrowsing.google.com`, ...) -- Squid's strict host verification
+   on *spliced* intercept connections where the client's DNS answer and
+   Squid's re-resolution diverge. NOT the item-7 self-IP case (that's
+   fixed and confirmed in the ruleset) and NOT bump-mode domains. Each
+   alert RSTs that connection (`NONE_NONE/409` +
+   `transaction-end-before-headers`), degrading browsing. The owner's
+   ask was "narrow `.30` to only bump the CR-family domains" -- but the
+   architecture already only *decrypts* `mode='bump'` domains; a
+   `bump_v4` device peek-and-splices everything else. The real lever is
+   `host_verify_strict off` (or `dns_v4_first on`) in
+   `proxy/squid.conf.template`, a contained config change to weigh
+   against its security tradeoff -- decision for the owner.
+
 ---
 
 ## Cross-cutting: security-by-design
