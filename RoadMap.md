@@ -7930,18 +7930,33 @@ fully exercised until DNS traffic is flowing (a "Sync now" on the
 YouTube category needs to reach v2fly and land `ggpht.cn` in
 `category_domains`) -- fold into the window.
 
-**Image built on production, inert until the interception profile is
-next started** (`docker compose --profile interception up -d` picks
-them up automatically, no rebuild needed) -- each still needs a live
-end-to-end retest in the next supervised window:
+**Image built on production, live-verified or still pending** in the
+2026-09-10 interception window:
 
-| Item | Change | Container | Live retest to run |
+| Item | Change | Container | Live retest status |
 |---|---|---|---|
-| 7 | `bump_v4` self-IP exception in the nftables redirect | `nftables-manager` | `optigate.home` shows the real device; no `SECURITY ALERT: Host header forgery detected` for a bump device's hard-denied domain |
-| 17 | AdGuard `$dnstype=HTTPS` ECH-strip rules | `controller` | Crunchyroll/Asurascans bump successfully; no `NONE_NONE/409` in Squid's `access.log` |
-| 21 | conntrack flush on device reclassification | `nftables-manager` | reclassify the Echo (`20:a1:71:9d:58:dc`) WITHOUT power-cycling; confirm the open voice connection is cut |
-| 13 (controller half) | same v2fly fix (`b7020e2`), image rebuilt 2026-09-10; powers the periodic `category_fetch.run_loop` | `controller` | after the profile is up, confirm the periodic category sync also picks up `ggpht.cn` |
-| `ip_address` pass | `authz_helper.py`/`sni_helper.py` now pass `ip_address` to every `log_access()` (`7302a21`); `proxy` image live since 2026-09-10 but the Squid helpers only run under interception | `proxy` (already live) | during interception, confirm new Report-page rows for Squid-tier decisions carry a source IP |
+| 7 | `bump_v4` self-IP exception in the nftables redirect | `nftables-manager` | **PENDING** -- needs a `bump_enabled` device, blocked on selective per-domain bump (finding #7). Self-IP `return` rules confirmed present in the ruleset. |
+| 17 | AdGuard `$dnstype=HTTPS` ECH-strip rules | `controller` | **PENDING** -- same block as #7. ECH-strip rules confirmed present for the 3 bump domains scoped to the bump device. |
+| 21 | conntrack flush on device reclassification | `nftables-manager` | **VERIFIED LIVE 2026-09-10** -- the Echo (`20:a1:71:9d:58:dc`) reclassified from the dashboard mid-use; open connection dropped without a power-cycle. |
+| 13 (controller half) | same v2fly fix (`b7020e2`); powers the periodic `category_fetch.run_loop` | `controller` | **VERIFIED** -- `ggpht` patterns present in `category_domains` (controller's startup fetch ran clean with the fixed parser). |
+| `ip_address` pass | `authz_helper.py`/`sni_helper.py` pass `ip_address` to every `log_access()` (`7302a21`) | `proxy` | **VERIFIED LIVE 2026-09-10** -- every recent Squid-tier `access_log` row carries a source IP. |
+| 25 | HTTPS hard-deny Report-page back-fill poller | `dashboard` | **VERIFIED LIVE 2026-09-10** -- `dns_hard_deny` rows landed for a real YouTube-category block (12 rows: `www.youtube.com`, `googlevideo.com` CDN, `i.ytimg.com`), attributed to the right user/device with source IP; watermark advancing. |
+
+**Also verified live in the 2026-09-10 window (no bump device needed):**
+- **DNS-tier filtering** -- a blocked-category domain (YouTube, for a
+  user with that category) is hard-denied end to end.
+- **Item 21** (above) -- conntrack flush on reclassification.
+- **Finding #4 fix (`89cf895`)** -- `optigate.home` from a known
+  non-bypass device now shows the device-status page, not the login.
+- **Phase 4 captive portal** -- a never-seen device (Jacob's) hit the
+  portal, appeared in "Devices awaiting login", and a kid login granted
+  DNS access. First real end-to-end confirmation of the portal flow.
+- **Schedule enforcement** -- "Shift mode now" from the dashboard
+  actually flipped a device's access (tested against `youtube.com`).
+- **G1** (ARP mechanism covers every device incl. satellites) -- already
+  closed 2026-08-31 (see the fault-campaign matrix above, "Verdict:
+  GO"); 43 of 45 devices showed active `device_bindings` this window,
+  consistent with that. Not re-litigated.
 
 **No deploy needed:** item 16 (rebuild alone was the fix, done), and the
 markdown-only commits `git pull`ed to prod as they landed (`341736d`,
@@ -8114,8 +8129,8 @@ redesign in a dedicated session, not a live quick-patch**.
    :3131` rule (live at the same prerouting hook as the current table)
    force-redirected the tablet to the captive portal regardless of its
    correct classification. `nftables-manager` now prunes that table on
-   startup; re-verify on the next window that `optigate.home` shows the
-   device-status page.
+   startup. **Re-verified live 2026-09-10** -- `optigate.home` from a
+   known non-bypass device shows the device-status page. Closed.
 
 5. **Report page "Recent activity" table -- owner sees no allowed/blocked
    Status column** (only Time, User, Device, Domain, Show/Path). The
