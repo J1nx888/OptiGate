@@ -15,10 +15,13 @@ a real, running consumer since the interception profile shipped.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 import db
 import system_events
+
+log = logging.getLogger(__name__)
 
 
 def record_binding(
@@ -76,7 +79,25 @@ def record_binding(
     (per an explicit 2026-08-31 product decision: no retroactive
     backfill, only newly-observed MACs going forward) even across a
     later DHCP renewal.
+
+    **Off-LAN guard (2026-09-10, RoadMap finding #3):** discovery
+    watches every interface's neighbour table, including the host's
+    `docker0` bridge, so it observes 172.17.x container addresses and
+    -- before this -- recorded them as real `devices` rows. Any IP
+    outside the configured `local_network` is dropped here, at the one
+    chokepoint every binding-creating discovery source
+    (`controller/discovery.py` snapshots, `controller/rtnetlink_listener.py`)
+    funnels through. An unset `local_network` means the operator has
+    turned the LAN check off (see `matching.ip_in_configured_lan`); in
+    that mode nothing is dropped, same as everywhere else that helper is
+    consulted.
     """
+    import matching  # local: keep common/identity import-light, mirror ip_in_configured_lan's own style
+
+    if not matching.ip_in_configured_lan(conn, ipv4_address):
+        log.debug("record_binding: ignoring off-LAN %s for %s (source=%s)", ipv4_address, mac_address, source)
+        return
+
     seen_at = seen_at or db.now_iso()
 
     # Wrapped in an explicit transaction (fixed 2026-09-02, a real race

@@ -413,3 +413,41 @@ def test_record_binding_never_leaves_two_active_bindings_for_one_ip(conn, monkey
         f"expected exactly one active binding for {IP_1}, got {[r['mac_address'] for r in active]} -- "
         "the conflict-check-then-write sequence let both writers through"
     )
+
+
+# --------------------------------------------- off-LAN guard (RoadMap #3)
+
+DOCKER_MAC = "02:42:ac:11:00:02"
+DOCKER_IP = "172.17.0.2"
+
+
+def test_record_binding_ignores_an_off_lan_ip(conn):
+    """RoadMap 2026-09-10 finding #3: discovery watching docker0 must not
+    turn a 172.17.x container address into a devices row."""
+    db.set_setting(conn, "local_network", "192.168.1.0/24")
+    identity.record_binding(conn, DOCKER_MAC, DOCKER_IP, source="snapshot")
+    assert _bindings(conn) == []
+    assert conn.execute("SELECT COUNT(*) c FROM devices").fetchone()["c"] == 0
+    assert _events(conn) == []
+
+
+def test_record_binding_still_records_an_in_lan_ip_with_the_setting_on(conn):
+    db.set_setting(conn, "local_network", "192.168.1.0/24")
+    identity.record_binding(conn, MAC_A, IP_1, source="snapshot")
+    assert len(_bindings(conn)) == 1
+    assert conn.execute("SELECT COUNT(*) c FROM devices").fetchone()["c"] == 1
+
+
+def test_record_binding_records_everything_when_local_network_is_unset(conn):
+    # No local_network setting -> LAN check disabled -> even 172.17.x is
+    # recorded, matching ip_in_configured_lan's documented behaviour.
+    identity.record_binding(conn, DOCKER_MAC, DOCKER_IP, source="snapshot")
+    assert len(_bindings(conn)) == 1
+
+
+def test_record_binding_honours_a_multi_cidr_local_network(conn):
+    db.set_setting(conn, "local_network", "192.168.1.0/24 10.0.0.0/24")
+    identity.record_binding(conn, MAC_A, "10.0.0.5", source="rtnetlink")
+    identity.record_binding(conn, DOCKER_MAC, DOCKER_IP, source="rtnetlink")
+    ips = sorted(b["ipv4_address"] for b in _bindings(conn))
+    assert ips == ["10.0.0.5"]

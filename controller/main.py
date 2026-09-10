@@ -627,6 +627,45 @@ def _build_db_backed_provider(
     return provider, conn
 
 
+def _purge_offlan_discovery_junk(conn: sqlite3.Connection) -> int:
+    """One-time cleanup for RoadMap finding #3 (2026-09-10): before
+    identity.record_binding() filtered non-LAN IPs, the discovery loop
+    recorded Docker-bridge (172.17.x) addresses off the host's docker0
+    interface as real `devices` rows. Delete every device row that is
+    unmistakably that junk -- it has at least one binding, EVERY binding
+    it has is outside the configured local_network, and it carries no
+    human intent (no user, no group, not ignored, no label). A
+    manually-added device has no bindings at all and is never touched;
+    a real device with even one in-LAN binding is never touched.
+    Returns the number of device rows removed. No-op (returns 0) when
+    local_network is unset, since then the LAN check is disabled and
+    "off-LAN" has no meaning."""
+    import db as _db
+    import matching
+
+    if not (_db.get_setting(conn, "local_network") or "").strip():
+        return 0  # LAN check disabled -- "off-LAN" has no meaning
+
+    candidates = conn.execute(
+        "SELECT d.id FROM devices d "
+        "WHERE d.label IS NULL AND d.user_id IS NULL AND d.group_id IS NULL AND d.ignored = 0 "
+        "AND EXISTS (SELECT 1 FROM device_bindings b WHERE b.device_id = d.id)"
+    ).fetchall()
+    removed = 0
+    for row in candidates:
+        binds = conn.execute(
+            "SELECT ipv4_address FROM device_bindings WHERE device_id = ?", (row["id"],)
+        ).fetchall()
+        if binds and all(not matching.ip_in_configured_lan(conn, b["ipv4_address"]) for b in binds):
+            conn.execute("DELETE FROM device_bindings WHERE device_id = ?", (row["id"],))
+            conn.execute("DELETE FROM devices WHERE id = ?", (row["id"],))
+            removed += 1
+    if removed:
+        conn.commit()
+        log.info("purged %d off-LAN discovery-junk device row(s) (RoadMap finding #3)", removed)
+    return removed
+
+
 def _resolve_adguard_credentials(
     conn: sqlite3.Connection,
     cli_username: str | None,
@@ -832,6 +871,7 @@ def main(argv: list[str] | None = None) -> int:
         provider, conn = _build_db_backed_provider(
             args.db_path, args.gateway_ip, args.gateway_mac, args.full_duplex
         )
+        _purge_offlan_discovery_junk(conn)
         if not args.no_discovery:
             # discovery.run_loop() opens its own connection internally
             # (see its docstring for why) -- db.DB_PATH is already set to
