@@ -7882,13 +7882,21 @@ is actively hitting a hard-deny over HTTPS).
 ### Deployment status of everything from this session (as of 2026-09-10, end of day)
 
 Production box (`pp-beelink`, hostname `optigate-MINI-S`) is at git
-`a4a378f`. **Interception was run live 2026-09-10 ~16:12--~17:5x and is
+`ccfb8bc`. **Interception was run live 2026-09-10 ~16:12--~17:5x and is
 now OFF again** -- network handed back to Bark Home
 (`docker compose --profile interception down` then a base-only
 `up -d`). Only `dashboard`/`proxy`/`adguard` run. The controller's
 graceful shutdown sent corrective ARPs (devices un-poisoned); the
 `inet optigate` and legacy `inet parental_proxy` nftables tables are
 both gone (verified via a throwaway `--cap-add=NET_ADMIN` container).
+
+**Full test run + prod verification, 2026-09-10 evening:** Python
+`1205 passed, 34 skipped, 0 failed`; Go `nftables-manager` and
+`arp-worker` both build/vet/gofmt/test clean. On prod: `dashboard` and
+`proxy` containers confirmed running their latest images with the new
+code present and parsing; the staged `controller` / `nftables-manager`
+images confirmed to contain their changes (see each table below);
+`squid -k parse` clean; zero errors in the base-service logs.
 
 The window's bring-up hit one real bug -- the controller took its
 AdGuard credentials from stale `.env`-sourced CLI flags, 401'd every
@@ -7909,16 +7917,17 @@ needed; `dashboard` and `proxy` both rebuilt + recreated 2026-09-10):
 | 13 (dashboard half) (`b7020e2`) | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling -- powers the per-category "Sync now" buttons | `dashboard` | **2026-09-10** |
 | "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report reason labels / AdGuard-401 self-diagnosing message | `dashboard` | **2026-09-10** |
 | Dashboard feedback batch (`35fbb87`) | Devices roster: Current-IP column, sortable columns, off-LAN filter, "Last seen" fix, IP in search. Integrations -> collapsible sidebar group (Crunchyroll / YouTube / Discord sub-pages). | `dashboard` | **2026-09-10** (rebuilt + restarted; 507 dashboard tests green; browser-verified on the dev server AND rendered-page-verified on prod -- IP column present, `172.17.x` hidden, device count 45->43, sidebar tree + placeholder pages + redirect all correct) |
-| `ip_address` pass (`7302a21`) + outside-LAN check reorder (`566d72c`) | `authz_helper.py`/`sni_helper.py` pass `ip_address` to every `log_access()`; and now do the `ip_in_configured_lan` check *before* identity resolution, so an off-LAN client (which no longer gets a `device_bindings` row after `2425cd2`) is still denied + logged as `outside_lan` | `proxy` | **2026-09-10** (rebuilt + restarted; image live, helpers only run while Squid is intercepting) |
+| `ip_address` pass (`7302a21`) + outside-LAN check reorder (`566d72c`) | `authz_helper.py`/`sni_helper.py` pass `ip_address` to every `log_access()`; and now do the `ip_in_configured_lan` check *before* identity resolution, so an off-LAN client (which no longer gets a `device_bindings` row after `2425cd2`) is still denied + logged as `outside_lan` | `proxy` | **2026-09-10** (rebuilt + restarted; prod-verified: reorder present in both helpers in the running container, helpers parse, `squid -k parse` clean; helpers only run while Squid is intercepting) |
 
 **Images rebuilt on production but NOT running** -- staged for the next
 interception window (`docker compose --profile interception up -d` picks
-them up):
+them up). Image contents confirmed on prod 2026-09-10 evening (grep of
+the built image / binary):
 
 | Container | Carries | Notes |
 |---|---|---|
-| `controller` | AdGuard-creds-from-DB (`f5705a8`), item 13 v2fly (controller half), **off-LAN discovery guard + one-time junk purge (`2425cd2`, finding #3 controller half)** | `--adguard-username/--adguard-password` removed from `docker-compose.yml`. On next start, `_purge_offlan_discovery_junk()` deletes the 2 orphan `172.17.0.2` device rows. |
-| `nftables-manager` | **QUIC/udp-443 drop for `bump_v4` devices (`3e381d0`)**, legacy `inet parental_proxy` table auto-prune on startup (`89cf895`, finding #4 fix) | The QUIC drop only matches `bump_v4` members; with zero bump devices it is inert until one is added. |
+| `controller` (`53d0686`) | AdGuard-creds-from-DB (`f5705a8`), item 13 v2fly (controller half), **off-LAN discovery guard + one-time junk purge (`2425cd2`, finding #3 controller half)** | Verified in the image: `_purge_offlan_discovery_junk` + `_resolve_adguard_credentials` in `main.py`, `import matching` + off-LAN guard in `identity.py`, `_V2FLY_ATTR_RE` in `blocklist_parser.py`. `--adguard-username/--adguard-password` removed from `docker-compose.yml`. On next start, `_purge_offlan_discovery_junk()` deletes the 2 orphan `172.17.0.2` device rows. |
+| `nftables-manager` (`548bec52`) | **QUIC/udp-443 drop for `bump_v4` devices (`3e381d0`)**, legacy `inet parental_proxy` table auto-prune on startup (`89cf895`, finding #4 fix) | Verified in the binary: the `udp dport 443 drop` rule string and the `legacy table` / `parental_proxy` prune strings are present. The QUIC drop only matches `bump_v4` members; with zero bump devices it is inert until one is added. |
 | `arp-worker` | unchanged | 2026-09-09 image. |
 
 **Live-verified in the 2026-09-10 window:**
