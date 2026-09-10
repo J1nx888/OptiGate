@@ -7921,6 +7921,7 @@ profile needed):
 | Integrations page | New "Integrations" nav + Crunchyroll cross-user management page (`855d1c5`) | `dashboard` | **2026-09-10** |
 | 13 (dashboard half) | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (`b7020e2`) -- powers the per-category "Sync now" buttons | `dashboard` | **2026-09-10** |
 | "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report-page reason labels / AdGuard-401 self-diagnosing message | `dashboard` | **2026-09-10** |
+| Dashboard feedback batch (`35fbb87`) | Devices roster IP column + column sort + off-LAN filter; "Integrations" -> collapsible sidebar group with Crunchyroll/YouTube/Discord sub-pages (see the findings section) | `dashboard` | **2026-09-10** (rebuilt + restarted; 507 dashboard tests green; browser-verified) |
 
 Still needs a functional spot-check on the live dashboard (routes are
 registered -- `/integrations` responds, not 404): open `/integrations`,
