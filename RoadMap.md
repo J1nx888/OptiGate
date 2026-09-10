@@ -7848,11 +7848,16 @@ errors, and wrote its `adguard_report_sync_watermark` setting (0 rows
 back-filled so far, which is the expected healthy result while nothing
 is actively hitting a hard-deny over HTTPS).
 
-### Deployment status of everything from this session (as of 2026-09-09)
+### Deployment status of everything from this session (as of 2026-09-10)
 
 Production box (`pp-beelink`, hostname `optigate-MINI-S`) is at git
-`b2011bb`. Bark Home currently has the network; only the base services
-(`dashboard`/`proxy`/`adguard`) run.
+`7302a21`. Bark Home currently has the network; only the base services
+(`dashboard`/`proxy`/`adguard`) run -- and every one of them is still on
+its **2026-09-09** image (see "Live on production now" below). Nothing
+has been rebuilt or restarted on 2026-09-10: that day's work
+(Integrations page, `ip_address` pass, item 13, `config export/import`
+closeout) is all committed and `git pull`ed to prod but **not built** --
+see the "Committed but NOT yet built" table below.
 
 **Live on production now** (base-service changes, no interception
 profile needed):
@@ -7879,23 +7884,26 @@ end-to-end retest in the next supervised window:
 
 **Committed + `git pull`ed to prod, but NOT yet built -- bundle the
 rebuild into the next deployment window** (project owner's call,
-2026-09-10):
+2026-09-10). Git range `b2011bb..7302a21`:
 
 | Item | Change | Containers to rebuild | How to confirm after |
 |---|---|---|---|
 | 13 | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (commit `b7020e2`) | `dashboard` **and** `controller` | rebuild both, restart `dashboard`; then click "Sync now" on the YouTube category and confirm `ggpht.cn` now lands in `category_domains` |
 | Integrations page | New "Integrations" nav + Crunchyroll cross-user management page (commit `855d1c5`) | `dashboard` | open `/integrations`, confirm the cross-user shows table + approve/remove-all/remove-one all work |
 | "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report-page reason labels / AdGuard-401 self-diagnosing message -- all coded + pushed on 2026-09-08..09, never deployed | `dashboard` | spot-check each on the live dashboard after the rebuild |
-| `ip_address` pass | `authz_helper.py`/`sni_helper.py` now pass `ip_address` to every `log_access()` (commit pending) | `proxy` | rebuild + restart `proxy`; during interception, confirm new Report-page rows for Squid-tier decisions carry a source IP |
+| `ip_address` pass | `authz_helper.py`/`sni_helper.py` now pass `ip_address` to every `log_access()` (commit `7302a21`) | `proxy` | rebuild + restart `proxy`; during interception, confirm new Report-page rows for Squid-tier decisions carry a source IP |
 
-All of the `dashboard`-only rows above go live in **one** `dashboard`
-rebuild + restart; item 13 also needs `controller` rebuilt and the
-`ip_address` pass needs `proxy` rebuilt -- both ride the interception
-window with items 7/17/21.
+**One `dashboard` rebuild + restart** covers every `dashboard`-only row
+above (Integrations page, item 13's dashboard half, follow-ups 1-5/10).
+`controller` must also be rebuilt for item 13's other half, and `proxy`
+for the `ip_address` pass -- both ride the interception window with
+items 7/17/21 (that's when the `controller` sync and the Squid helpers
+actually run).
 
-**No deploy needed:** item 16 (rebuild alone was the fix, done), and
-the documentation commits (`341736d`, `b2011bb` -- markdown only,
-`git pull`ed to prod).
+**No deploy needed:** item 16 (rebuild alone was the fix, done), and the
+markdown-only commits `git pull`ed to prod as they landed (`341736d`,
+`b2011bb`, `cc43359`, `9e15503`, `af7cb37`, plus the RoadMap edits in
+this same commit).
 
 ---
 
