@@ -8065,9 +8065,11 @@ def update_admin():
             )
         else:
             message = (
-                "Saved. AdGuard's own login was updated too -- run "
-                "'docker compose restart adguard' for it to take effect "
-                "(AdGuard only reads its config at startup)."
+                "Saved. AdGuard's own login was updated too. Run "
+                "'docker compose restart adguard controller' for it to take "
+                "effect -- AdGuard only reads its config at startup, and the "
+                "controller reads this credential from the DB once at startup "
+                "(it's the same value both now use)."
             )
     conn.commit()
     return flash_redirect("settings_page", message)

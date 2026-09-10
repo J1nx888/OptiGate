@@ -4961,6 +4961,37 @@ regressions.
   coordinated AdGuard restart (a real DNS-resolution blip for the whole
   household, unlike restarting the dashboard container alone) -- real
   infrastructure work, not a quick patch.
+
+  **DONE (2026-09-10).** Completed in two parts. The dashboard<->AdGuard
+  half landed earlier with `dashboard/adguard_config_sync.py`: the
+  dashboard mounts AdGuard's conf volume read-write, generates AdGuard's
+  own bcrypt hash format, and re-writes `AdGuardHome.yaml`'s `users:`
+  block whenever the admin changes the password on the Settings page (it
+  also stores the plaintext in the `adguard_password` DB setting for its
+  own REST calls). The **controller** half landed today: it no longer
+  takes `--adguard-username`/`--adguard-password` from `docker-compose.yml`
+  (which filled them from `.env` -- the value showed up in `docker
+  inspect`/`ps` and, worse, silently drifted the first time an admin
+  changed the password from the dashboard: the controller kept sending
+  the stale one, 401ing every cycle, which tripped AdGuard's brute-force
+  lockout and locked the dashboard out too -- observed live this date on
+  first interception bring-up). Now `controller/main.py`'s new
+  `_resolve_adguard_credentials(conn, cli_user, cli_pass)` reads the
+  `adguard_username`/`adguard_password` settings rows -- the same single
+  source of truth the dashboard owns -- with the two CLI flags kept only
+  as optional overrides for tests/manual runs (still mandatory when
+  `--adguard-url` is used *without* `--db-path`, since then there's no DB
+  to read). If no password resolves, the controller logs one warning and
+  **skips the AdGuard sync loops** instead of spraying 401s. `.env`'s
+  `ADGUARD_PASSWORD` is now first-boot-bootstrap-only (documented in
+  compose); the live secret only ever lives in the DB (optigate_config
+  volume, not in git, not on a command line). A password change still
+  needs `docker compose restart adguard controller` -- AdGuard to reload
+  its yaml, the controller to re-read the row (startup-only read; a
+  periodic re-read to drop even that restart is a possible later
+  enhancement, noted but not built). 8 new tests in
+  `tests/test_controller_adguard_credentials.py`. Dashboard Settings
+  success message updated to name both services.
 - **`ip_address` capture across every `log_access()` call site**,
   specifically Squid's `authz_helper.py`/`sni_helper.py` (13 call sites) --
   each already has the raw client IP in scope (it's what they pass to

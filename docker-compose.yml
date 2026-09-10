@@ -54,15 +54,17 @@ services:
     # on exactly those real IPs.
     network_mode: host
     environment:
-      # Same pattern as DASHBOARD_USER/PASSWORD below: only consumed by
-      # adguard/entrypoint.sh's one-time bootstrap on first run. If
-      # ADGUARD_PASSWORD is left blank, a random one is generated and
-      # printed to this container's own logs
-      # (`docker compose logs adguard`) -- change it from AdGuard Home's
-      # own Settings page afterward. Whatever value ends up in effect
-      # here must also be passed to controller/main.py's
-      # --adguard-username/--adguard-password once that process is
-      # wired up (not yet in this compose file -- see RoadMap.md).
+      # FIRST-BOOT BOOTSTRAP ONLY. Consumed once by adguard/entrypoint.sh
+      # when the conf volume is empty. Leave ADGUARD_PASSWORD blank in
+      # .env (the secure default): the entrypoint then generates a random
+      # one, printed to this container's own logs
+      # (`docker compose logs adguard`). After first boot the live
+      # credential is owned by the dashboard -- set it on the Settings
+      # page, which stores it in the `adguard_password` DB setting AND
+      # re-hashes it into AdGuardHome.yaml (dashboard/adguard_config_sync.py).
+      # The controller reads that same DB setting; nothing here needs the
+      # password again. `docker compose restart adguard` after a change so
+      # AdGuard reloads its yaml.
       - ADGUARD_USERNAME=${ADGUARD_USERNAME:-admin}
       - ADGUARD_PASSWORD=${ADGUARD_PASSWORD:-}
       # 5354, not 5353: avahi-daemon (mDNS), a common default service on
@@ -150,12 +152,14 @@ services:
       # deny_info already uses -- one setting for both paths.
       - DASHBOARD_URL=${DASHBOARD_URL:-}
       # AdGuard connection settings for the Settings page's "Check for
-      # filter updates now" button (common/adguard_client.py) -- only
-      # consumed once, to seed the same-named DB settings on first run;
-      # editable from the Settings page afterward (e.g. to paste in a
-      # password AdGuard auto-generated because ADGUARD_PASSWORD was left
-      # blank -- see adguard's own environment block above). Must match
-      # whatever the adguard service is actually configured with.
+      # filter updates now" button (common/adguard_client.py). ADGUARD_URL
+      # is the live value. ADGUARD_USERNAME/ADGUARD_PASSWORD are consumed
+      # ONCE, to seed the same-named DB settings on first run only (via
+      # set_setting_if_absent) -- leave ADGUARD_PASSWORD blank in .env and
+      # set the real credential from the Settings page, which becomes the
+      # single source of truth for both this service and the controller
+      # (it also re-hashes it into AdGuardHome.yaml). See adguard's own
+      # environment block above.
       - ADGUARD_URL=${ADGUARD_URL:-http://127.0.0.1:3000}
       - ADGUARD_USERNAME=${ADGUARD_USERNAME:-admin}
       - ADGUARD_PASSWORD=${ADGUARD_PASSWORD:-}
@@ -288,8 +292,15 @@ services:
       - --gateway-ip=${GATEWAY_IP:-}
       - --gateway-mac=${GATEWAY_MAC:-}
       - --adguard-url=${ADGUARD_URL:-http://127.0.0.1:3000}
-      - --adguard-username=${ADGUARD_USERNAME:-admin}
-      - --adguard-password=${ADGUARD_PASSWORD:-}
+      # No --adguard-username/--adguard-password here on purpose: the
+      # controller reads them from the `adguard_username`/`adguard_password`
+      # DB settings (shared optigate_config volume, --db-path above), which
+      # the dashboard owns as the single source of truth. Keeps the secret
+      # off this command line entirely (it was showing up in `docker
+      # inspect` / `ps`). The two flags still exist in main.py as optional
+      # overrides for tests and manual runs. If the password isn't set yet,
+      # the controller logs a warning and skips the AdGuard sync loops
+      # rather than spraying 401s (which trips AdGuard's brute-force lock).
       - --dashboard-url=${DASHBOARD_URL:-}
     # No default for GATEWAY_IP/GATEWAY_MAC on purpose -- main.py's own
     # argparse refuses to start without both ("--db-path requires

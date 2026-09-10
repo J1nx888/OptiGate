@@ -627,6 +627,33 @@ def _build_db_backed_provider(
     return provider, conn
 
 
+def _resolve_adguard_credentials(
+    conn: sqlite3.Connection,
+    cli_username: str | None,
+    cli_password: str | None,
+) -> tuple[str, str | None]:
+    """Where the controller gets its AdGuard admin credentials.
+
+    The dashboard is the single source of truth: it stores them in the
+    `adguard_username`/`adguard_password` settings rows (in the
+    optigate_config volume, never in .env or on a command line) and
+    re-hashes the password into AdGuardHome.yaml on every Settings-page
+    change (dashboard/adguard_config_sync.py). This process reads the
+    same rows so the two can't drift.
+
+    An explicit CLI flag still wins when given (tests, one-off manual
+    runs). Returns (username, password) with username always a non-empty
+    string (defaulting to "admin") and password None when neither a flag
+    nor a non-empty DB setting supplied one -- the caller treats a None
+    password as "skip the AdGuard loops", never as a value to send.
+    """
+    import db
+
+    username = cli_username or db.get_setting(conn, "adguard_username", "admin") or "admin"
+    password = cli_password or db.get_setting(conn, "adguard_password", "") or None
+    return username, password
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default="/run/optigate/arp-worker.sock")
@@ -773,8 +800,21 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO)
 
-    if args.adguard_url and not (args.adguard_username and args.adguard_password):
-        parser.error("--adguard-url requires --adguard-username and --adguard-password")
+    # AdGuard credentials (username/password) are the ONE thing this
+    # process shares with the dashboard, and the dashboard is their single
+    # source of truth: it stores them in the `adguard_username`/
+    # `adguard_password` settings rows (in the optigate_config volume, not
+    # in .env or on any command line) and, on every Settings-page change,
+    # re-hashes the password into AdGuard's own AdGuardHome.yaml via
+    # dashboard/adguard_config_sync.py. So when --db-path is available we
+    # read them from there, and --adguard-username/--adguard-password
+    # become optional overrides (kept for tests and one-off manual runs).
+    # Only when there's no DB to read from do the CLI flags become
+    # mandatory alongside --adguard-url.
+    if args.adguard_url and not args.db_path and not (args.adguard_username and args.adguard_password):
+        parser.error(
+            "--adguard-url without --db-path requires --adguard-username and --adguard-password"
+        )
 
     conn: sqlite3.Connection | None = None
     discovery_interval: float | None = None
@@ -784,6 +824,8 @@ def main(argv: list[str] | None = None) -> int:
     active_scan_interval: float | None = None
     category_fetch_interval: float | None = None
     enable_network_sweep = False
+    adguard_username = args.adguard_username
+    adguard_password = args.adguard_password
     if args.db_path:
         if not args.gateway_ip or not args.gateway_mac:
             parser.error("--db-path requires --gateway-ip and --gateway-mac")
@@ -803,16 +845,35 @@ def main(argv: list[str] | None = None) -> int:
             # rather than at this file's top level.
             enable_rtnetlink = True
         if args.adguard_url:
-            # Same reasoning as discovery_interval above -- adguard_sync
-            # opens its own connection internally, reading the DB
-            # policy-state discovery already keeps current.
-            adguard_interval = args.adguard_interval
-            if not args.no_adguard_discovery:
-                # adguard_discovery.run_loop() opens its own connection
-                # internally too, same reasoning as discovery_interval
-                # above -- only meaningful alongside adguard_interval
-                # since both require the same adguard_url/credentials.
-                adguard_discovery_interval = args.adguard_discovery_interval
+            adguard_username, adguard_password = _resolve_adguard_credentials(
+                conn, args.adguard_username, args.adguard_password
+            )
+            if not adguard_password:
+                # Starting the AdGuard loops with no password would just
+                # spray 401s at AdGuard on every cycle -- and enough of
+                # those trip AdGuard's own brute-force lockout, which then
+                # locks out the dashboard too (observed 2026-09-10). Skip
+                # them instead and say why; the periodic sync is a
+                # convenience, not a correctness gate, and an admin
+                # setting the password in dashboard Settings + restarting
+                # this container is the intended recovery.
+                log.warning(
+                    "--adguard-url is set but no AdGuard password is available "
+                    "(neither --adguard-password nor the 'adguard_password' DB "
+                    "setting) -- skipping all AdGuard sync loops. Set it from the "
+                    "dashboard Settings page, then restart this container."
+                )
+            else:
+                # Same reasoning as discovery_interval above -- adguard_sync
+                # opens its own connection internally, reading the DB
+                # policy-state discovery already keeps current.
+                adguard_interval = args.adguard_interval
+                if not args.no_adguard_discovery:
+                    # adguard_discovery.run_loop() opens its own connection
+                    # internally too, same reasoning as discovery_interval
+                    # above -- only meaningful alongside adguard_interval
+                    # since both require the same adguard_url/credentials.
+                    adguard_discovery_interval = args.adguard_discovery_interval
         if not args.no_active_scan:
             # active_scan.run_loop() opens its own connection internally
             # too, same reasoning as discovery_interval above -- unlike
@@ -844,8 +905,8 @@ def main(argv: list[str] | None = None) -> int:
         adguard_interval=adguard_interval,
         adguard_discovery_interval=adguard_discovery_interval,
         adguard_url=args.adguard_url,
-        adguard_username=args.adguard_username,
-        adguard_password=args.adguard_password,
+        adguard_username=adguard_username,
+        adguard_password=adguard_password,
         block_page_ip=parse_block_page_ip(args.dashboard_url),
         worker_ready_timeout=args.worker_ready_timeout,
         adguard_ready_timeout=args.adguard_ready_timeout,
