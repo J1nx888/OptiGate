@@ -7905,6 +7905,88 @@ markdown-only commits `git pull`ed to prod as they landed (`341736d`,
 `b2011bb`, `cc43359`, `9e15503`, `af7cb37`, `1312343`, plus the RoadMap
 edits in this same commit).
 
+### One-pass interception-window runbook (2026-09-10)
+
+Everything buildable is already built (Phase 1, above). This is the
+sequenced checklist for the supervised window itself. All `ssh
+pp-beelink` docker commands are written single (no `&&` chain -- the
+auto-mode classifier blocks compound docker commands); `--project-directory
+~/parental_proxy` stands in for `cd`.
+
+**Phase 2 -- cutover (owner does the network handoff)**
+
+1. Owner physically moves the household network from Bark Home to
+   OptiGate (DHCP / cabling). Wait for a client to pull a lease from
+   the OptiGate box.
+2. Start the interception stack (images pre-built, so this is fast):
+   `ssh pp-beelink "docker compose --project-directory ~/parental_proxy --profile interception up -d"`
+3. Confirm every container is up:
+   `ssh pp-beelink "docker compose --project-directory ~/parental_proxy --profile interception ps"`
+   -- expect `nftables-manager`, `arp-worker`, `controller`, `proxy`,
+   `dashboard`, `adguard` all `Up`.
+4. Controller / nftables / worker startup sanity:
+   `ssh pp-beelink "docker logs --since 2m optigate-controller 2>&1 | tail -40"`
+   `ssh pp-beelink "docker logs --since 2m optigate-nftables-manager 2>&1 | tail -40"`
+   `ssh pp-beelink "docker logs --since 2m optigate-arp-worker 2>&1 | tail -40"`
+   -- discovery/rtnetlink loops running, nftables ruleset applied, no
+   crash-loop, no IPC fault.
+5. `ssh pp-beelink "nft list ruleset | head -80"` -- confirm the
+   `optigate` table/chains are present and the `bump_v4` redirect rule
+   carries the box's own LAN IP as an exception (item 7).
+
+**Phase 3 -- live retests, in this order**
+
+6. **Item 7** -- from a bump-mode device, load `http://optigate.home/`:
+   the device-status page shows *that device's* real identity (not the
+   box). Then hit a hard-denied domain from the same device and check
+   `ssh pp-beelink "docker logs --since 2m optigate-proxy 2>&1 | grep -i 'SECURITY ALERT'"`
+   -- expect no `Host header forgery detected` line.
+7. **Item 17** -- from a bump device, open Crunchyroll and Asurascans;
+   both should play. Then
+   `ssh pp-beelink "docker exec optigate-proxy sh -c 'tail -100 /var/log/squid/access.log'" | grep -E 'NONE_NONE/409|crunchyroll|asura'`
+   -- expect no `NONE_NONE/409`.
+8. **Item 13** -- dashboard -> Categories -> YouTube -> "Sync now".
+   Then
+   `ssh pp-beelink "docker exec optigate-dashboard sqlite3 /config/optigate.db \"SELECT COUNT(*) FROM category_domains cd JOIN categories c ON c.id=cd.category_id WHERE c.name LIKE '%YouTube%' AND cd.pattern LIKE '%ggpht\\.cn%' ESCAPE '\\';\""`
+   -- expect `1`. Also confirm the periodic `controller` sync agrees:
+   `ssh pp-beelink "docker logs --since 10m optigate-controller 2>&1 | grep -i category"`.
+9. **Item 21** -- reclassify the Echo (`20:a1:71:9d:58:dc`) to a more
+   restrictive mode from the dashboard WITHOUT power-cycling it, while a
+   voice interaction / stream is open. The open connection should drop
+   within one poll interval. Watch
+   `ssh pp-beelink "docker logs --since 2m optigate-nftables-manager 2>&1 | grep -i conntrack"`.
+10. **`ip_address` pass** -- from a known device, trigger one allowed
+    and one denied Squid-tier decision (visit an allowed unconfigured
+    domain; visit a bump domain not assigned to that user). Then on the
+    Report page confirm both new rows show a source IP. SQL check:
+    `ssh pp-beelink "docker exec optigate-dashboard sqlite3 /config/optigate.db \"SELECT ts, username, domain, allowed, reason, ip_address FROM access_log ORDER BY id DESC LIMIT 10;\""`
+    -- the newest Squid-tier rows have a non-NULL `ip_address`.
+11. **Item 25** -- from a device, hit a hard-denied HTTPS domain. Within
+    a poll cycle a `reason="dns_hard_deny"` row should appear on the
+    Report page and the watermark should advance:
+    `ssh pp-beelink "docker exec optigate-dashboard sqlite3 /config/optigate.db \"SELECT value FROM settings WHERE key='adguard_report_sync_watermark';\""`
+    -- newer than `2026-09-09T18:10:39Z`.
+12. **Integrations page** -- open `/integrations`: cross-user shows
+    table renders; approve a series for two kids; remove-from-one;
+    remove-from-everyone. All redirect with the right flash and the DB
+    reflects each change.
+13. Spot-check the five "13 more" follow-ups (1-5, 10) on the live
+    dashboard.
+
+**Phase 4 -- wind-down**
+
+14. GO / NO-GO decision: leave interception routing the household, or
+    hand the network back to Bark Home. If handing back:
+    `ssh pp-beelink "docker compose --project-directory ~/parental_proxy --profile interception down"`
+    then owner reverts the network.
+15. Update this section + each item's own entry with what actually
+    verified. Commit + push + `git pull` on prod.
+
+**If this comes back a no-go:** capture the failing container's logs
+and the relevant `nft list ruleset` / `access.log` slice before tearing
+down, hand the network back to Bark Home, and file the specifics under
+the failing item rather than re-running blind.
+
 ---
 
 ## Cross-cutting: security-by-design
