@@ -374,22 +374,49 @@ def test_failed_kid_login_logs_a_system_event(server, conn):
     assert "correcthorse" not in row["message"], "the password itself must never be logged"
 
 
-def test_successful_kid_login_logs_no_system_event(server, conn):
+def test_successful_kid_login_logs_one_info_system_event(server, conn):
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")
 
-    # Baseline taken AFTER setup, not before: record_binding() above is a
-    # genuinely brand-new MAC, which (2026-09-09, system_events.py's own
-    # narrow 'info' severity) now correctly logs a "new device
-    # discovered" event of its own -- that's the setup step's business,
-    # not the login's. This test's real claim is narrower: the LOGIN
-    # itself must add nothing further.
+    # Baseline taken AFTER setup: record_binding() above is a genuinely
+    # brand-new MAC, which logs its own "new device discovered" event
+    # (system_events.py's narrow 'info' severity) -- the setup step's
+    # business, not the login's.
     before = conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"]
 
     _post(server, "kid1", "correcthorse")
 
     after = conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"]
-    assert after == before, "system_events is deliberately not a firehose -- a normal successful login isn't an event"
+    assert after == before + 1, "a successful portal login is now an auditable Events-page row (RoadMap.md finding, 2026-09-10)"
+    row = conn.execute(
+        "SELECT source, severity, message FROM system_events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["source"] == "captive_portal_login"
+    assert row["severity"] == "info"
+    assert "kid1" in row["message"]
+    assert MAC_A in row["message"]
+    assert "correcthorse" not in row["message"], "the password itself must never be logged"
+
+
+def test_blank_form_post_is_not_logged_and_does_not_spend_the_rate_limit_budget(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _add_user(conn, "kid1", "correcthorse")
+    before = conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"]
+
+    # An OS captive-portal assistant auto-POSTing the empty form, over
+    # and over, more times than the rate limiter would normally allow.
+    for _ in range(captive_portal_server._MAX_ATTEMPTS + 3):
+        _post(server, "", "")
+
+    after = conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"]
+    assert after == before, "a blank auto-submit must not write 'username: \\'\\'' error rows (RoadMap.md, 2026-09-10)"
+
+    # ...and the real login right afterwards still goes through -- the
+    # blank probes didn't burn the shared budget.
+    status, body = _post(server, "kid1", "correcthorse")
+    assert status == 200
+    assert "signed in" in body.lower()
+    assert conn.execute("SELECT is_authenticated FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()[0] == 1
 
 
 def test_one_attempt_below_the_limit_still_succeeds_with_the_right_password(server, conn):

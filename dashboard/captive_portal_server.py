@@ -387,6 +387,20 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if not username or not password:
+            # No real login has an empty username or password (the form
+            # fields are `required`, so a human can't submit this) -- it's
+            # an OS captive-portal assistant / WebView auto-POSTing the
+            # bare form the moment it renders, or a re-POST of a blank
+            # one. Re-render the form and stop here: recording a
+            # system_events row for it would be pure "username: ''" noise
+            # on the Events page (RoadMap.md finding, 2026-09-10), and
+            # spending the shared rate-limit budget on a submission that
+            # can never succeed risks locking out the device's real
+            # attempt right after.
+            self._send_html(200, _render(groups=_fetch_groups(conn)))
+            return
+
         user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         if user is None or not auth.verify_password(password, user["password_hash"]):
             _LOGIN_LIMITER.record_failure(client_ip)
@@ -419,6 +433,18 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
         )
         conn.commit()
         log.info("device %s authenticated as %s", device["mac_address"], username)
+        # Auditable, dashboard-visible record that a device joined the
+        # filtered network via the portal -- the counterpart to the
+        # failed-attempt rows already written above, so the whole portal
+        # flow (not just its failures) can be confirmed from the Events
+        # page without container logs (RoadMap.md, 2026-09-10). A genuine
+        # one-off admin-relevant event, not a routine cycle -- the same
+        # bar system_events' own `'info'` severity documents for its
+        # other callers.
+        system_events.log_event(
+            conn, "captive_portal_login", "info",
+            f"{username!r} logged in from device {device['mac_address']} ({client_ip})",
+        )
 
         # Does this same user already have a DIFFERENT device with
         # SSL-Bump enabled? If so, this login -- DNS-tier only, always

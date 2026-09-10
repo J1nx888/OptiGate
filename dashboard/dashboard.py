@@ -7602,6 +7602,13 @@ SETTINGS_BODY = """
   finding those yourself. The <code>.home</code> suffix is fixed; only
   the first part is yours to change.
 </p>
+<p class="hint">
+  This won't resolve on a device set to <strong>bypass login</strong> or
+  <strong>ignored</strong> -- OptiGate deliberately leaves those devices'
+  DNS completely alone, and this address only exists inside OptiGate's own
+  resolver. That's expected: an unmanaged device has nothing to
+  troubleshoot here. Reach the dashboard by its IP address instead.
+</p>
 <div class="add-form">
   <input type="text" name="optigate_hostname_prefix" id="optigateHostnamePrefixInput" value="{{ optigate_hostname_prefix }}" style="max-width:12rem;">
   <span class="hint" style="margin:0;">.home</span>

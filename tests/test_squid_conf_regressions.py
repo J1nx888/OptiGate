@@ -191,3 +191,20 @@ def test_http_access_catchall_is_still_deny_not_allow():
     assert lines[-1] == "http_access deny all", (
         f"expected the final http_access rule to be 'http_access deny all', got {lines[-1]!r}"
     )
+
+
+def test_host_verify_strict_is_off_for_intercept_mode():
+    """RoadMap.md finding #6 (2026-09-10): with Squid's stricter host
+    verification, an intercepted connection to a large multi-IP CDN gets
+    killed with `SECURITY ALERT: Host header forgery detected` +
+    NONE_NONE/409 whenever the client's connected IP isn't in Squid's own
+    fresh re-resolution of the SNI name -- which is most of the time for a
+    short-TTL CDN pool. `host_verify_strict off` makes Squid treat the
+    intercepted destination as authoritative instead. It must sit BEFORE
+    the ssl_bump chain (it governs how the intercepted destination is
+    established, which happens first)."""
+    text = TEMPLATE_PATH.read_text()
+    m = re.search(r"^host_verify_strict\s+off\s*$", text, re.MULTILINE)
+    assert m, "host_verify_strict off must be set -- see the comment block above it in squid.conf.template"
+    first_ssl_bump = text.index("ssl_bump ")
+    assert m.start() < first_ssl_bump, "host_verify_strict must be configured before the ssl_bump rules"

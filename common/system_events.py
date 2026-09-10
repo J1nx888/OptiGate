@@ -33,12 +33,15 @@ itself, a notable "recovery" worth a row).
 "Run now" on the network discovery sweep visibly did something, but
 nothing showed up here at all): deliberately narrow, not a general
 "log routine success" escape hatch that would reopen the firehose
-question above. Only two callers use it, both genuinely rare,
-admin-relevant, one-off events, not a periodic cycle succeeding:
+question above. Its callers are all genuinely rare, admin-relevant,
+one-off events, not a periodic cycle succeeding:
 `controller/network_sweep.py`'s manual "Run now" trigger completing
-(an explicit admin action, not the automatic hourly schedule), and
+(an explicit admin action, not the automatic hourly schedule),
 `common/identity.py`'s `record_binding()` recording a genuinely
-brand-new device for the first time (not a routine binding refresh).
+brand-new device for the first time (not a routine binding refresh),
+and `dashboard/captive_portal_server.py` recording a successful
+portal login (a device joins the filtered network once -- the
+counterpart to the failed-attempt rows that surface already exists).
 Requires a real schema migration (`common/db.py`'s `_migrate()`) since
 SQLite's `CHECK` constraints can't be altered in place -- see that
 migration's own comment for why this differs from

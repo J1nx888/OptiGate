@@ -46,6 +46,33 @@ sslcrtd_children 5 startup=1 idle=1
 
 
 # ==========================================================
+# HOST HEADER / INTERCEPTED-DESTINATION VERIFICATION
+# ==========================================================
+# RoadMap.md finding #6 (2026-09-10 QUIC/Crunchyroll trace). With this
+# left at Squid's stricter behaviour, an intercepted connection whose
+# real destination IP is not in Squid's OWN fresh re-resolution of the
+# SNI/Host name is killed outright with `SECURITY ALERT: Host header
+# forgery detected` + NONE_NONE/409. That is exactly what a large,
+# multi-IP, short-TTL CDN looks like from here: the client connected to
+# whatever address its resolver handed out, Squid re-resolves a moment
+# later and gets a different rotation of the same pool. During the
+# 2026-09-10 window this filled `.30`'s cache.log for clients*.google.com,
+# encrypted-tbn0.gstatic.com, lh3.googleusercontent.com, and
+# Crunchyroll's own video CDN vod-*.crunchyrollcdn.com -- breaking normal
+# browsing and CR playback alike once all of a device's 443 was forced
+# through Squid.
+#
+# `off` makes Squid treat the intercepted TCP destination as
+# authoritative (log the discrepancy, carry on) instead of erroring --
+# the documented setting for an intercepting proxy. It does NOT weaken
+# the per-domain / per-path / per-show enforcement below: that runs on
+# the SNI and the decrypted request, not on this DNS-round-trip
+# comparison. Unrelated to the item-7 self-IP redirect carve-out
+# (nftables-manager) and to bump-mode domains (still fully decrypted).
+host_verify_strict off
+
+
+# ==========================================================
 # SSL BUMP STEPS
 # ==========================================================
 

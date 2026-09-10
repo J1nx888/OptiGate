@@ -60,6 +60,10 @@ Test series that must be BLOCKED: **Black Clover `GRE50KV36`** (not approved).
    (see #3), and specifically breaks Crunchyroll's own video CDN.
    Fix: `host_verify_strict off` in `proxy/squid.conf.template` — the
    standard setting for intercept mode. (RoadMap finding #6.)
+   **Applied 2026-09-10** (own section before the ssl_bump chain; proxy
+   image rebuilt + deployed; `squid -k parse` clean). Inert with zero
+   bump devices — the "CDN traffic stops 409ing" check itself still
+   needs the next supervised interception window.
 
 3. **Forcing ALL of a device's HTTPS through Squid is too blunt.** `.30`
    is a blanket `bump_v4` member, so nftables redirects every tcp/443 to

@@ -8125,16 +8125,48 @@ redesign in a dedicated session, not a live quick-patch**.
    `asurascans.com` (id 28, `mode='bump'`, `is_global=0`); no live
    Squid/`access_log` traffic for it at all this session, which points
    at Asura's rebrand to **`asuracomic.net`** (not in `domains`, so
-   default-splice/allow). **Fix needs:** confirm the current host(s),
-   add `asuracomic.net` as bump mode, and check why a `mode='bump'`
-   domain is falling to `ssl_bump splice` for some paths (should be
-   per-domain, not per-path -- `sni_helper.py bump` returning ERR?).
+   default-splice/allow).
 
-3. **`optigate.home` unreachable for `bypass_login` devices.** Owner's
-   own read is almost certainly right: a bypass device gets `ct mark
-   0x1` and no `:5354` DNS redirect, so `optigate.home` (an AdGuard
-   rewrite) never resolves for it. Confirm and then either document as
-   intended or add a deliberate exception.
+   **Investigated 2026-09-10 -- there is no per-path bump bug.**
+   `proxy/sni_helper.py`'s `handle_bump()` keys purely on
+   `matching.find_domain(sni)["mode"] == "bump"` -- it never looks at
+   the path (it can't; nothing is decrypted yet), and squid.conf's
+   `ssl_bump bump step2 sni_bump` is ordered *before*
+   `ssl_bump splice step2 sni_splice_allowed`, first-match-wins. A real
+   `mode='bump'` domain therefore always bumps, every path. The
+   "root/non-listed paths splice through" behaviour is entirely the
+   rebrand: `asuracomic.net` has no `domains` row, so it hits
+   `handle_splice()` with `domain is None`, which (by the deliberate
+   2026-09-08 "match the DNS tier's default-allow" fix) logs
+   `unconfigured_domain` / `allowed=1` and splices it. The deep link
+   that *did* bump was still hitting the old `asurascans.com` host.
+
+   **Remaining action (owner, via the dashboard -- direct prod DB
+   writes are classifier-blocked):** confirm Asura's current host(s)
+   in a browser, then Domains -> Add `asuracomic\.net`, mode = bump
+   (mirror whatever `is_global` / user assignment `asurascans.com`
+   has). Once a real `domains` row exists, every path on it
+   bumps-and-enforces exactly like Crunchyroll. Optionally also add
+   `asura` path allow-rules if any deep paths should be permitted
+   without a per-show check.
+
+3. **~~`optigate.home` unreachable for `bypass_login` devices~~ --
+   CONFIRMED + DOCUMENTED AS INTENDED (2026-09-10).** Owner's read was
+   right. `phase3/nftables-manager` `baselineRules()` gives a
+   `bypass_v4` device exactly one rule -- `ct mark set 0x1 return` --
+   with **no `:5354` DNS redirect**; an `ignored` device is in no
+   managed set at all. `optigate.home` is only ever an AdGuard DNS
+   rewrite, so it resolves only for a device whose DNS actually goes
+   through AdGuard. Both modes send their DNS to whatever upstream
+   resolver they're pointed at, which returns NXDOMAIN. Not fixed with
+   an exception: the only way to make it resolve is to redirect the
+   device's DNS to AdGuard, which is precisely the interception
+   `bypass_login` / `ignored` exist to opt out of -- and an unmanaged
+   device has nothing to self-diagnose on that page anyway. Documented
+   where it'll actually be seen: the Settings page "Memorable
+   troubleshooting address" hint now says so explicitly, and
+   `common/optigate_rewrite.py`'s module docstring records the
+   rationale. An admin on a bypass device reaches the dashboard by IP.
 
 4. **~~`optigate.home` from a known non-bypass device shows only a login
    prompt~~ -- FIXED 2026-09-10 (`89cf895`).** Root cause was the stale
@@ -8185,22 +8217,31 @@ redesign in a dedicated session, not a live quick-patch**.
    A browser still showing an old layout after deploy needs a one-time
    hard reload (the `sw.js` bump handles the rest).
 
-6. **`host_verify_strict` breaks spliced multi-IP CDN traffic** --
-   upgraded from "noise" to a real blocker after the 2026-09-10 QUIC
-   trace. `.30`'s `cache.log` filled with `SECURITY ALERT: Host header
-   forgery detected … (local IP does not match any domain IP)` for
+6. **~~`host_verify_strict` breaks spliced multi-IP CDN traffic~~ --
+   CONFIG LANDED 2026-09-10 (`proxy/squid.conf.template`); live re-verify
+   still pending the next interception window.** Upgraded from "noise"
+   to a real blocker after the 2026-09-10 QUIC trace. `.30`'s
+   `cache.log` filled with `SECURITY ALERT: Host header forgery detected
+   … (local IP does not match any domain IP)` for
    `clients2/clients4.google.com`, `encrypted-tbn0.gstatic.com`,
    `lh3.googleusercontent.com`, `waa-pa.clients6.google.com`, and
-   Crunchyroll's own video CDN `vod-*.crunchyrollcdn.com` -- Squid's
-   default `host_verify_strict on` killing spliced connections where the
-   client's cached DNS answer != Squid's fresh re-resolution
-   (`NONE_NONE/409` + `transaction-end-before-headers`). Once all of a
-   device's 443 is forced through Squid (finding #7 + the QUIC drop),
-   this degrades the whole device's browsing AND breaks CR video
-   playback. **Fix:** `host_verify_strict off` in
-   `proxy/squid.conf.template` -- the standard, Squid-documented setting
-   for intercept mode. NOT the item-7 self-IP case (fixed) and NOT
-   bump-mode domains.
+   Crunchyroll's own video CDN `vod-*.crunchyrollcdn.com` -- Squid
+   killing spliced connections where the client's cached DNS answer !=
+   Squid's fresh re-resolution (`NONE_NONE/409` +
+   `transaction-end-before-headers`). Once all of a device's 443 is
+   forced through Squid (finding #7 + the QUIC drop), this degrades the
+   whole device's browsing AND breaks CR video playback.
+   **Fix applied:** `host_verify_strict off` added in its own
+   "HOST HEADER / INTERCEPTED-DESTINATION VERIFICATION" section of
+   `proxy/squid.conf.template`, before the ssl_bump chain -- Squid now
+   treats the intercepted TCP destination as authoritative instead of
+   erroring. Does NOT touch per-domain/path/show enforcement (runs on
+   SNI + decrypted request, not this DNS-round-trip compare); NOT the
+   item-7 self-IP case (fixed) and NOT bump-mode domains. Regression
+   guard: `tests/test_squid_conf_regressions.py::test_host_verify_strict_is_off_for_intercept_mode`.
+   `proxy` image rebuilt + restarted on prod (`squid -k parse` clean);
+   inert until a bump device exists, so the actual "CDN traffic no
+   longer 409s" check has to wait for the next supervised window.
 
 7. **Full-bump on a device is too blunt -- needs selective (per-domain)
    bumping.** `.30` is a blanket `bump_v4` member, so nftables redirects
@@ -8317,13 +8358,23 @@ redesign in a dedicated session, not a live quick-patch**.
      no unified filtering/approval UX.
    Leans toward the first, gated on the retention design.
 
-   Related, small: a successful captive-portal login currently writes
-   NO `system_events` row (only failures do) -- add a success event so
-   "a device logged in" is auditable and the portal flow can be
-   confirmed from the logs. And the `"Failed login attempt (username:
-   '')"` events are OS captive-portal *detection probes*, not real
-   attempts -- stop logging those as `error`-severity events (cosmetic
-   noise, already flagged).
+   Related, small -- **both DONE 2026-09-10** (`dashboard/captive_portal_server.py`):
+   - A successful captive-portal login now writes one `info`
+     `system_events` row (`source='captive_portal_login'`,
+     `"'kid1' logged in from device <mac> (<ip>)"`, no password) -- the
+     counterpart to the failed-attempt rows, so the whole portal flow
+     is confirmable from the Events page. `system_events.py`'s docstring
+     updated to list this third legitimate `'info'` caller.
+   - A blank form POST (empty username *or* password) now short-circuits
+     before both `_log_failed_login()` and the rate limiter: it can only
+     be an OS captive-portal assistant / WebView auto-submitting the
+     bare form, never a real attempt, so it no longer produces
+     `"username: ''"` `error` rows and no longer spends the shared
+     rate-limit budget (which had risked locking out the device's real
+     login right after). Non-empty bad credentials still log + count
+     exactly as before.
+     Tests: `test_successful_kid_login_logs_one_info_system_event`,
+     `test_blank_form_post_is_not_logged_and_does_not_spend_the_rate_limit_budget`.
 
 ### Dashboard feedback batch (2026-09-10, from interception-window use)
 

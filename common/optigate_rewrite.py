@@ -21,6 +21,20 @@ flagged. Fixed by making the dashboard call this directly (see
 dashboard.py's own `_sync_optigate_rewrite_now()`), so the feature
 works standalone, with `controller`'s own periodic call now just a
 second, redundant path for when that profile happens to be running.
+
+**Bypass/ignored devices can't reach `optigate.home` -- by design
+(RoadMap.md finding #3, 2026-09-10).** The hostname is only ever an
+AdGuard DNS rewrite, so it resolves only for a device whose DNS
+actually goes through AdGuard. A `bypass_login` device gets nftables'
+plain `ct mark set 0x1 return` with no `:5354` DNS redirect
+(phase3/nftables-manager baselineRules), and an `ignored` device isn't
+in any managed set at all -- both resolve `optigate.home` against
+whatever upstream resolver they're configured with, which returns
+NXDOMAIN. Making it work for them would mean redirecting their DNS to
+AdGuard, which is exactly the interception those two modes exist to
+opt out of. An unmanaged device has nothing to self-diagnose on the
+troubleshooting page anyway; its admin reaches the dashboard by IP.
+Surfaced to the operator in the Settings page hint text.
 """
 from __future__ import annotations
 
