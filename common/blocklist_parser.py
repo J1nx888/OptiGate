@@ -47,6 +47,19 @@ _URL_SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
 # plausible hostname is skipped rather than guessed at.
 _BARE_DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
 
+# v2fly/domain-list-community style (github.com/v2fly/domain-list-community).
+# Lines there can carry one or more trailing " @attribute" tags (region /
+# purpose markers, e.g. "ggpht.cn @cn", "ads.youtube.com @ads",
+# "example.com @ads @cn") and an optional leading "domain:" or "full:"
+# match-type prefix ("full:example.com" is exact-match-only, "domain:" is the
+# implicit default). Strip both so the plain hostname underneath is picked up
+# by the bare-domain / hosts / URL handling below. The format's other line
+# kinds -- "keyword:", "regexp:", "include:" -- are deliberately left alone:
+# they are not plain domains and stay skipped by _normalize() exactly as
+# before (a "keyword:" line must never be emitted as if it were a hostname).
+_V2FLY_ATTR_RE = re.compile(r"(?:\s+@\S+)+\s*$")
+_V2FLY_DOMAIN_PREFIX_RE = re.compile(r"^(?:domain|full):", re.IGNORECASE)
+
 
 def _normalize(hostname: str) -> str | None:
     hostname = hostname.strip().rstrip(".").lower()
@@ -79,6 +92,15 @@ def parse_hostlist(text: str) -> list[str]:
         entries parsed correctly, including the query-glued and
         trailing-`#`-fragment lines.
       - a bare domain on its own line.
+      - v2fly/domain-list-community style: a bare domain (or a `domain:` /
+        `full:` prefixed one) with zero or more trailing ` @attribute` tags,
+        e.g. `ggpht.cn @cn`, `full:ads.youtube.com @ads`. The prefix and the
+        tags are stripped; the hostname underneath is then parsed as a bare
+        domain. `keyword:` / `regexp:` / `include:` lines from that same
+        format are NOT unwrapped -- they are not plain domains and stay
+        skipped (added 2026-09-10, RoadMap follow-up item 13: real coverage
+        loss found in the live YouTube category, whose source list is one of
+        these -- `ggpht.cn` and other `@`-tagged entries were being dropped).
 
     A line matching none of these shapes (malformed, or a rule type this
     parser doesn't understand -- e.g. a regex rule, an exception rule
@@ -94,6 +116,18 @@ def parse_hostlist(text: str) -> list[str]:
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith(_COMMENT_PREFIXES):
+            continue
+
+        # Unwrap v2fly/domain-list-community syntax (see the module notes by
+        # _V2FLY_ATTR_RE): drop any trailing " @attribute" tags, then a
+        # leading "domain:"/"full:" match-type prefix, so the plain hostname
+        # underneath falls through to the shape handlers below. Applied before
+        # the format dispatch so a tagged hosts/AdGuard/URL line is unwrapped
+        # too; harmless for those formats, which never legitimately carry a
+        # space-separated trailing "@" token.
+        line = _V2FLY_ATTR_RE.sub("", line)
+        line = _V2FLY_DOMAIN_PREFIX_RE.sub("", line, count=1)
+        if not line:
             continue
 
         match = _ADGUARD_RULE_RE.match(line)

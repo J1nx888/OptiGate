@@ -7037,6 +7037,36 @@ or their explicit real-time approval in a live conversation turn.**
     **Lesson for future me: verify against the real fetched content
     before writing a technical claim into this file, not just by
     reading the consuming code's own doc comment.**
+
+    **DONE (implemented + tested 2026-09-10): both gaps closed exactly as
+    the "if ever worth closing" note above sketched.** `common/blocklist_parser.py`
+    now, right after the comment/blank-line check and before the format
+    dispatch, strips any trailing ` @attribute` tag(s) (`_V2FLY_ATTR_RE`,
+    `(?:\s+@\S+)+\s*$` -- covers multiple tags, e.g. `example.com @ads @cn`)
+    and then a leading `domain:`/`full:` match-type prefix
+    (`_V2FLY_DOMAIN_PREFIX_RE`, case-insensitive), so the plain hostname
+    underneath falls through to the existing bare-domain / hosts / URL
+    handlers. `keyword:` / `regexp:` / `include:` lines are deliberately
+    left untouched -- they carry no plain hostname and must stay skipped
+    (a `keyword:` rule must never be emitted as if it were a domain). The
+    strip runs before the format dispatch, so a tagged hosts-file or
+    AdGuard line is unwrapped too -- harmless, since those formats never
+    legitimately carry a space-separated trailing `@` token. 13 new tests
+    in `tests/test_blocklist_parser.py` (single/multiple `@tag`,
+    `domain:`/`full:` prefix, prefix+tag together, `keyword:`/`regexp:`/
+    `include:` still skipped, a realistic v2fly YouTube-list excerpt, a
+    bare `@cn` with no host, and non-regression on hosts/AdGuard lines).
+    Full local suite green (1160 passed, 34 skipped). **Not yet activated
+    on production**: `parse_hostlist()` runs in both `controller`
+    (periodic `category_fetch.run_loop`) and `dashboard` (the per-category
+    "Sync now" / bulk-sync buttons, `dashboard.py` imports `category_fetch`
+    directly), so the fixed parse takes effect only after those images are
+    rebuilt AND a category is re-fetched (on its schedule or via "Sync
+    now"). Source is `git pull`ed to prod; the `dashboard` rebuild+restart
+    needs the project owner's own hands / real-time approval, and the
+    `controller` rebuild rides the next interception-window deploy. Low
+    urgency -- existing `category_domains` rows are unaffected until a
+    re-fetch runs.
 14. **NEW, found 2026-09-08 while investigating item 6, not something
     the project owner reported: repeated "SECURITY ALERT: Host header
     forgery detected" entries in `optigate-proxy`'s `cache.log`,

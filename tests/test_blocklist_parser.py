@@ -110,3 +110,74 @@ def test_full_url_real_world_edge_cases():
 def test_full_url_deduplicates_with_other_formats_for_the_same_host():
     text = "http://example.com\nexample.com\n||example.com^\n"
     assert blocklist_parser.parse_hostlist(text) == ["example.com"]
+
+
+# --- v2fly/domain-list-community format (RoadMap follow-up item 13, 2026-09-10) -
+
+def test_v2fly_trailing_attribute_tag_is_stripped():
+    # The exact shape that was dropping real YouTube-related domains from the
+    # live category: a bare host with a trailing region/purpose tag.
+    text = "ggpht.cn @cn\nads.youtube.com @ads\n"
+    assert blocklist_parser.parse_hostlist(text) == ["ggpht.cn", "ads.youtube.com"]
+
+
+def test_v2fly_multiple_trailing_attribute_tags_are_all_stripped():
+    text = "example.com @ads @cn\n"
+    assert blocklist_parser.parse_hostlist(text) == ["example.com"]
+
+
+def test_v2fly_domain_prefix_is_stripped():
+    text = "domain:example.com\n"
+    assert blocklist_parser.parse_hostlist(text) == ["example.com"]
+
+
+def test_v2fly_full_prefix_is_stripped():
+    text = "full:exact.example.com\n"
+    assert blocklist_parser.parse_hostlist(text) == ["exact.example.com"]
+
+
+def test_v2fly_prefix_and_attribute_tag_together():
+    text = "full:ads.youtube.com @ads\n"
+    assert blocklist_parser.parse_hostlist(text) == ["ads.youtube.com"]
+
+
+def test_v2fly_keyword_regexp_include_lines_are_not_treated_as_domains():
+    # These carry no plain hostname -- they must stay skipped, never emitted.
+    text = (
+        "keyword:youtube\n"
+        "regexp:.*\\.youtube\\.com$\n"
+        "include:geolocation-cn\n"
+        "youtube.com\n"
+    )
+    assert blocklist_parser.parse_hostlist(text) == ["youtube.com"]
+
+
+def test_v2fly_realistic_youtube_list_excerpt():
+    # A representative slice of github.com/v2fly/domain-list-community's own
+    # youtube list: bare domains, a domain: prefix, @-tagged lines, and a
+    # keyword line mixed together.
+    text = (
+        "youtube.com\n"
+        "youtu.be\n"
+        "domain:googlevideo.com\n"
+        "ggpht.cn @cn\n"
+        "ads.youtube.com @ads\n"
+        "keyword:youtube\n"
+    )
+    assert blocklist_parser.parse_hostlist(text) == [
+        "youtube.com",
+        "youtu.be",
+        "googlevideo.com",
+        "ggpht.cn",
+        "ads.youtube.com",
+    ]
+
+
+def test_v2fly_bare_at_token_with_no_host_is_skipped():
+    text = "@cn\nexample.com\n"
+    assert blocklist_parser.parse_hostlist(text) == ["example.com"]
+
+
+def test_v2fly_attribute_strip_does_not_break_hosts_or_adguard_lines():
+    text = "0.0.0.0 tracker.example.com @ads\n||beacon.example.org^ @ads\n"
+    assert blocklist_parser.parse_hostlist(text) == ["tracker.example.com", "beacon.example.org"]
