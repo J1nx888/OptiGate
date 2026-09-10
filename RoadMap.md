@@ -8252,14 +8252,18 @@ dashboard-only; done except the controller half of #3.
    "Planned" placeholders). `/integrations` 302-redirects to
    `/integrations/crunchyroll`; the group auto-opens when a child is
    active and its open/closed state persists per-browser.
-3. **Docker-bridge IPs (172.17.x) shown as devices.** DASHBOARD STOPGAP
-   DONE -- `_out_of_lan_device_ids()` hides any device whose only
-   bindings are outside the `local_network` setting, from both the
-   roster and the pending card. **Still pending (controller):**
-   `controller/discovery.py` + `rtnetlink_listener` / `identity.record_binding`
-   must reject non-LAN IPs at record time so the junk rows stop being
-   created, plus a one-time purge of the existing ones. Rides the next
-   interception window.
+3. **Docker-bridge IPs (172.17.x) shown as devices.** DONE. Dashboard
+   stopgap (`35fbb87`) hides any device whose only bindings are off-LAN.
+   Controller half (`2425cd2`): `common/identity.py`'s `record_binding()`
+   -- the one chokepoint `discovery.py` snapshots and
+   `rtnetlink_listener.py` both funnel through -- now drops any IP
+   outside the configured `local_network` before recording anything, so
+   the junk rows stop being created; and `controller/main.py`'s
+   `_purge_offlan_discovery_junk()` deletes the existing junk once at
+   startup (only rows that are unmistakably discovery junk -- >=1
+   binding, every binding off-LAN, no label/user/group, not ignored).
+   Controller image needs a rebuild + the next interception window to
+   run; the two current orphan rows (`172.17.0.2`) get purged then.
 4. **"Missing" device 192.168.1.12 -- was not actually missing.** It's
    a PREAUTH device that renders in the pending card and the roster;
    the owner couldn't find it because the roster had no IP column and
