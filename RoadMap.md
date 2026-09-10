@@ -7851,25 +7851,41 @@ is actively hitting a hard-deny over HTTPS).
 ### Deployment status of everything from this session (as of 2026-09-10)
 
 Production box (`pp-beelink`, hostname `optigate-MINI-S`) is at git
-`7302a21`. Bark Home currently has the network; only the base services
-(`dashboard`/`proxy`/`adguard`) run -- and every one of them is still on
-its **2026-09-09** image (see "Live on production now" below). Nothing
-has been rebuilt or restarted on 2026-09-10: that day's work
-(Integrations page, `ip_address` pass, item 13, `config export/import`
-closeout) is all committed and `git pull`ed to prod but **not built** --
-see the "Committed but NOT yet built" table below.
+`1312343`. Bark Home currently has the network; only the base services
+(`dashboard`/`proxy`/`adguard`) run. **Phase 1 of the interception-test
+prep ran 2026-09-10**: all three of `dashboard`/`controller`/`proxy`
+were rebuilt from `1312343`, and `dashboard` + `proxy` were recreated on
+the new images (the `up -d dashboard` also picked up the new `proxy`
+image via the dependency). `controller` is built but not started (it
+only runs under the `interception` profile). Verified in the running
+images: `dashboard` carries the Integrations code + the `blocklist_parser`
+v2fly fix; `proxy` carries the `ip_address` pass (12 sites in
+`authz_helper.py`, 4 in `sni_helper.py`); the `controller` image carries
+the v2fly fix too. Dashboard startup log clean (block-page :80, report
+poller, captive portal :3131, waitress :8787); proxy startup clean.
 
 **Live on production now** (base-service changes, no interception
 profile needed):
 
-| Item | Change | Container |
-|---|---|---|
-| 19a | AdGuard config permission repair loop | `adguard` (rebuilt + **restarted** -- entrypoint fix) |
-| 19b | Logout username-caching fix | `dashboard` |
-| 22 follow-up | "Ignore" on the captive-portal admin action | `dashboard` |
-| 23 | Per-row + toolbar quick-ignore on Devices | `dashboard` |
-| 24 | "Shift mode now" on the User detail page | `dashboard` |
-| 25 | HTTPS hard-deny Report-page back-fill poller | `dashboard` |
+| Item | Change | Container | Deployed |
+|---|---|---|---|
+| 19a | AdGuard config permission repair loop | `adguard` (rebuilt + **restarted** -- entrypoint fix) | 2026-09-09 |
+| 19b | Logout username-caching fix | `dashboard` | 2026-09-09 |
+| 22 follow-up | "Ignore" on the captive-portal admin action | `dashboard` | 2026-09-09 |
+| 23 | Per-row + toolbar quick-ignore on Devices | `dashboard` | 2026-09-09 |
+| 24 | "Shift mode now" on the User detail page | `dashboard` | 2026-09-09 |
+| 25 | HTTPS hard-deny Report-page back-fill poller | `dashboard` | 2026-09-09 |
+| Integrations page | New "Integrations" nav + Crunchyroll cross-user management page (`855d1c5`) | `dashboard` | **2026-09-10** |
+| 13 (dashboard half) | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (`b7020e2`) -- powers the per-category "Sync now" buttons | `dashboard` | **2026-09-10** |
+| "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report-page reason labels / AdGuard-401 self-diagnosing message | `dashboard` | **2026-09-10** |
+
+Still needs a functional spot-check on the live dashboard (routes are
+registered -- `/integrations` responds, not 404): open `/integrations`,
+confirm the cross-user shows table + approve/remove-all/remove-one work;
+eyeball the five follow-up fixes. Item 13's dashboard half can't be
+fully exercised until DNS traffic is flowing (a "Sync now" on the
+YouTube category needs to reach v2fly and land `ggpht.cn` in
+`category_domains`) -- fold into the window.
 
 **Image built on production, inert until the interception profile is
 next started** (`docker compose --profile interception up -d` picks
@@ -7881,29 +7897,13 @@ end-to-end retest in the next supervised window:
 | 7 | `bump_v4` self-IP exception in the nftables redirect | `nftables-manager` | `optigate.home` shows the real device; no `SECURITY ALERT: Host header forgery detected` for a bump device's hard-denied domain |
 | 17 | AdGuard `$dnstype=HTTPS` ECH-strip rules | `controller` | Crunchyroll/Asurascans bump successfully; no `NONE_NONE/409` in Squid's `access.log` |
 | 21 | conntrack flush on device reclassification | `nftables-manager` | reclassify the Echo (`20:a1:71:9d:58:dc`) WITHOUT power-cycling; confirm the open voice connection is cut |
-
-**Committed + `git pull`ed to prod, but NOT yet built -- bundle the
-rebuild into the next deployment window** (project owner's call,
-2026-09-10). Git range `b2011bb..7302a21`:
-
-| Item | Change | Containers to rebuild | How to confirm after |
-|---|---|---|---|
-| 13 | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (commit `b7020e2`) | `dashboard` **and** `controller` | rebuild both, restart `dashboard`; then click "Sync now" on the YouTube category and confirm `ggpht.cn` now lands in `category_domains` |
-| Integrations page | New "Integrations" nav + Crunchyroll cross-user management page (commit `855d1c5`) | `dashboard` | open `/integrations`, confirm the cross-user shows table + approve/remove-all/remove-one all work |
-| "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report-page reason labels / AdGuard-401 self-diagnosing message -- all coded + pushed on 2026-09-08..09, never deployed | `dashboard` | spot-check each on the live dashboard after the rebuild |
-| `ip_address` pass | `authz_helper.py`/`sni_helper.py` now pass `ip_address` to every `log_access()` (commit `7302a21`) | `proxy` | rebuild + restart `proxy`; during interception, confirm new Report-page rows for Squid-tier decisions carry a source IP |
-
-**One `dashboard` rebuild + restart** covers every `dashboard`-only row
-above (Integrations page, item 13's dashboard half, follow-ups 1-5/10).
-`controller` must also be rebuilt for item 13's other half, and `proxy`
-for the `ip_address` pass -- both ride the interception window with
-items 7/17/21 (that's when the `controller` sync and the Squid helpers
-actually run).
+| 13 (controller half) | same v2fly fix (`b7020e2`), image rebuilt 2026-09-10; powers the periodic `category_fetch.run_loop` | `controller` | after the profile is up, confirm the periodic category sync also picks up `ggpht.cn` |
+| `ip_address` pass | `authz_helper.py`/`sni_helper.py` now pass `ip_address` to every `log_access()` (`7302a21`); `proxy` image live since 2026-09-10 but the Squid helpers only run under interception | `proxy` (already live) | during interception, confirm new Report-page rows for Squid-tier decisions carry a source IP |
 
 **No deploy needed:** item 16 (rebuild alone was the fix, done), and the
 markdown-only commits `git pull`ed to prod as they landed (`341736d`,
-`b2011bb`, `cc43359`, `9e15503`, `af7cb37`, plus the RoadMap edits in
-this same commit).
+`b2011bb`, `cc43359`, `9e15503`, `af7cb37`, `1312343`, plus the RoadMap
+edits in this same commit).
 
 ---
 
