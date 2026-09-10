@@ -7879,69 +7879,58 @@ errors, and wrote its `adguard_report_sync_watermark` setting (0 rows
 back-filled so far, which is the expected healthy result while nothing
 is actively hitting a hard-deny over HTTPS).
 
-### Deployment status of everything from this session (as of 2026-09-10)
+### Deployment status of everything from this session (as of 2026-09-10, end of day)
 
 Production box (`pp-beelink`, hostname `optigate-MINI-S`) is at git
-`f5705a8`. **Interception is LIVE as of 2026-09-10 ~16:12** -- Bark Home
-was taken off the network and `docker compose --profile interception up
--d` brought the full stack up (all 6 containers). Phase 1 prep (earlier
-this date) rebuilt `dashboard`/`controller`/`proxy` from `1312343` and
-recreated `dashboard` + `proxy`; the interception bring-up then started
-`controller` + `nftables-manager` + `arp-worker`.
+`a4a378f`. **Interception was run live 2026-09-10 ~16:12--~17:5x and is
+now OFF again** -- network handed back to Bark Home
+(`docker compose --profile interception down` then a base-only
+`up -d`). Only `dashboard`/`proxy`/`adguard` run. The controller's
+graceful shutdown sent corrective ARPs (devices un-poisoned); the
+`inet optigate` and legacy `inet parental_proxy` nftables tables are
+both gone (verified via a throwaway `--cap-add=NET_ADMIN` container).
 
-**Bring-up hit one real bug, now fixed (commit `f5705a8`):** the
-controller took its AdGuard credentials from `--adguard-username`/
-`--adguard-password` (compose, from `.env`), which had drifted stale
-after the AdGuard password was changed from the dashboard. The
-controller 401'd every cycle, tripping AdGuard's brute-force lockout,
-which cascaded to lock the dashboard out too. Fixed by making the
-controller read the `adguard_username`/`adguard_password` DB settings
-(the dashboard's single source of truth) -- see the "AdGuard/dashboard
-credential unification -- DONE" entry above. AdGuard was restarted to
-clear the lockout, the two flags were removed from `docker-compose.yml`,
-and `controller` was rebuilt (`f5705a8`) + recreated. Post-fix: zero
-`adguard_sync`/`adguard_discovery` errors, AdGuard `filtering/status`
-returns the OptiGate `$dnsrewrite` hard-deny rules with current
-per-client IP lists, `inet optigate` nftables table fully applied
-(item 7's `bump_v4` self-IP `return` rules present). One-time SQLite
-`database is locked` blip at bring-up (controller rtnetlink listener +
-nftables-manager health write) -- both auto-retry, no recurrence.
+The window's bring-up hit one real bug -- the controller took its
+AdGuard credentials from stale `.env`-sourced CLI flags, 401'd every
+cycle, tripped AdGuard's brute-force lockout, cascaded to the dashboard.
+Fixed by making the controller read the `adguard_username`/
+`adguard_password` DB settings (`f5705a8`; see "AdGuard/dashboard
+credential unification -- DONE" above). Full window write-up +
+verifications are in "Live interception test 2026-09-10 -- findings".
 
-**Live on production now** (base-service changes, no interception
-profile needed):
+**Live on production now** (base services -- no interception profile
+needed; `dashboard` and `proxy` both rebuilt + recreated 2026-09-10):
 
 | Item | Change | Container | Deployed |
 |---|---|---|---|
-| 19a | AdGuard config permission repair loop | `adguard` (rebuilt + **restarted** -- entrypoint fix) | 2026-09-09 |
-| 19b | Logout username-caching fix | `dashboard` | 2026-09-09 |
-| 22 follow-up | "Ignore" on the captive-portal admin action | `dashboard` | 2026-09-09 |
-| 23 | Per-row + toolbar quick-ignore on Devices | `dashboard` | 2026-09-09 |
-| 24 | "Shift mode now" on the User detail page | `dashboard` | 2026-09-09 |
-| 25 | HTTPS hard-deny Report-page back-fill poller | `dashboard` | 2026-09-09 |
-| Integrations page | New "Integrations" nav + Crunchyroll cross-user management page (`855d1c5`) | `dashboard` | **2026-09-10** |
-| 13 (dashboard half) | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling (`b7020e2`) -- powers the per-category "Sync now" buttons | `dashboard` | **2026-09-10** |
-| "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report-page reason labels / AdGuard-401 self-diagnosing message | `dashboard` | **2026-09-10** |
-| Dashboard feedback batch (`35fbb87`) | Devices roster IP column + column sort + off-LAN filter; "Integrations" -> collapsible sidebar group with Crunchyroll/YouTube/Discord sub-pages (see the findings section) | `dashboard` | **2026-09-10** (rebuilt + restarted; 507 dashboard tests green; browser-verified) |
+| 19a | AdGuard config permission repair loop | `adguard` (rebuilt + restarted -- entrypoint fix) | 2026-09-09 |
+| 19b / 22-fu / 23 / 24 / 25 | logout cache fix / captive-portal "Ignore" / Devices quick-ignore / "Shift mode now" / HTTPS hard-deny Report poller | `dashboard` | 2026-09-09 |
+| Integrations page (`855d1c5`) | "Integrations" nav + Crunchyroll cross-user management page | `dashboard` | **2026-09-10** |
+| 13 (dashboard half) (`b7020e2`) | `blocklist_parser` v2fly `@tag` / `domain:`/`full:` prefix handling -- powers the per-category "Sync now" buttons | `dashboard` | **2026-09-10** |
+| "13 more" follow-ups 1-5, 10 | Dismiss awaiting-login card / group-ignored not "pending" / one-Save-per-section / `optigate.home` port note / Report reason labels / AdGuard-401 self-diagnosing message | `dashboard` | **2026-09-10** |
+| Dashboard feedback batch (`35fbb87`) | Devices roster: Current-IP column, sortable columns, off-LAN filter, "Last seen" fix, IP in search. Integrations -> collapsible sidebar group (Crunchyroll / YouTube / Discord sub-pages). | `dashboard` | **2026-09-10** (rebuilt + restarted; 507 dashboard tests green; browser-verified on the dev server AND rendered-page-verified on prod -- IP column present, `172.17.x` hidden, device count 45->43, sidebar tree + placeholder pages + redirect all correct) |
+| `ip_address` pass (`7302a21`) | `authz_helper.py`/`sni_helper.py` pass `ip_address` to every `log_access()` | `proxy` | **2026-09-10** (image live; only exercised while Squid is intercepting -- see verified table below) |
 
-Still needs a functional spot-check on the live dashboard (routes are
-registered -- `/integrations` responds, not 404): open `/integrations`,
-confirm the cross-user shows table + approve/remove-all/remove-one work;
-eyeball the five follow-up fixes. Item 13's dashboard half can't be
-fully exercised until DNS traffic is flowing (a "Sync now" on the
-YouTube category needs to reach v2fly and land `ggpht.cn` in
-`category_domains`) -- fold into the window.
+**Images rebuilt on production but NOT running** -- staged for the next
+interception window (`docker compose --profile interception up -d` picks
+them up):
 
-**Image built on production, live-verified or still pending** in the
-2026-09-10 interception window:
+| Container | Carries | Notes |
+|---|---|---|
+| `controller` | AdGuard-creds-from-DB (`f5705a8`), item 13 v2fly (controller half), **off-LAN discovery guard + one-time junk purge (`2425cd2`, finding #3 controller half)** | `--adguard-username/--adguard-password` removed from `docker-compose.yml`. On next start, `_purge_offlan_discovery_junk()` deletes the 2 orphan `172.17.0.2` device rows. |
+| `nftables-manager` | **QUIC/udp-443 drop for `bump_v4` devices (`3e381d0`)**, legacy `inet parental_proxy` table auto-prune on startup (`89cf895`, finding #4 fix) | The QUIC drop only matches `bump_v4` members; with zero bump devices it is inert until one is added. |
+| `arp-worker` | unchanged | 2026-09-09 image. |
 
-| Item | Change | Container | Live retest status |
-|---|---|---|---|
-| 7 | `bump_v4` self-IP exception in the nftables redirect | `nftables-manager` | **PENDING** -- needs a `bump_enabled` device, blocked on selective per-domain bump (finding #7). Self-IP `return` rules confirmed present in the ruleset. |
-| 17 | AdGuard `$dnstype=HTTPS` ECH-strip rules | `controller` | **PENDING** -- same block as #7. ECH-strip rules confirmed present for the 3 bump domains scoped to the bump device. |
-| 21 | conntrack flush on device reclassification | `nftables-manager` | **VERIFIED LIVE 2026-09-10** -- the Echo (`20:a1:71:9d:58:dc`) reclassified from the dashboard mid-use; open connection dropped without a power-cycle. |
-| 13 (controller half) | same v2fly fix (`b7020e2`); powers the periodic `category_fetch.run_loop` | `controller` | **VERIFIED** -- `ggpht` patterns present in `category_domains` (controller's startup fetch ran clean with the fixed parser). |
-| `ip_address` pass | `authz_helper.py`/`sni_helper.py` pass `ip_address` to every `log_access()` (`7302a21`) | `proxy` | **VERIFIED LIVE 2026-09-10** -- every recent Squid-tier `access_log` row carries a source IP. |
-| 25 | HTTPS hard-deny Report-page back-fill poller | `dashboard` | **VERIFIED LIVE 2026-09-10** -- `dns_hard_deny` rows landed for a real YouTube-category block (12 rows: `www.youtube.com`, `googlevideo.com` CDN, `i.ytimg.com`), attributed to the right user/device with source IP; watermark advancing. |
+**Live-verified in the 2026-09-10 window:**
+
+| Item | Container | Live retest status |
+|---|---|---|
+| 21 -- conntrack flush on reclassification | `nftables-manager` | **VERIFIED** -- the Echo (`20:a1:71:9d:58:dc`) reclassified mid-use from the dashboard; open connection dropped without a power-cycle. |
+| 13 (controller half) -- v2fly parser | `controller` | **VERIFIED** -- `ggpht` patterns present in `category_domains` (controller startup fetch ran clean with the fixed parser). |
+| `ip_address` pass | `proxy` | **VERIFIED** -- every recent Squid-tier `access_log` row carried a source IP. |
+| 25 -- HTTPS hard-deny Report back-fill | `dashboard` | **VERIFIED** -- 12 `dns_hard_deny` rows landed for a real YouTube-category block (`www.youtube.com`, `googlevideo.com` CDN, `i.ytimg.com`), attributed to the right user/device with source IP; watermark advancing. |
+| 7 -- `bump_v4` self-IP redirect exception | `nftables-manager` | **PENDING** -- needs a `bump_enabled` device; blocked on device CA trust + selective per-domain bump (findings #7/#8). Self-IP `return` rules confirmed present in the applied ruleset. |
+| 17 -- AdGuard `$dnstype=HTTPS` ECH-strip | `controller` | **PENDING** -- same block. ECH-strip rules confirmed present for the 3 bump domains scoped to the bump device. |
 
 **Also verified live in the 2026-09-10 window (no bump device needed):**
 - **DNS-tier filtering** -- a blocked-category domain (YouTube, for a
@@ -7959,18 +7948,23 @@ YouTube category needs to reach v2fly and land `ggpht.cn` in
   GO"); 43 of 45 devices showed active `device_bindings` this window,
   consistent with that. Not re-litigated.
 
-**No deploy needed:** item 16 (rebuild alone was the fix, done), and the
-markdown-only commits `git pull`ed to prod as they landed (`341736d`,
-`b2011bb`, `cc43359`, `9e15503`, `af7cb37`, `1312343`, plus the RoadMap
-edits in this same commit).
+**No deploy needed:** item 16 (rebuild alone was the fix, done); the
+`docs/design/crunchyroll-trace-2026-09-10/ANALYSIS.md` bundle
+(`db84979`, `55cdce3`, `3f36233`, `5bf8def`); and every markdown-only
+commit `git pull`ed to prod as it landed (`341736d`, `b2011bb`,
+`cc43359`, `9e15503`, `af7cb37`, `1312343`, `1c31373`, `53fa544`,
+`cff3cd2`, `a4a378f`, plus this edit).
 
 ### One-pass interception-window runbook (2026-09-10)
 
-Everything buildable is already built (Phase 1, above). This is the
-sequenced checklist for the supervised window itself. All `ssh
-pp-beelink` docker commands are written single (no `&&` chain -- the
-auto-mode classifier blocks compound docker commands); `--project-directory
-~/parental_proxy` stands in for `cd`.
+All service images are already built on prod (see the deployment-status
+tables above -- `controller` and `nftables-manager` carry unrun changes
+staged for the next window). This is the sequenced checklist for a
+supervised window. All `ssh pp-beelink` docker commands are written
+single (no `&&` chain -- the auto-mode classifier blocks compound docker
+commands); `--project-directory ~/parental_proxy` stands in for `cd`.
+Steps 6-9 (items 7/17 functional, Crunchyroll) stay blocked until a
+bump device with a trusted CA exists -- see findings #7/#8.
 
 **Phase 2 -- cutover (owner does the network handoff)**
 
