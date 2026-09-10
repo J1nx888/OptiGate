@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "last_run": "2026-09-09T19:30:00Z",
+  "last_run": "2026-09-09T20:15:00Z",
   "sections": {
     "architecture": {
       "source_paths": ["README.md", "docker-compose.yml", "common/", "proxy/", "adguard/", "defaults/", "dashboard/", "controller/", "phase3/arp-worker/Dockerfile", "phase3/nftables-manager/Dockerfile"],
@@ -27,10 +27,10 @@
       "last_updated": "2026-09-09T19:30:00Z"
     },
     "security": {
-      "source_paths": ["common/auth.py", "common/rate_limit.py", "common/system_events.py", "proxy/authz_helper.py", "proxy/sni_helper.py", "common/squid_helper.py", "proxy/entrypoint.sh", "proxy/squid.conf.template", "dashboard/dashboard.py", "dashboard/block_page_server.py", "dashboard/captive_portal_server.py", "common/device_identity.py", "common/adguard_client.py", "controller/adguard_sync.py", "controller/main.py", "adguard/entrypoint.sh"],
-      "fingerprint": "f8d90e7be9f9af9c6e8a5c746d6340fdaeca54a9111b66343a63ddef32b490f7",
+      "source_paths": ["common/auth.py", "common/rate_limit.py", "common/system_events.py", "proxy/authz_helper.py", "proxy/sni_helper.py", "common/squid_helper.py", "proxy/entrypoint.sh", "proxy/squid.conf.template", "dashboard/dashboard.py", "dashboard/block_page_server.py", "dashboard/captive_portal_server.py", "common/device_identity.py", "common/adguard_client.py", "common/matching.py", "controller/adguard_sync.py", "controller/main.py", "adguard/entrypoint.sh"],
+      "fingerprint": "db3a82192ee4cf54cf6834e2cd00f61fab434c26272408ff333e7add2fc7a4ad",
       "doc_path": "docs/security/overview.md",
-      "last_updated": "2026-09-09T19:30:00Z"
+      "last_updated": "2026-09-09T20:15:00Z"
     },
     "testing": {
       "source_paths": ["tests/", "pytest.ini", "requirements-dev.txt", ".github/workflows/tests.yml"],
@@ -40,5 +40,5 @@
     }
   },
   "fingerprint_method_note": "Fingerprints exclude __pycache__/*.pyc (find ... ! -path '*__pycache__*' ! -name '*.pyc' | sort | xargs sha256sum | sha256sum). Earlier fingerprints in this file's history included pycache artifacts, which caused false-positive drift signals when a local pytest run added/changed .pyc files under a source_paths directory with no real .py change -- recomputed clean as of the 2026-09-02 full documentation audit.",
-  "last_update_note": "2026-09-09: a TARGETED update for RoadMap.md follow-up items 7 and 16-25 (ECH-strip rules, AdGuard config/logout fixes, conntrack flush, quick-ignore + Shift-mode-now UI, the bump_v4 self-IP exception, the captive-portal Ignore action, and the Report-page HTTPS hard-deny back-fill). Fingerprints were recomputed against current source afterward, so a future generator run compares against 2026-09-09 -- but the 2026-09-02..2026-09-08 sessions' own changes were NOT independently re-audited section by section in this pass; treat this as 'recent work folded in', not a full regeneration."
+  "last_update_note": "2026-09-09 (two passes). Pass 1: targeted fold-in of RoadMap.md items 7 and 16-25 across all six sections. Pass 2 (project-docs-generator re-run): verified every section against current source. The 2026-09-01..09-09 window turned out to already be well-covered -- docs/ was maintained alongside nearly every feature commit and got a dedicated audit (git 354abe5). Real gaps found and fixed in this pass, both in security/overview.md: the admin-regex ReDoS guard (common/matching.py's _search_with_timeout, code-review fix #19) was undocumented, and the shared captive-portal rate-limiter's clear()-on-success bug (fix #12) was described imprecisely. common/matching.py added to the security section's source_paths. All other sections verified current -- no changes needed."
 }

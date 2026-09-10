@@ -777,9 +777,19 @@ planned full code-review pass) closed it: `require_admin` now shares
 the exact same mechanism the captive portal already used, factored out
 into `common/rate_limit.py`'s `RateLimiter` (5 failed attempts / 60s,
 per source IP, in-memory) rather than a second implementation --
-`dashboard.py` and `captive_portal_server.py` each hold their own
-separate instance (different network surfaces, deliberately not sharing
-a budget). Same "use up the budget on wrong guesses" closure as the
+`dashboard.py` holds its own instance, separate from
+`captive_portal_server.py`'s (different network surfaces, deliberately
+not sharing a budget). **Within `captive_portal_server.py`**, by
+contrast, the kid-login form and the portal admin action **share one
+`_LOGIN_LIMITER` instance on purpose** -- the higher-value admin action
+should not get its own fresh, separately-exhaustible budget. **Code-
+review fix #12 (2026-09-08)**: a successful login used to call the
+limiter's `clear()`, which -- because that one instance is shared --
+wiped out failures recorded against the *other* form, so a household
+member's normal kid login succeeding from a shared/NAT'd IP handed an
+in-progress admin-password guesser a fresh 5-attempt budget. Success no
+longer clears anything; recorded failures just age out of the 60s
+window on their own. Same "use up the budget on wrong guesses" closure as the
 portal: a rate-limited request is rejected (`429`, `Retry-After: 60`)
 *before* even checking the supplied credentials, which also means an
 attacker can no longer force repeated 260,000-iteration PBKDF2
@@ -1073,6 +1083,25 @@ derived from request data, even partially.
 `common/db.py`'s `init_db()`/`SCHEMA` uses `executescript()` against a
 module-level constant string (the DDL) — no interpolation, not
 attacker-reachable at all.
+
+### Admin-supplied regexes: ReDoS guard (2026-09-08, code-review fix #19)
+
+A different injection class from SQL: `domains.pattern`,
+`domain_paths.pattern`, and `category_domains.pattern` are admin-typed
+regexes compiled and run by `common/matching.py` against every hostname
+and request path. A pathological pattern (catastrophic backtracking)
+could hang a Squid helper or a dashboard request. `matching.py` now
+routes every match through `_search_with_timeout(rx, text)` — a
+`signal.SIGALRM`-based cap (`_PATH_MATCH_TIMEOUT_SECONDS`, 0.5s) that
+raises `_RegexTimedOut` internally and is caught so the match returns
+"no match" (fail-closed for an allow-list pattern) instead of hanging.
+Applied at both domain-matching call sites (`find_domain()`,
+`path_allowed()`) and the category fast/slow-path matcher.
+`_domain_regex()`/`_path_regex()` also still return `None` for anything
+that isn't valid regex, and `find_domain()` input is bounded by DNS's
+own 253-char hostname limit. The `SIGALRM` mechanism is POSIX-only —
+fine for the Linux containers; on a Windows dev machine it degrades to a
+no-op (the pattern still runs, but no untrusted input reaches it there).
 
 ## 10. Client-side tamper resistance (2026-09-02)
 
