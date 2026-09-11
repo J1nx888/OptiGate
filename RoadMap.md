@@ -7920,10 +7920,13 @@ needed; `dashboard` and `proxy` both rebuilt + recreated 2026-09-10):
 | `ip_address` pass (`7302a21`) + outside-LAN check reorder (`566d72c`) | `authz_helper.py`/`sni_helper.py` pass `ip_address` to every `log_access()`; and now do the `ip_in_configured_lan` check *before* identity resolution, so an off-LAN client (which no longer gets a `device_bindings` row after `2425cd2`) is still denied + logged as `outside_lan` | `proxy` | **2026-09-10** (rebuilt + restarted; prod-verified: reorder present in both helpers in the running container, helpers parse, `squid -k parse` clean; helpers only run while Squid is intercepting) |
 | Report table truncation (`313c6b4`, finding #5 real fix) | `.cell-truncate`/`.cell-truncate-sm` utilities; `REPORT_BODY` Show/Path + Domain cells wrapped so a long URL/hostname can't stretch the table past `.table-scroll` and hide the `Result` column; timestamp stacked to two lines | `dashboard` | **2026-09-10** (rebuilt + recreated; 509 dashboard tests green; dev-server verified table width-bounded ~740px with no horizontal scroll at desktop widths, long values ellipsised with full text in `title`; prod `:8787/static/css/app.css` serves the new rules, container clean start) |
 
-**Images rebuilt on production but NOT running** -- staged for the next
-interception window (`docker compose --profile interception up -d` picks
-them up). Image contents confirmed on prod 2026-09-10 evening (grep of
-the built image / binary):
+**Images rebuilt on production, run + verified in the 2026-09-11 window,
+now stopped again** (`docker compose --project-directory ~/parental_proxy
+stop controller arp-worker nftables-manager` -- NOT `--profile
+interception down`, which also tears down the base stack). Everything in
+this table was exercised live on 2026-09-11 and is in the "Live-verified"
+table above. Bring back with `docker compose --profile interception up -d`.
+Image contents also confirmed by grep on prod:
 
 | Container | Carries | Notes |
 |---|---|---|
@@ -7931,7 +7934,8 @@ the built image / binary):
 | `nftables-manager` (`548bec52`) | **QUIC/udp-443 drop for `bump_v4` devices (`3e381d0`)**, legacy `inet parental_proxy` table auto-prune on startup (`89cf895`, finding #4 fix) | Verified in the binary: the `udp dport 443 drop` rule string and the `legacy table` / `parental_proxy` prune strings are present. The QUIC drop only matches `bump_v4` members; with zero bump devices it is inert until one is added. **The QUIC-drop live check also closes finding #2** (Asurascans "loads unfiltered" was h3 riding past the un-redirected udp/443, not a bump bug -- see finding #2). |
 | `arp-worker` | unchanged | 2026-09-09 image. |
 
-**Live-verified in the 2026-09-10 window:**
+**Live-verified (2026-09-10 window unless noted; the CR chain in a short
+2026-09-11 window):**
 
 | Item | Container | Live retest status |
 |---|---|---|
@@ -7939,8 +7943,12 @@ the built image / binary):
 | 13 (controller half) -- v2fly parser | `controller` | **VERIFIED** -- `ggpht` patterns present in `category_domains` (controller startup fetch ran clean with the fixed parser). |
 | `ip_address` pass | `proxy` | **VERIFIED** -- every recent Squid-tier `access_log` row carried a source IP. |
 | 25 -- HTTPS hard-deny Report back-fill | `dashboard` | **VERIFIED** -- 12 `dns_hard_deny` rows landed for a real YouTube-category block (`www.youtube.com`, `googlevideo.com` CDN, `i.ytimg.com`), attributed to the right user/device with source IP; watermark advancing. |
-| 7 -- `bump_v4` self-IP redirect exception | `nftables-manager` | **PENDING** -- needs a `bump_enabled` device; blocked on device CA trust + selective per-domain bump (findings #7/#8). Self-IP `return` rules confirmed present in the applied ruleset. |
-| 17 -- AdGuard `$dnstype=HTTPS` ECH-strip | `controller` | **PENDING** -- same block. ECH-strip rules confirmed present for the 3 bump domains scoped to the bump device. |
+| **Crunchyroll per-series whitelist (finding #1)** | `proxy` + `controller` | **VERIFIED 2026-09-11** -- owner installed the OptiGate CA into the tablet's Android **system** store; `.30` in `bump_v4`. Squid decrypted `www.crunchyroll.com/content/v2/...` (`TCP_MISS/200`, cert shown as "parental proxy"). **Dr. STONE** (`GYEXQKJG6`, approved) -> `/playback/v3/GN7UD75ZD/web/chrome/play` -> `show_approved` -> **played**. **Black Clover** (`GRE50KV36`, not approved) -> `/playback/v3/G50UZ4E20/web/chrome/play` -> `TCP_DENIED/403` / `show_not_approved` -> **failed to launch**. **No classifier redesign was needed** -- the existing `PLAYBACK_URL_RE` matched the modern `/playback/vN/<id>/web/<platform>/play` shape, `series_resolve` mapped media->series, `user_has_show` gated it. |
+| 6 -- `host_verify_strict off` | `proxy` | **VERIFIED 2026-09-11** -- no `SECURITY ALERT: Host header forgery` / `NONE_NONE/409` in `cache.log` for the whole session, incl. CR's own multi-IP CDN. |
+| 17 -- AdGuard `$dnstype=HTTPS` ECH-strip | `controller` | **VERIFIED 2026-09-11** -- rules generated for `.30` (`crunchyroll.com`, `asurascans.com`, `webtoons.com` -> `$client=192.168.1.30,dnstype=HTTPS`), and the bump completing at all proves the visible SNI was restored (no `CONNECT cloudflare-ech.com` in the trace). |
+| QUIC/udp-443 drop (`3e381d0`) | `nftables-manager` | **VERIFIED 2026-09-11** -- Chrome could not use h3 (`ERR_QUIC_PROTOCOL_ERROR` shown for `asurascans.com`, i.e. the drop biting), and every CR request in the trace was tcp/443 through Squid. UX wrinkle noted under finding #2 (Chrome surfaces the dropped QUIC as a page error before falling back). |
+| 7 -- `bump_v4` self-IP redirect exception | `nftables-manager` | **VERIFIED (implicit) 2026-09-11** -- with `.30` full-bump, box-addressed traffic (block page, `optigate.home`) was not swept into Squid or killed by host-forgery; the session had no such failures. A dedicated `optigate.home`-from-a-bump-device check is still worth doing. |
+| off-LAN discovery purge (`2425cd2`) | `controller` | **VERIFIED 2026-09-11** -- controller logged `purged 2 off-LAN discovery-junk device row(s)` on start; the `172.17.0.2` orphans are gone. |
 
 **Also verified live in the 2026-09-10 window (no bump device needed):**
 - **DNS-tier filtering** -- a blocked-category domain (YouTube, for a
@@ -8059,6 +8067,66 @@ and the relevant `nft list ruleset` / `access.log` slice before tearing
 down, hand the network back to Bark Home, and file the specifics under
 the failing item rather than re-running blind.
 
+### 2026-09-11 short window -- Crunchyroll Option A proven end-to-end
+
+Owner installed the OptiGate CA into the tablet's Android **system**
+store (not the user store -- the thing that was actually missing) and
+opened a ~15-minute window. Full `interception` profile brought up
+(household-wide -- see the cutover caveat below); `.30` in `bump_v4`
+after the owner shifted its Bedtime schedule.
+
+**Result: the Crunchyroll per-series whitelist works.** Details in the
+"Live-verified" table above -- Dr. STONE (approved) played, Black Clover
+(not approved) got `TCP_DENIED/403` at the playback call and failed to
+launch. Squid decrypted CR's API (cert shown as "parental proxy" on the
+device). `host_verify_strict off`, the ECH-strip, and the QUIC drop all
+did their jobs in the same session. **No classifier redesign was needed
+for correctness** -- the existing `PLAYBACK_URL_RE` already matches the
+modern `/playback/vN/<id>/web/<platform>/play` shape.
+
+**This settles the A-vs-B question: Option A (transparent
+intercept-bump) is the path.** Finding #8's two-browser split is now
+**fallback-only** -- for a device that genuinely can't take a
+system-store CA (locked-down work phone, an OS version that won't allow
+it). Not being built unless such a device turns up.
+
+**Gaps this window exposed (all pre-existing, none block Option A on a
+provisioned device):**
+- **Full cutover is not household-viable as-is.** 23 of ~44 active
+  devices are `is_authenticated = 0`, so the moment interception came up
+  they became PREAUTH -> `unauthenticated_v4` -> captive-portal-only ->
+  **lost general internet**. The household was only ever run DNS-tier,
+  where that flag is irrelevant. A real Option A rollout needs EITHER a
+  scoped-interception mechanism (a controller `--only-mac` flag threading
+  an allowlist into `desired_state.db_backed_desired_state()` +
+  `policy_state.compute_desired_policy()` -- ~40 lines, non-destructive,
+  reusable for testing any device) OR bulk-authenticating the household
+  first (portal logins / an admin "mark authenticated" bulk action).
+  **Next step for Crunchyroll = build `--only-mac`**, then a scoped
+  window can test/roll out one device at a time without touching the
+  other 43.
+- **Finding #10** -- a manual "Shift mode now" override does not suppress
+  a `lockout_all` Bedtime schedule; had to remove Matthew from Bedtime
+  to test.
+- **QUIC fallback UX** (finding #2) -- Chrome shows
+  `ERR_QUIC_PROTOCOL_ERROR` on first navigation to an h3 origin instead
+  of silently retrying on tcp/443. Mitigations captured there.
+- **Browse != play.** A non-approved show's *page* still loads
+  (`up_next`, `cms/objects`, `cms/series` all returned 200); only the
+  playback call is denied. Correctness is fine; finding #7's classifier
+  work would move the block to series-open for a cleaner UX and drop the
+  now-unnecessary blanket `^/content/v[0-9]+/` / `^/playback/v[0-9]+/`
+  path rules so an unknown future shape fails closed.
+- **Post-window state:** the AdGuard sync removed `.30` from the CR /
+  Asura DNS-tier hard-deny (it was bump-eligible during the window).
+  With interception now off, `.30` has unfiltered Crunchyroll at the DNS
+  tier until its `bump_enabled` is toggled off + the controller
+  re-syncs, or the next interception window. Owner is aware.
+
+**Also shipped 2026-09-11 (dashboard/proxy, deployed):** the Report
+"Show / Path" column now shows the **show name** next to the series id
+on blocked/approved rows (`6349e23`) -- owner request from this window.
+
 ### Live interception test 2026-09-10 -- findings
 
 Bark Home taken off the network ~15:45; full `interception` stack brought
@@ -8081,13 +8149,37 @@ The rest are **real defects/gaps surfaced by hands-on testing** on
 device). Per the project owner's standing rule these get a **proper
 redesign in a dedicated session, not a live quick-patch**.
 
-1. **Crunchyroll per-series whitelist is not enforcing -- and the fix
-   is a stack of three problems, not one.** Repro: Black Clover
-   `GRE50KV36` (not on Matthew's list; SPY x FAMILY `G4PH0WXVJ` / Dr.
-   STONE `GYEXQKJG6` are) plays fine. Full live trace captured this
-   session in **`docs/design/crunchyroll-trace-2026-09-10/`** (raw
-   `access.log`/`cache.log`/AdGuard-querylog slices + `ANALYSIS.md`).
-   Findings, in dependency order:
+1. **~~Crunchyroll per-series whitelist is not enforcing~~ -- WORKS as of
+   2026-09-11, Option A (transparent intercept-bump).** The whole stack
+   below was really blocked on one thing: **(a) the OptiGate CA was not
+   in the tablet's Android *system* store.** Once the owner installed it
+   there, `.30` in `bump_v4`, the session proved end to end: Squid
+   decrypts CR's API, Dr. STONE (approved) plays, Black Clover (not
+   approved) is `TCP_DENIED/403` at `/playback/v3/G50UZ4E20/web/chrome/play`
+   with `show_not_approved` and fails to launch. See the "Live-verified"
+   table + the "2026-09-11 short window" section above.
+   - **(b) `host_verify_strict`** -- fixed (`host_verify_strict off`,
+     `3aab836`) and verified live 2026-09-11 (no 409 storms).
+   - **(c) Full-bump is too blunt** (finding #7) -- did NOT block the
+     test. Not built. Still worth doing for a device whose *general*
+     browsing quality matters under full intercept; revisit after a
+     longer soak.
+   - **(d) The classifier** -- **not needed for correctness.** The
+     existing `PLAYBACK_URL_RE` matches the modern
+     `/playback/vN/<id>/web/<platform>/play` shape and `series_resolve`
+     mapped media->series, so the playback call is the hard gate and it
+     held. The redesign (new `UP_NEXT` shape, drop the blanket
+     `^/content/v[0-9]+/` / `^/playback/v[0-9]+/` path rules, fail
+     closed on unknown shapes, deny at series-open not press-play) is
+     now a **UX + defence-in-depth polish**, tracked as finding #7's
+     sibling. Plan in `ANALYSIS.md`.
+
+   **Remaining before a real rollout:** the device-scoping problem (see
+   the 2026-09-11 section) -- build the controller `--only-mac` flag so
+   one device can be intercepted without gating the other 43. Then a
+   scoped window enrols devices one at a time.
+
+   *(Historical detail from the 2026-09-10 trace kept below for context.)*
    - **(a) The bump fails on the device.** After a browser restart,
      Squid could not complete the TLS bump handshake with Chrome for
      `www.crunchyroll.com` at all -- `cache.log`:
@@ -8277,12 +8369,20 @@ redesign in a dedicated session, not a live quick-patch**.
    longer 409s" check has to wait for the next supervised window.
 
 7. **Full-bump on a device is too blunt -- needs selective (per-domain)
-   bumping.** `.30` is a blanket `bump_v4` member, so nftables redirects
+   bumping.** *Downgraded 2026-09-11: NOT a blocker for Option A.* The
+   2026-09-11 session ran `.30` full-bump with `host_verify_strict off`
+   + the QUIC drop and the CR test worked cleanly; the browsing-quality
+   problems below were mostly host-forgery (fixed) and failed bump
+   attempts on a distrusted CA (fixed). Still worth building if a longer
+   soak shows full-intercept degrades a device's *general* browsing --
+   but it no longer gates anything.
+
+   `.30` is a blanket `bump_v4` member, so nftables redirects
    *every* tcp/443 to Squid (and, as of `3e381d0`, drops its udp/443).
-   Combined with #1a and #6, the tablet's general browsing (Google
-   services, Datadog, Bark, analytics) went broadly unreliable during
-   the window -- a stream of `NONE_NONE/000` / `NONE_NONE/409` /
-   `TCP_TUNNEL/500`. Squid's `ssl_bump` only *decrypts* `mode='bump'`
+   In the 2026-09-10 window (before `host_verify_strict off` and with an
+   untrusted CA), the tablet's general browsing (Google services,
+   Datadog, Bark, analytics) went broadly unreliable -- a stream of
+   `NONE_NONE/000` / `NONE_NONE/409` / `TCP_TUNNEL/500`. Squid's `ssl_bump` only *decrypts* `mode='bump'`
    domains, but it still peek-and-splices (and host-verifies, and can
    fail the TLS accept on) everything else. The device needs
    **destination-scoped interception**: redirect only the
@@ -8296,10 +8396,12 @@ redesign in a dedicated session, not a live quick-patch**.
    browsing, so `.30` should run with **SSL-Bump OFF** (DNS-tier only)
    outside of a supervised test.
 
-8. **FOLLOW-UP (design discussion, not decided) -- "two-browser split"
-   as an alternative to solving blockers (a)+(b)+(c).** Project owner's
-   idea, 2026-09-10: on a device that needs the show-whitelist, run
-   **two browsers**:
+8. **~~FOLLOW-UP -- "two-browser split"~~ -- NOT NEEDED as the primary
+   path (2026-09-11).** Option A works once the CA is system-trusted
+   (finding #1), so this stays on the shelf as a **fallback only** for a
+   device that genuinely cannot take a system-store CA. Design notes
+   kept below for that case. Project owner's idea, 2026-09-10: on a
+   device that needs the show-whitelist, run **two browsers**:
    - **Chrome** -- no proxy configured, no CA installed. Transparent
      intercept handles it. For any `mode='bump'` domain, Chrome's
      intercepted connection is **denied outright** (a friendly "open
