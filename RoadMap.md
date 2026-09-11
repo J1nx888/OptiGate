@@ -9655,3 +9655,48 @@ scoped to Crunchyroll or Webtoons specifically -- likely affects every
 `$client=`-scoped hard-deny and every category deny rule this project
 has. Tracked as a follow-up task; interception torn down for the
 night, base stack (dashboard/proxy/adguard) left running normally.
+
+### Root cause confirmed and fixed, same night, once actually read
+
+Picked back up immediately after logging the finding above (owner's
+own question: "why does AdGuard need to resync every 30 seconds, that
+seems kind of crazy" -- worth taking at face value rather than assuming
+the interval itself was load-bearing). Reading `sync_once()` directly
+confirmed the theory without any further guessing: it called
+`adguard_client.set_custom_rules()` **unconditionally, every single
+cycle**, with zero comparison against the `current` rules it had just
+fetched moments earlier in the same function -- a full tear-down-and-
+rebuild of AdGuard's entire custom-rules engine every 30 seconds,
+FOREVER, regardless of whether anything had actually changed since the
+last cycle. `set_custom_rules()`'s own docstring confirms AdGuard has
+no incremental update API at all, so this was never "the only way to
+push a change" -- it was "the only way to push a change, called even
+when there was no change to push."
+
+**Fixed**: `sync_once()` now skips the write entirely when the freshly-
+computed `new_rules` are identical to `current`. The self-correcting
+property (an admin's own AdGuard-side edit, or any external drift,
+gets caught and overwritten on the next cycle) is unchanged -- `current`
+is still read fresh every single cycle either way, cheaply, since GET
+was never the expensive/disruptive half of this. Only the WRITE, and
+the recompile it triggers, is now conditional on something having
+actually changed. In steady-state household operation (the overwhelming
+majority of 30-second windows, where nothing was added/removed/edited)
+this should eliminate nearly all of these calls -- turning "constantly
+recurring, every 30s, forever" into "only when something real actually
+changed," which is a categorically smaller and rarer exposure than what
+was happening before, regardless of whatever AdGuard's exact recompile
+latency turns out to be. 3 new regression tests (skip-when-unchanged,
+still-writes-on-a-real-change, the other three independent sync calls
+-- category subscriptions/SafeSearch/optigate-rewrite -- are unaffected
+by the skip), full suite passing.
+
+**Not yet fully closed**: this fixes the confirmed, direct cause (needless
+constant churn) but doesn't itself measure AdGuard's actual recompile
+latency or definitively rule out the alternative explanation (a
+client-identification mismatch) the original finding named as
+unconfirmed -- both still worth doing to fully understand the residual
+risk on a cycle where a real change DOES land. Not yet deployed/live-
+tested against production as of this entry -- needs the owner's
+explicit go-ahead to bring interception up again first, per the
+standing instruction above.

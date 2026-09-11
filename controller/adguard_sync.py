@@ -829,20 +829,47 @@ def sync_once(
     conn: sqlite3.Connection, base_url: str, username: str, password: str, block_page_ip: str | None = None
 ) -> int:
     """One full sync cycle. Returns the number of managed CUSTOM rules
-    pushed -- does not count native filter-subscription toggles from
-    `sync_category_subscriptions()` or the SafeSearch master toggle from
-    `sync_safesearch()`, separate mechanisms (Phase 8/G3) each with
-    their own success/failure shape. Never 0 as of 2026-09-02:
-    `build_anti_doh_rules()`'s fixed baseline is always included, so the
-    minimum healthy count is `len(build_anti_doh_rules())`, not 0 --
-    see that function's own docstring before assuming an empty managed
-    block still means "nothing to deny.\"
+    currently in force -- does not count native filter-subscription
+    toggles from `sync_category_subscriptions()` or the SafeSearch
+    master toggle from `sync_safesearch()`, separate mechanisms (Phase
+    8/G3) each with their own success/failure shape. Never 0 as of
+    2026-09-02: `build_anti_doh_rules()`'s fixed baseline is always
+    included, so the minimum healthy count is `len(build_anti_doh_rules())`,
+    not 0 -- see that function's own docstring before assuming an empty
+    managed block still means "nothing to deny."
 
     Fetches the eligible-device list ONCE (2026-09-02, a real
     efficiency gap found by code review) and shares it across all
     device-aware builders below, instead of each independently
     re-querying and re-classifying the full device list -- see
-    `_fetch_eligible_devices()`'s own docstring for the before/after."""
+    `_fetch_eligible_devices()`'s own docstring for the before/after.
+
+    **Real gap found live 2026-09-11, closed the same night**: this
+    used to call `adguard_client.set_custom_rules()` UNCONDITIONALLY,
+    every single cycle (`--adguard-interval` defaults to 30s), even
+    when the computed rules were byte-for-byte identical to what was
+    already applied -- `set_custom_rules()` has no incremental update
+    API (see its own docstring), so every one of those needless calls
+    was a full tear-down-and-rebuild of AdGuard's entire custom-rules
+    engine. AdGuard needs a brief moment to recompile after that (this
+    project's own earlier `build_ech_strip_rules()` finding), and two
+    unrelated live tests the same night (Crunchyroll's bump-domain
+    hard-deny, Webtoons' category block) both showed a device correctly
+    listed in its deny rule getting full access anyway -- the working
+    theory being that a query landing inside one of these needless,
+    constantly-recurring recompile windows resolves the real IP, and
+    the client's own DNS cache then serves that answer for its own TTL,
+    long after the (never-actually-changed) rule is back in force. Now
+    skips the write entirely when `new_rules == current` -- the
+    self-correcting property (an admin's own AdGuard-side edit outside
+    this project, or any external drift, gets caught and overwritten)
+    is unchanged, since `current` is still read fresh every cycle
+    either way; only the WRITE, and the disruptive recompile it
+    triggers, is now conditional on something having actually changed.
+    In steady-state household operation (no new device, no schedule
+    boundary just crossed, no category/domain edit in the last cycle)
+    this should eliminate the vast majority of these calls entirely.
+    """
     eligible_devices = _fetch_eligible_devices(conn)
     managed = (
         build_rules(conn, block_page_ip, eligible_devices=eligible_devices)
@@ -855,7 +882,8 @@ def sync_once(
     preserved = _strip_managed_block(current)
 
     new_rules = preserved if not managed else preserved + [_MARKER_BEGIN, *managed, _MARKER_END]
-    adguard_client.set_custom_rules(base_url, username, password, new_rules)
+    if new_rules != current:
+        adguard_client.set_custom_rules(base_url, username, password, new_rules)
     sync_category_subscriptions(conn, base_url, username, password)
     sync_safesearch(conn, base_url, username, password)
     sync_optigate_rewrite(conn, base_url, username, password, block_page_ip)

@@ -640,6 +640,112 @@ def test_sync_once_with_nothing_to_deny_still_clears_a_stale_managed_block(conn,
 
 
 # ============================================================
+# sync_once: skip the write when nothing actually changed (real gap
+# found live 2026-09-11 -- see this function's own dated docstring).
+# set_custom_rules() has no incremental API: every call is a full
+# tear-down-and-rebuild of AdGuard's rule engine, which needs a brief
+# moment to recompile -- calling it every 30s regardless of whether
+# anything changed created a small, constantly-recurring window where
+# two unrelated live tests (Crunchyroll, Webtoons) both showed a
+# correctly-denied device getting through anyway.
+# ============================================================
+
+def test_sync_once_skips_the_write_when_nothing_changed(conn, monkeypatch):
+    _insert_domain(conn, "crunchyroll\\.com", mode="bump")
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False)
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_safesearch_status", lambda *a, **k: {"enabled": False})
+
+    # First cycle computes the real managed block -- capture exactly
+    # what it would push, then have get_custom_rules report THAT as
+    # AdGuard's current state on the second cycle, simulating "the
+    # previous cycle's write already landed, nothing has changed since."
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: [])
+    first_push = {}
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: first_push.setdefault("rules", rules),
+    )
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+    assert "rules" in first_push, "expected the first cycle (empty -> real rules) to actually write"
+
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: list(first_push["rules"]))
+    write_calls = []
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: write_calls.append(rules),
+    )
+
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+
+    assert write_calls == [], "expected the second, unchanged cycle to skip set_custom_rules entirely"
+
+
+def test_sync_once_still_writes_when_something_actually_changed(conn, monkeypatch):
+    """The diff-and-skip fix must not turn into diff-and-NEVER-write --
+    a real, detectable change still has to go through."""
+    _insert_domain(conn, "crunchyroll\\.com", mode="bump")
+    device_id = _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False)
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_safesearch_status", lambda *a, **k: {"enabled": False})
+
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: [])
+    first_push = {}
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: first_push.setdefault("rules", rules),
+    )
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+
+    # A real change: a second device now also needs denying.
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:02", "192.168.1.20", bump_enabled=False)
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: list(first_push["rules"]))
+    write_calls = []
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: write_calls.append(rules),
+    )
+
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+
+    assert len(write_calls) == 1, "expected the cycle with a real change to actually write"
+    assert any("192.168.1.20" in r for r in write_calls[0])
+
+
+def test_sync_once_skip_does_not_affect_the_other_independent_sync_calls(conn, monkeypatch):
+    """sync_category_subscriptions()/sync_safesearch()/
+    sync_optigate_rewrite() are separate mechanisms with their own
+    success/failure shape -- skipping the custom-rules write must not
+    accidentally skip these too."""
+    _insert_domain(conn, "crunchyroll\\.com", mode="bump")
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False)
+
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: [])
+    first_push = {}
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: first_push.setdefault("rules", rules),
+    )
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_safesearch_status", lambda *a, **k: {"enabled": False})
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: list(first_push["rules"]))
+    monkeypatch.setattr(adguard_sync.adguard_client, "set_custom_rules", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("set_custom_rules must not be called on an unchanged cycle")
+    ))
+    safesearch_calls = []
+    monkeypatch.setattr(adguard_sync, "sync_safesearch", lambda *a, **k: safesearch_calls.append(1))
+    rewrite_calls = []
+    monkeypatch.setattr(adguard_sync, "sync_optigate_rewrite", lambda *a, **k: rewrite_calls.append(1))
+    subs_calls = []
+    monkeypatch.setattr(adguard_sync, "sync_category_subscriptions", lambda *a, **k: subs_calls.append(1))
+
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+
+    assert safesearch_calls == [1]
+    assert rewrite_calls == [1]
+    assert subs_calls == [1]
+
+
+# ============================================================
 # run_loop -- wiring sync_once() into a background PeriodicTask
 # ============================================================
 #
