@@ -9583,4 +9583,75 @@ request (a login, an admin action, an intercepted connection) is
 actively in flight for this exact device right now. 5 new regression
 tests (`test_device_identity.py`), full suite passing.
 
-Not yet committed as of writing this entry.
+Committed as `14de31a`, pushed, deployed to production (dashboard +
+proxy rebuilt and recreated; interception left stopped, not brought
+back up automatically -- see the owner's own standing instruction
+below). Live-verified against the real orphaned `.57` binding: the
+captive portal login succeeded on the first attempt post-fix, and a
+household-wide conntrack check right after showed every active device
+(including `.57`, `.102`, `.71`, `.30`) with 100% healthy
+ESTABLISHED/TIME_WAIT/CLOSE connections, zero stuck SYN_SENT anywhere.
+
+**Owner instruction, standing from here on**: never bring the
+`interception` profile up without the owner's own explicit
+confirmation first, even mid-session -- it strands every
+non-bypass/non-authenticated device's general internet for as long as
+it's up, and that cost isn't the assistant's call to make unilaterally
+until this is a finished product.
+
+## New finding, same night: AdGuard's full-replace rule sync creates a periodic filtering gap, exploited by client-side DNS caching
+
+Surfaced live during supervised re-testing after the device-identity
+fix above (with the owner's explicit go-ahead to bring interception up
+for that specific test). `.102` and `.57` -- confirmed non-bump,
+confirmed correctly listed in the live `crunchyroll.com` hard-deny
+rule's `$client=` scope at the moment of testing -- both got full,
+sustained access to Crunchyroll anyway (signed in, played a full
+episode of Black Clover). Not a one-off: the SAME "blocked, then
+loads anyway" pattern also hit Webtoons, an entirely different site
+under an entirely different (category-based, not bump-domain) block
+mechanism -- ruling out anything specific to the Crunchyroll rule's own
+content and pointing at something systemic to how AdGuard applies
+rules generally.
+
+**Working theory, not yet confirmed by direct AdGuard-internals
+investigation**: `controller/adguard_sync.py`'s `sync_once()` fully
+REPLACES AdGuard's entire custom-rules list every cycle (`--adguard-
+interval` defaults to 30s, never overridden in `docker-compose.yml`) --
+never an incremental/differential update. This project's own earlier
+investigation (the ECH-strip finding, `build_ech_strip_rules()`'s own
+docstring) already established that AdGuard needs "a brief moment" to
+recompile its rule engine after `/control/filtering/set_rules` before
+newly-set rules actually take effect. If that recompile isn't
+effectively instantaneous, every single 30-second sync cycle opens a
+brief window where filtering is momentarily incomplete/stale. A device
+actively browsing fires many rapid DNS lookups -- enough that, over a
+few minutes, one plausibly lands inside that window, resolves the REAL
+IP, and the client's own DNS cache/connection reuse then keeps serving
+that valid answer for its own TTL -- looking, from the user's side,
+like the block silently disappeared, even though the server-side rule
+is correctly back in force moments later. AdGuard's live query log
+directly corroborates the symptom (`www.crunchyroll.com`,
+`sso.crunchyroll.com`, `crunchyroll.com` all logged
+`NotFilteredNotFound` -- no rule matched at all -- repeatedly across a
+5+ minute window for both `.102` and `.57`, despite the rule
+demonstrably existing and listing both IPs at the same time), but does
+not by itself prove the recompile-lag mechanism over some other
+explanation (a client-identification mismatch in how AdGuard maps the
+query's source to `$client=`'s IP list was also considered and not yet
+ruled out).
+
+**Not fixed tonight** -- real investigation needed before touching
+anything: measure AdGuard's actual recompile latency after
+`set_custom_rules()` directly (not assumed from the older ECH-strip
+finding), determine whether AdGuard exposes any incremental rule-update
+API instead of full-replace, and only then decide on a fix (a longer
+sync interval trades responsiveness for fewer windows without closing
+the gap; something more sophisticated, like diffing the rule set and
+only replacing when it actually changed, would reduce recompile
+frequency without an equivalent responsiveness cost, but adds real
+complexity). This is a systemic DNS-tier filtering reliability gap, not
+scoped to Crunchyroll or Webtoons specifically -- likely affects every
+`$client=`-scoped hard-deny and every category deny rule this project
+has. Tracked as a follow-up task; interception torn down for the
+night, base stack (dashboard/proxy/adguard) left running normally.
