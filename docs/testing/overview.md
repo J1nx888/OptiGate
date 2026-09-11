@@ -403,11 +403,24 @@ case for Australia/Sydney, a US DST spring-forward transition day, plus
 [The Block List Project](https://github.com/blocklistproject/Lists):
 AdGuard/adblock, hosts-file including IPv6 null-routes and multiple
 aliases per line, bare domain-per-line, plus comments/dedup/malformed-line
-skipping), and `tests/test_category_fetch.py` (6 tests, `_OPENER.open`
-faked same as `test_adguard_client.py`'s own pattern -- a re-sync
-replacing only `source='subscription'` rows is the one worth calling
-out, since a bug there would have silently discarded an admin's manual
-additions on every scheduled refresh). `tests/test_matching.py` gained
+skipping), and `tests/test_category_fetch.py` (15 tests as of
+2026-09-11, `_OPENER.open` faked same as `test_adguard_client.py`'s
+own pattern -- a re-sync replacing only `source='subscription'` rows
+is the one worth calling out, since a bug there would have silently
+discarded an admin's manual additions on every scheduled refresh; the
+2026-09-11 additions cover `_resolve_includes()`'s v2fly `include:`
+graph-following -- nested chains, cycle guard, an unreachable include
+skipped without aborting the rest, the file cap, and one full
+end-to-end case proving a real v2fly *category* file, which is
+entirely include lines, actually resolves to real domains).
+`tests/test_category_catalog_sync.py` (2026-09-11, 18 tests) covers
+the "Add category from catalog" picker's `build_catalog()` classifier
+directly against small fake filename lists (region-split preference,
+region-only families, the whole-name overrides, display-name
+polish -- no network at all, pure logic) plus `sync_category_catalog()`/
+`start()` with the same mocked-`_OPENER` and threading patterns as
+`test_category_fetch.py`/`test_controller_active_scan.py`
+respectively. `tests/test_matching.py` gained
 7 tests for `category_applies_to_device()`/`schedule_applies_to_device()`
 (is_global, and each of user/group/device targeting, plus a check that
 an unrelated user's grant doesn't leak). `tests/test_adguard_client.py`

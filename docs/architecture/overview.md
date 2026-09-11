@@ -81,7 +81,23 @@ common/                      shared Python modules, imported by both containers
   blocklist_parser.py           Phase 8: parse_hostlist() -- the three real subscription-list
                                 formats (bare domain-per-line, hosts-file, AdGuard/adblock)
   category_fetch.py             Phase 8: fetch_and_sync_category() -- HTTP GETs a category's
-                                subscription_url, replaces only its source='subscription' rows
+                                subscription_url, replaces only its source='subscription' rows.
+                                _resolve_includes() (2026-09-11) recursively follows v2fly/
+                                domain-list-community's own "include:<name>" convention (a
+                                *category* file there is often entirely include lines, zero
+                                literal domains of its own) before handing the merged text to
+                                parse_hostlist() -- capped at MAX_INCLUDED_FILES=300
+  category_catalog_sync.py       2026-09-11: the Categories page's "Add category from catalog"
+                                picker -- build_catalog() curates v2fly's own data/category-*
+                                files into {slug, display_name, file_path, region} rows (region
+                                NULL = global/default-shown, a code = hidden unless the
+                                show_region_specific_categories setting is on); sync_category_
+                                catalog() replaces category_catalog's contents from a live
+                                GitHub git-trees fetch; start() runs this from the ALWAYS-ON
+                                dashboard process (not controller's own interception-gated
+                                category_fetch.run_loop()) on an 86400s interval, ticking
+                                immediately on start (same class of fix as periodic.py's
+                                2026-09-07 one)
   sdnotify.py                    stdlib-only systemd sd_notify client (READY=1/WATCHDOG=1),
                                 used by the controller's heartbeat pacer
   rate_limit.py                  RateLimiter -- shared per-IP sliding-window brute-force

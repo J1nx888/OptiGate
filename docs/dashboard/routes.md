@@ -532,6 +532,26 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   URL, not a webpage -- found live when an admin pointed a category at a
   Microsoft documentation page that visibly lists domains in a table but
   isn't in any of the three parseable shapes.
+  **"Add from catalog" picker (2026-09-11, project owner's explicit
+  request)**: a single-mode combobox above this form
+  (`category_catalog_combo`, built by `_category_catalog_combo()`,
+  filtered to `region IS NULL` entries unless the
+  `show_region_specific_categories` setting is on) -- picking a result
+  pre-fills `name`/`subscription_url` via a small inline `<script>`
+  (placed AFTER the form in `CATEGORIES_BODY`, deliberately -- a
+  `<script>` tag runs the instant the parser reaches it, and an earlier
+  placement left `categoryNameInput`/`categorySubscriptionUrlInput`
+  not yet in the DOM, confirmed live 2026-09-11: the whole picker
+  silently did nothing on every pick until this was caught testing in
+  a real browser). Relies on a small addition to the shared
+  `data-combobox` widget itself (BASE template's own `<script>`):
+  single-mode's `selectItem()` now also dispatches a real `change`
+  event on its hidden input after setting its value, which it never
+  did before this date -- harmless for every prior single-mode
+  combobox (nothing listened for it), but required for this picker to
+  react to a pick immediately rather than only at form submit. See
+  `common/category_catalog_sync.py`'s own module docstring for where
+  the catalog data comes from.
 - `POST /categories/delete` -> `delete_category()` -- form field
   `category_id`. Cascades to every `category_*` junction table.
 - `GET /categories/<int:category_id>` -> `category_detail()` -- the
@@ -1407,6 +1427,24 @@ the project owner asked for, not only an operational-health trail.
   message if the rewrite isn't active, without failing the whole
   request over it (filter refresh and the rewrite are independent
   concerns that happen to share a button for convenience).
+- `POST /settings/category-catalog/refresh` -> `refresh_category_catalog()`
+  (added 2026-09-11) -- same one-off "check now" shape as
+  `refresh_adguard_filters()` above: calls
+  `category_catalog_sync.sync_category_catalog()` synchronously
+  against the live v2fly source right now, independent of that
+  module's own background refresh loop (which already runs in this
+  same dashboard process -- no cross-process "write a timestamp and
+  let the other process notice it" indirection needed, unlike
+  `controller/network_sweep.py`'s own "Run now"). A failure (network,
+  malformed response) flashes an error and leaves the existing catalog
+  completely untouched.
+- `POST /settings/category-catalog` -> `update_category_catalog_settings()`
+  (added 2026-09-11) -- form field `show_region_specific_categories`
+  (checkbox). Persisted setting, deliberately its own tiny route
+  separate from the refresh-now action above -- same "don't fold an
+  action into an unrelated field-save" reasoning the AdGuard filter
+  section already documents for its own "Check for filter updates now"
+  button.
 - `_adguard_ui_url(adguard_url)` (added 2026-09-07, not a route -- a
   helper `settings_page()` calls) -- builds an "Open AdGuard's own
   dashboard" link for a quick click-through to AdGuard's own admin UI

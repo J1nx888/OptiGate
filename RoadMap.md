@@ -9069,3 +9069,141 @@ writing these: an Edit accidentally split an existing test's body,
 orphaning its trailing assertions -- found immediately by the test
 actually failing, not silently, and fixed by restoring them to the
 right function before moving on). Full suite: 1298 passed / 34 skipped.
+
+---
+
+## "Add category from catalog" -- v2fly/domain-list-community integration (2026-09-11)
+
+Started from a narrower question -- can the existing subscription
+mechanism pull in a `github.com/v2fly/domain-list-community` category
+(the owner wanted "Gaming"/"Entertainment" without listing domains by
+hand) -- and grew into a real feature once the owner reframed it:
+**"this replaces most of our entire existing domains category to
+begin with... the administrator can click 'Add' [and] search for a
+category... provide the bulk of the categories needed. The
+administrator can still add their own non-subscription/manual list or
+point to another random list."** Confirmed via GitHub's git-trees API
+(the plain "contents" API silently truncates past 1000 entries; this
+repo's `data/` alone has 1,539 files) that v2fly's own catalog has
+**118 `category-*` files**, not the 1000 the truncated listing implied.
+
+**The real gap found before building anything**: v2fly's own *category*
+files (`data/category-games`, `data/category-entertainment`, etc.) are
+entirely `include:<name>` lines pointing at other files -- confirmed
+live, zero literal domains of their own. Pasting one directly into the
+existing `subscription_url` field would fetch successfully and
+silently produce zero domains.
+
+**Three scoping questions asked and answered before building**:
+1. Bulk-select-then-target-picker UI (Categories-page shape) vs.
+   pick-a-category-then-search (Devices-page shape) -- moot once the
+   real ask ("replace how categories get added") became clear.
+2. Fresh-install seed (`defaults/seed_defaults.py`) vs. an ongoing
+   "Add" picker only -- **picker only, for now; owner wants to revisit
+   the default seed set in a future session** (not started).
+3. Region-specific entries (v2fly splits some categories by `-cn`/
+   `-ru`/`-ir`/etc.) -- **hidden by default, revealable via a Settings
+   toggle** (owner's explicit call).
+4. Follow-up mid-build: does "refreshed occasionally" mean a static
+   file I regenerate by hand, or an actual automatic background job
+   with a manual override -- **confirmed: automatic background
+   refresh + manual "Refresh catalog now" button**, matching every
+   other sync mechanism already in this app (AdGuard filters,
+   category domain lists).
+
+**Built**:
+- **`common/category_fetch.py`'s `_resolve_includes()`** -- recursively
+  follows a v2fly-style `include:<name>` chain (any source using the
+  convention, not gated on the URL being v2fly-specific -- harmless
+  no-op, zero extra fetches, for a source that never uses it), merging
+  every resolved file's text before `parse_hostlist()` runs. Cycle
+  guard + `MAX_INCLUDED_FILES=300` cap (an admin-supplied URL fetched
+  automatically by an unattended background job, same SSRF-adjacent
+  caution `_validate_subscription_url()` already documents). Verified
+  live end-to-end 2026-09-11: `category-games-!cn` resolves through 76
+  files to 858 real domains (`steampowered.com`, `epicgames.com`,
+  etc.) instead of the zero a direct fetch would have produced.
+- **`common/category_catalog_sync.py`** (new) -- `build_catalog()` is
+  the pure classifier (no network): for a region-split family, keeps
+  the `-!cn` file as the default/global entry and skips the noisier
+  bare-union file entirely (`category-games` bare is literally
+  `include:category-games-cn` + `include:category-games-!cn` --
+  confirmed live by fetching all three); a same-family region variant
+  or a region-ONLY family (no global equivalent, e.g. Iranian banks)
+  gets its own row tagged with a region code, hidden by default.
+  Curated 116 catalog entries from the real 118-file listing (one
+  file, `category-tm`/Turkmenistan, dropped as too niche for a whole
+  new region code; a handful of whole-name region overrides for
+  `category-ir`/`category-ru`, whose OWN NAME is the region, not a
+  detectable suffix) plus display-name polish for acronym-y entries
+  (`category-doh` -> "DNS-over-HTTPS", not "Doh"). `sync_category_catalog()`
+  fetches the live tree + replaces `category_catalog`'s contents in one
+  transaction; `resolve_subscription_url()` is the one choke point
+  that turns a catalog row into a real raw-content URL.
+- **`common/db.py`**: new `category_catalog` table (schema comment
+  explains it is NOT itself a category -- picking a row only pre-fills
+  the ordinary Add-category form, same trust boundary as an admin
+  typing a URL by hand); `_migrate()` seeds it from
+  `common/data/v2fly_category_catalog.tsv` only when empty (day-one
+  bootstrap, confirmed never re-fires once a live sync has run).
+- **Background refresh**: `category_catalog_sync.start()` runs from
+  the `dashboard` process (always on) at startup, 86400s interval,
+  ticking immediately (not waiting a full interval first -- same class
+  of bug `controller/periodic.py` was fixed for 2026-09-07) --
+  deliberately NOT wired into `controller/main.py`'s own
+  `category_fetch.run_loop()`, which is gated behind the interception
+  profile; browsing/adding categories has nothing to do with
+  interception. Manual "Refresh catalog now" + the region-specific
+  toggle live in a new Settings "Category Catalog" section.
+- **Categories page**: a search-and-pick combobox above the existing
+  Add-category form (`_category_catalog_combo()`, filtered by the
+  region setting) pre-fills name + subscription URL on pick. Required
+  one small addition to the SHARED `data-combobox` widget itself:
+  single-mode's `selectItem()` never dispatched any DOM event on its
+  hidden input before this -- fine for every prior use (value only
+  needed to ride along with a form submit), but this picker needs to
+  react to a pick immediately. Added a genuine `change` event dispatch,
+  harmless for every existing single-mode combobox (nothing listened
+  for it before).
+
+**Two real bugs caught by actually testing in a browser, not just unit
+tests** (both would have shipped silently broken otherwise):
+1. The picker's own inline `<script>` was placed BEFORE the
+   `name`/`subscription_url` `<input>` elements in the template -- a
+   `<script>` tag runs the instant the parser reaches it, so
+   `document.getElementById("categoryNameInput")` returned null every
+   time and the whole fill-in silently no-op'd. Fixed by moving the
+   script to after the form. Confirmed live before AND after the fix
+   (broken, then working) rather than assuming the reorder alone was
+   proof.
+2. Testing via a URL with embedded HTTP Basic Auth credentials
+   (`http://admin:pw@host/...`) silently blocked the Add-category
+   form's POST submission entirely -- zero network request, no error
+   -- once the browser's own cached auth for the origin was in place
+   (confirmed by an earlier plain navigation), switching to plain URLs
+   fixed it immediately. Not a bug in the shipped code (an artifact of
+   how this session tested it), but worth remembering for future
+   browser-testing sessions: navigate with embedded credentials once,
+   to establish the session, then switch to plain URLs for everything
+   after.
+
+**Tests**: `tests/test_category_fetch.py` gained 9 (`_resolve_includes()`
+unit tests + one full end-to-end category sync through a mocked
+v2fly-shaped include chain). New `tests/test_category_catalog_sync.py`
+(18 tests: `build_catalog()` pure-logic cases, `sync_category_catalog()`
+against mocked HTTP, `start()` threading behavior including the
+tick-immediately fix). New `tests/test_dashboard.py` cases (9): the
+picker renders with bundled entries, region-specific hidden/shown,
+refresh-now success/failure paths, the settings toggle, admin-auth
+guards. Full suite green.
+
+**Live-verified end to end against the real v2fly repo, not just
+mocks**: the background sync fetched the real GitHub git-trees API and
+landed exactly 116 entries (matching the bundled snapshot's own
+curation); picking "Games" in the real browser pre-filled the real
+raw URL; clicking "Sync now" on the resulting category fetched and
+resolved the real 76-file include chain into 858 real domains.
+
+**Not done, explicitly deferred**: rebasing `defaults/seed_defaults.py`'s
+own fresh-install category seed set on this catalog -- owner wants to
+revisit this later, not part of this change.

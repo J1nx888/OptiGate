@@ -48,7 +48,10 @@ session or two; grep the function/constant names instead.)
   now-dangerous seeded row (two blanket allow-paths that had turned into
   a real security gap) can actually get removed from an existing
   database automatically. Same idempotent-on-every-startup contract as
-  every column-addition check above.
+  every column-addition check above. A third shape, added 2026-09-11:
+  a brand-new table's day-one DATA seed (`category_catalog`, from
+  `common/data/v2fly_category_catalog.tsv`, only when the table is
+  genuinely empty) — see that table's own section below.
 - **Called from:** `init_db()` runs on every dashboard request that opens a
   connection (`dashboard.get_db()`) and on every proxy container start
   (`proxy/entrypoint.sh`, inline Python heredoc). It's cheap and
@@ -700,6 +703,72 @@ Same shape as `user_domains`/`group_domains`/`device_domains` (`id`,
 `category_id`, one of `user_id`/`group_id`/`device_id`, all
 `ON DELETE CASCADE`, `UNIQUE(category_id, *_id)`) — which
 user/group/device this category is BLOCKED for.
+
+### `category_catalog`
+The Categories page's "Add category from catalog" search picker
+(2026-09-11) — a searchable menu of ready-made subscription sources so
+an admin doesn't have to go find a raw blocklist URL themselves for a
+common category like "Gaming" or "Social Media". Sourced from
+[v2fly/domain-list-community](https://github.com/v2fly/domain-list-community)'s
+own `data/category-*` files (118 of them as of 2026-09-11, via GitHub's
+git-trees API — the plain "contents" API silently truncates past 1000
+entries, and this repo's `data/` alone has 1,539 files).
+
+| Column         | Type    | Constraints |
+|---|---|---|
+| `id`            | INTEGER | PRIMARY KEY |
+| `slug`          | TEXT    | UNIQUE NOT NULL — the v2fly file's own name minus the `category-` prefix, e.g. `games-!cn` |
+| `display_name`  | TEXT    | NOT NULL — what the admin sees in the picker, e.g. "Games" |
+| `file_path`     | TEXT    | NOT NULL — the real v2fly `data/` filename, e.g. `category-games-!cn` |
+| `region`        | TEXT    | nullable — NULL = global/default-shown; a region code (`cn`/`ru`/`ir`/`jp`/`hk`/`uk`/`mm`) for a region-specific entry, hidden unless the `show_region_specific_categories` setting is on |
+| `updated_at`    | TEXT    | NOT NULL |
+
+**Not itself a category** — picking a row here only pre-fills the
+ordinary Add-category form's `name`/`subscription_url` (via
+`common/category_catalog_sync.py`'s `resolve_subscription_url()`,
+computed at picker-render time, never stored), exactly as if the admin
+had typed them in by hand. Nothing here is ever assigned to anyone or
+referenced by `category_domains`.
+
+**Region-split handling**: `common/category_catalog_sync.py`'s
+`build_catalog()` keeps a region-split family's `-!cn`-style ("not
+China") file as the `region IS NULL` default entry and skips the
+noisier bare-union file entirely (confirmed live: `category-games`
+alone is literally `include:category-games-cn` +
+`include:category-games-!cn` — using it directly would re-include the
+China-specific noise the split exists to avoid); a same-family
+region-specific sibling (`category-games-cn`) gets its own row tagged
+`region='cn'`. A family that ONLY exists in a region-specific form (no
+global equivalent at all, e.g. Iranian banks) is tagged the same way,
+not silently dropped.
+
+**Bundled fallback + live auto-refresh**, same two-layer shape as
+`common/data/oui_prefixes.tsv` (this session's earlier IEEE OUI
+snapshot): `common/db.py`'s `_migrate()` seeds this table from
+`common/data/v2fly_category_catalog.tsv` only if it's empty (a fresh
+install's day-one bootstrap, confirmed live never re-fires once a
+live sync has populated real data), and
+`category_catalog_sync.start()` — run from the `dashboard` process
+(always on, unlike `controller/category_fetch.py`'s own periodic loop,
+gated behind the interception profile; browsing/adding categories has
+nothing to do with interception) — re-fetches and REPLACES the whole
+table on a fixed interval (86400s default, matching
+`controller/main.py`'s own `--category-fetch-interval` default),
+ticking immediately on start rather than waiting a full interval first
+(same class of fix as `controller/periodic.py`'s 2026-09-07 one). A
+manual "Refresh catalog now" button on the Settings page
+(`refresh_category_catalog()`) triggers the same function synchronously,
+on demand.
+
+**Why this needs its own fetch logic, not just a URL paste into the
+existing `subscription_url` field**: confirmed live 2026-09-11 that
+v2fly's own *category* files (e.g. `data/category-games`) are entirely
+made of `include:<name>` lines pointing at other files — zero literal
+domains of their own. `common/category_fetch.py`'s
+`_resolve_includes()` (added the same day) recursively follows that
+include graph at CATEGORY FETCH time, for any source using the
+convention — a different concern from this table, which is only about
+which category NAMES to offer for picking.
 
 ### `schedules`
 A time window during which its assigned categories (or a full lockout)
