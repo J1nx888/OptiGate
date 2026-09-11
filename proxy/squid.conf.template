@@ -269,12 +269,35 @@ ssl_bump terminate step2 all
 # response (ssl_bump restricts the upstream ALPN offer to http/1.1, so
 # there is no HTTP/2 response framing here to complicate this) and
 # reply_header_access can deny individual headers from ever reaching
-# the client. `ssl::bumped` is true only for a transaction Squid
-# actually decrypted via ssl_bump -- a spliced (raw TCP relay)
-# connection is never HTTP-parsed at all, so this can't and doesn't
-# need to touch splice-mode traffic.
+# the client.
 #
-# **Needs live verification, not yet done**: Squid's header table only
+# **CORRECTED 2026-09-11, same day, after a real production failure**:
+# the original version of this rule scoped itself with `acl bumped
+# ssl::bumped` -- confirmed live against the real production Squid 5.7
+# that `ssl::bumped` is NOT a valid Squid ACL type at all ("FATAL:
+# Invalid ACL type 'ssl::bumped'", crash-looping the proxy container
+# immediately on deploy; caught within seconds of the rollout, before
+# any household device was affected, since traffic isn't redirected
+# through Squid at all while the interception profile is off). No such
+# ACL type exists in real Squid, despite earlier research claiming
+# otherwise -- that claim was wrong and should have been verified
+# against a real Squid instance before shipping, not just trusted.
+#
+# Fixed by dropping the ACL entirely: `reply_header_access Alt-Svc deny
+# all` fires unconditionally, but this is still safe and still mostly
+# achieves the original scoping intent structurally, not because of an
+# ACL condition -- a spliced (raw TCP relay) connection is NEVER
+# HTTP-parsed by Squid at all, so an unscoped reply_header_access
+# cannot touch splice-mode traffic regardless. The one thing this
+# broader form ALSO catches that the (nonexistent) scoped version
+# wouldn't have: plain-HTTP intercepted responses (bump_v4's own plain
+# :80 traffic, which Squid does HTTP-parse) also get Alt-Svc stripped.
+# Harmless -- Alt-Svc over plain HTTP is rare and stripping it costs
+# nothing -- and was already flagged as the acceptable fallback shape
+# in this feature's own original design research, before the scoped
+# version was (incorrectly) chosen instead.
+#
+# **Still needs live verification**: Squid's header table only
 # recognizes a fixed set of header names specially; an unrecognized
 # name falls into its generic "Other" bucket, and denying "Other"
 # would be far too broad (it would strip every header Squid doesn't
@@ -284,8 +307,7 @@ ssl_bump terminate step2 all
 # origin in the next interception window (or a disposable smoke-test
 # rig) that ONLY Alt-Svc is missing from the response and every other
 # header survives untouched.
-acl bumped ssl::bumped
-reply_header_access Alt-Svc deny bumped
+reply_header_access Alt-Svc deny all
 
 # Together with item 17's DNS-side strip, this closes both channels a
 # FRESH browser profile (no prior unfiltered visit to the origin) could

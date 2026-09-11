@@ -193,24 +193,37 @@ def test_http_access_catchall_is_still_deny_not_allow():
     )
 
 
-def test_alt_svc_response_header_is_stripped_for_bumped_connections():
+def test_alt_svc_response_header_is_stripped():
     """RoadMap.md finding #2 (QUIC fallback UX): controller/adguard_sync.py's
     build_ech_strip_rules() (item 17) already withholds the DNS HTTPS
     record's alpn="h3" hint for every bump-mode domain, but that alone was
     confirmed live 2026-09-11 NOT to stop Chrome's ERR_QUIC_PROTOCOL_ERROR
     -- Chrome also caches h3 support from a real Alt-Svc response header,
-    independent of DNS. reply_header_access denies that header specifically
-    for any transaction Squid actually decrypted (ssl::bumped is false for
-    spliced/raw-relayed traffic, which Squid never HTTP-parses at all), so
-    a fresh browser profile behind this proxy can never learn h3 support
-    for a bump-mode domain through either channel."""
+    independent of DNS.
+
+    **Real production failure, same day, worth its own regression guard**:
+    the original version of this rule scoped itself with `acl bumped
+    ssl::bumped` -- confirmed live against production Squid 5.7 that
+    `ssl::bumped` is NOT a real Squid ACL type at all ("FATAL: Invalid ACL
+    type 'ssl::bumped'"), crash-looping the proxy container the moment it
+    deployed. Fixed by dropping the ACL and using an unconditional
+    `reply_header_access Alt-Svc deny all` instead -- still effectively
+    scoped to bumped traffic in practice, since a spliced connection is
+    never HTTP-parsed by Squid at all regardless of any ACL. This test
+    guards against the invalid `ssl::bumped` ACL ever coming back."""
     text = TEMPLATE_PATH.read_text()
-    assert re.search(r"^acl\s+bumped\s+ssl::bumped\s*$", text, re.MULTILINE), (
-        "expected an `acl bumped ssl::bumped` line -- see squid.conf.template's "
-        "RESPONSE HEADER HYGIENE section"
+    active_lines = [
+        line for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert not any("ssl::bumped" in line for line in active_lines), (
+        "ssl::bumped is not a real Squid ACL type -- confirmed FATAL on "
+        "production Squid 5.7 ('Invalid ACL type'). Do not reintroduce it "
+        "as an active directive (mentioning it in a comment, e.g. this "
+        "incident's own writeup, is fine)."
     )
-    assert re.search(r"^reply_header_access\s+Alt-Svc\s+deny\s+bumped\s*$", text, re.MULTILINE), (
-        "expected `reply_header_access Alt-Svc deny bumped` -- see squid.conf.template's "
+    assert re.search(r"^reply_header_access\s+Alt-Svc\s+deny\s+all\s*$", text, re.MULTILINE), (
+        "expected `reply_header_access Alt-Svc deny all` -- see squid.conf.template's "
         "RESPONSE HEADER HYGIENE section"
     )
 
