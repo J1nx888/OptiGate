@@ -63,7 +63,7 @@ def _fake_log(entries):
 
 def _rows(conn):
     return conn.execute(
-        "SELECT domain, username, allowed, reason, device_id, ip_address FROM access_log ORDER BY id"
+        "SELECT domain, username, allowed, reason, device_id, ip_address, ts FROM access_log ORDER BY id"
     ).fetchall()
 
 
@@ -113,18 +113,61 @@ def test_writes_a_blocked_row_for_a_category_domain_hard_deny(conn, monkeypatch)
     assert _rows(conn)[0]["domain"] == "badgames.com"
 
 
-def test_ignores_an_ordinary_allowed_lookup(conn, monkeypatch):
-    """An entry whose answer is a real external IP, not the block page --
-    the overwhelmingly common case -- must never produce a row."""
-    _insert_domain(conn, r"youtube\.com", mode="bump")
+def test_ordinary_allowed_lookup_from_a_known_device_writes_an_allowed_row(conn, monkeypatch):
+    """Finding #9: an entry whose answer is a real external IP, not the
+    block page -- the overwhelmingly common case -- from a device this
+    project tracks now DOES produce a Report row, just an allowed
+    (dns_tier_allowed) one, not a block."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     monkeypatch.setattr(
         adguard_report_sync.adguard_client, "get_query_log",
         _fake_log([_entry("www.youtube.com", IP_1, answer_ip="142.250.72.206")]),
     )
 
+    assert adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP) == 1
+    row = _rows(conn)[0]
+    assert row["allowed"] == 1
+    assert row["reason"] == "dns_tier_allowed"
+    # Coarse dedupe key, not the raw queried hostname -- see _dedupe_site_key().
+    assert row["domain"] == "youtube.com"
+    assert row["ip_address"] == IP_1
+
+
+def test_ordinary_allowed_lookup_from_an_unknown_device_writes_nothing(conn, monkeypatch):
+    """No devices row bound to this IP at all -- nothing for an admin to
+    act on, so the allowed back-fill skips it (unlike the hard-deny path,
+    which always has a raw IP to fall back to)."""
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_query_log",
+        _fake_log([_entry("www.youtube.com", "192.168.1.77", answer_ip="142.250.72.206")]),
+    )
+
     assert adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP) == 0
     assert _rows(conn) == []
+
+
+def test_repeated_lookups_of_different_subdomains_collapse_into_one_allowed_row(conn, monkeypatch):
+    """The coarse site-key dedupe (finding #9) means a page that fans out
+    to a dozen subdomains of the same site collapses to one row within
+    log_access()'s 5-minute window, instead of a dozen. `written` counts
+    entries classified as loggable, same "not necessarily a new DB row"
+    semantics the hard-deny path above already has (log_access()'s own
+    dedupe decides that) -- the actual row count is the real assertion."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_query_log",
+        _fake_log([
+            _entry("www.crunchyroll.com", IP_1, answer_ip="1.2.3.4", time_str="2026-09-09T13:00:00Z"),
+            _entry("static.crunchyroll.com", IP_1, answer_ip="1.2.3.5", time_str="2026-09-09T13:00:01Z"),
+            _entry("api.crunchyroll.com", IP_1, answer_ip="1.2.3.6", time_str="2026-09-09T13:00:02Z"),
+        ]),
+    )
+
+    adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP)
+
+    rows = _rows(conn)
+    assert len(rows) == 1
+    assert rows[0]["domain"] == "crunchyroll.com"
 
 
 def test_ignores_a_domain_this_project_does_not_manage(conn, monkeypatch):
@@ -240,6 +283,45 @@ def test_answerless_entry_is_not_treated_as_a_block(conn, monkeypatch):
     )
 
     assert adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP) == 0
+
+
+# ============================================================
+# prune_allowed_rows() -- retention for the allowed-traffic sample
+# ============================================================
+
+def _insert_access_log_row(conn, *, reason, ts, allowed=1, domain="example.com"):
+    conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (?, NULL, '(unauthenticated)', ?, NULL, ?, ?)",
+        (ts, domain, int(allowed), reason),
+    )
+    conn.commit()
+
+
+def test_prune_allowed_rows_deletes_only_old_dns_tier_allowed_rows(conn):
+    old_iso = db.iso_secs_ago(31 * 86400)
+    recent_iso = db.iso_secs_ago(1 * 86400)
+    _insert_access_log_row(conn, reason="dns_tier_allowed", ts=old_iso)
+    _insert_access_log_row(conn, reason="dns_tier_allowed", ts=recent_iso)
+    # An old row of a DIFFERENT reason (a real block) must survive --
+    # this function only ever touches its own reason code.
+    _insert_access_log_row(conn, reason="dns_hard_deny", ts=old_iso, allowed=0)
+
+    deleted = adguard_report_sync.prune_allowed_rows(conn)
+
+    assert deleted == 1
+    remaining = {(r["reason"], r["ts"]) for r in _rows(conn)}
+    assert ("dns_tier_allowed", recent_iso) in remaining
+    assert ("dns_hard_deny", old_iso) in remaining
+    assert ("dns_tier_allowed", old_iso) not in remaining
+
+
+def test_prune_allowed_rows_respects_a_custom_retention_window(conn):
+    ts = db.iso_secs_ago(8 * 86400)
+    _insert_access_log_row(conn, reason="dns_tier_allowed", ts=ts)
+
+    assert adguard_report_sync.prune_allowed_rows(conn, retention_days=30) == 0
+    assert adguard_report_sync.prune_allowed_rows(conn, retention_days=7) == 1
 
 
 # ============================================================

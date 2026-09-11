@@ -38,6 +38,25 @@ observe them. `dashboard` already starts `block_page_server.py` and
 `captive_portal_server.py` as background components at boot; this is one
 more, gated behind the same `DASHBOARD_URL` check `block_page_server`
 already uses (no block-page IP configured -> nothing to correlate).
+
+**The second gap this closes (RoadMap.md finding #9, 2026-09-10):** a
+normal authenticated device that is neither SSL-Bump-enabled nor hitting
+a blocked category produced ZERO Report rows at all -- Squid only ever
+sees `bump_v4` devices, and the hard-deny back-fill above only fires on
+an actual block. `correlate_once()` below also back-fills one `allowed`
+row per querylog entry that resolves to a device this project tracks,
+using the SAME `logging_util.log_access()` 5-minute rolling dedupe every
+other writer relies on -- just keyed on a deliberately coarse "site" (see
+`_dedupe_site_key()`) rather than the exact queried name, so a page that
+fans out to a dozen subdomains of the same site collapses to one row
+instead of a dozen. Tagged `reason="dns_tier_allowed"` and hidden by
+default on the Report page (a "Show routine DNS-tier activity" toggle
+reveals them) since they're expected to vastly outnumber every other
+reason code -- they're routine browsing, not something needing review.
+`prune_allowed_rows()` deletes them past a 30-day retention window so
+this ordinary-traffic sampling doesn't grow `access_log` without bound
+the way a real block (rare, and worth keeping indefinitely) should not
+be pruned.
 """
 from __future__ import annotations
 
@@ -54,12 +73,35 @@ import matching
 
 log = logging.getLogger("dashboard.adguard_report_sync")
 
-# The reason string stamped on every row this module writes. Deliberately
-# distinct from the SNI/authz helpers' own vocabulary
+# The reason string stamped on every hard-deny row this module writes.
+# Deliberately distinct from the SNI/authz helpers' own vocabulary
 # ("domain_not_assigned", "unconfigured_domain", ...) -- this block
 # happened purely at the DNS tier, before (or instead of) Squid ever
 # seeing the connection, and the Report page just renders the string.
 _REASON = "dns_hard_deny"
+
+# The reason string stamped on every routine-allowed row this module
+# writes (finding #9). Distinct from block_page_server.py's
+# "dns_tier_denied" and this module's own "dns_hard_deny" above -- this
+# is the ALLOWED half of DNS-tier visibility, not a block of any kind.
+_ALLOWED_REASON = "dns_tier_allowed"
+
+# How long an allowed-traffic sample row survives before
+# prune_allowed_rows() deletes it. Unlike an actual block (rare, and
+# worth keeping indefinitely for review), this is routine browsing
+# noise sampled purely so the Report page has SOMETHING to show for a
+# non-bump device -- unbounded retention would grow access_log forever
+# for no benefit past a few weeks of "what has this device been doing"
+# review. Chosen 2026-09-10 (RoadMap.md finding #9): the project owner's
+# call, weighed against 7/90-day alternatives.
+_ALLOWED_RETENTION_DAYS = 30
+
+# prune_allowed_rows() only needs to run occasionally -- access_log has
+# no per-row expiry trigger, and a 30-day retention window doesn't need
+# sub-hourly enforcement. Checked once per start()-loop iteration against
+# a locally-held "last pruned at" wall-clock time (not persisted --
+# see start()'s own comment on why that's fine for a best-effort job).
+_PRUNE_INTERVAL_SECONDS = 60 * 60
 
 # Setting key holding the newest querylog timestamp already scanned, so a
 # restart (or a slow cycle) doesn't re-walk the same entries forever.
@@ -109,6 +151,32 @@ def _answer_is_block_page(entry: dict, block_page_ip: str) -> bool:
     return False
 
 
+def _entry_resolved(entry: dict) -> bool:
+    """True if this querylog entry got a real answer back (at least one
+    record) -- as opposed to NXDOMAIN/SERVFAIL/an empty response. Used to
+    keep the allowed-traffic back-fill to genuine successful lookups, not
+    every failed/mistyped query a device happens to make."""
+    answer = entry.get("answer")
+    return isinstance(answer, list) and len(answer) > 0
+
+
+def _dedupe_site_key(hostname: str) -> str:
+    """Coarse "site" grouping for the allowed-traffic back-fill's dedupe
+    key -- deliberately NOT a real public-suffix-aware registrable-domain
+    computation (this project has no PSL dependency, and common/ modules
+    stay stdlib-only, see common/auth.py's own docstring on why). Takes
+    the last two dot-separated labels (`www.crunchyroll.com` ->
+    `crunchyroll.com`, `static.cdn.example.org` -> `example.org`), which
+    is wrong for a handful of multi-part public suffixes (`foo.co.uk` ->
+    `co.uk`) but harmless here: this key only decides how many rows one
+    site's traffic can write to a best-effort Report sample within
+    log_access()'s existing 5-minute dedupe window, never an enforcement
+    decision -- matching.find_domain()'s anchored-suffix regex is what
+    actually decides policy, completely unaffected by this."""
+    labels = hostname.split(".")
+    return ".".join(labels[-2:]) if len(labels) >= 2 else hostname
+
+
 def _is_managed_hard_deny(conn: sqlite3.Connection, hostname: str) -> bool:
     """Whether `hostname` is something THIS project would currently
     hard-deny -- a `mode='bump'`/`'splice'` domain, or a domain in any
@@ -135,15 +203,17 @@ def correlate_once(
     *,
     limit: int = _QUERYLOG_LIMIT,
 ) -> int:
-    """Scans the most recent querylog page and writes an `access_log`
-    "blocked" row for each entry that is one of this project's own
-    DNS-tier hard-denies and is newer than the stored watermark.
+    """Scans the most recent querylog page and writes an `access_log` row
+    for each entry that's newer than the stored watermark and is either
+    one of this project's own DNS-tier hard-denies ("blocked", finding
+    #25) or a genuine successful lookup from a device this project
+    tracks ("allowed", finding #9 -- see module docstring).
 
-    Returns the number of rows actually written -- 0 is the normal,
-    healthy result (most queries are ordinary allowed lookups, and
-    `log_access()`'s own 5-minute dedupe legitimately absorbs repeats of
-    a block already logged). Never raises for a single malformed entry;
-    skips it and continues.
+    Returns the number of rows actually written -- 0 is a perfectly
+    normal, healthy result when nothing new happened this cycle, and
+    `log_access()`'s own 5-minute dedupe legitimately absorbs plenty of
+    repeats even when something did. Never raises for a single malformed
+    entry; skips it and continues.
     """
     entries = adguard_client.get_query_log(base_url, username, password, limit=limit)
     watermark = db.get_setting(conn, _WATERMARK_SETTING, "")
@@ -167,22 +237,48 @@ def correlate_once(
         client_ip = entry.get("client")
         if not hostname or not isinstance(client_ip, str) or not client_ip:
             continue
-        if not _answer_is_block_page(entry, block_page_ip):
-            continue
-        if not _is_managed_hard_deny(conn, hostname):
+
+        if _answer_is_block_page(entry, block_page_ip):
+            if not _is_managed_hard_deny(conn, hostname):
+                continue
+            device = device_identity.resolve_device(conn, client_ip)
+            user = device_identity.resolve_user_for_device(conn, device)
+            user_id, resolved_username, device_id = device_identity.log_identity_fields(device, user)
+            logging_util.log_access(
+                conn,
+                user_id=user_id,
+                username=resolved_username,
+                domain=hostname,
+                path=None,
+                allowed=False,
+                reason=_REASON,
+                device_id=device_id,
+                ip_address=client_ip,
+            )
+            written += 1
             continue
 
+        # Not one of our own blocks -- only worth a Report row at all if
+        # it's a genuine successful lookup (skip NXDOMAIN/SERVFAIL noise)
+        # from a device this project actually tracks (skip everything
+        # else -- an untracked IP gives an admin nothing to act on here,
+        # unlike the hard-deny path above which always has a client_ip to
+        # fall back to).
+        if not _entry_resolved(entry):
+            continue
         device = device_identity.resolve_device(conn, client_ip)
+        if device is None:
+            continue
         user = device_identity.resolve_user_for_device(conn, device)
         user_id, resolved_username, device_id = device_identity.log_identity_fields(device, user)
         logging_util.log_access(
             conn,
             user_id=user_id,
             username=resolved_username,
-            domain=hostname,
+            domain=_dedupe_site_key(hostname),
             path=None,
-            allowed=False,
-            reason=_REASON,
+            allowed=True,
+            reason=_ALLOWED_REASON,
             device_id=device_id,
             ip_address=client_ip,
         )
@@ -192,6 +288,20 @@ def correlate_once(
         db.set_setting(conn, _WATERMARK_SETTING, newest_seen)
 
     return written
+
+
+def prune_allowed_rows(conn: sqlite3.Connection, *, retention_days: int = _ALLOWED_RETENTION_DAYS) -> int:
+    """Deletes `dns_tier_allowed` rows older than `retention_days` --
+    keeps the routine-traffic sample from growing access_log without
+    bound (see module docstring / RoadMap.md finding #9). Only ever
+    touches this module's own `_ALLOWED_REASON` rows -- an actual block
+    (dns_hard_deny, dns_tier_denied, or any proxy-tier denial) is never
+    pruned by this or anything else. Returns the number of rows deleted.
+    """
+    cutoff = db.iso_secs_ago(retention_days * 86400)
+    cur = conn.execute("DELETE FROM access_log WHERE reason = ? AND ts < ?", (_ALLOWED_REASON, cutoff))
+    conn.commit()
+    return cur.rowcount
 
 
 def start(
@@ -212,6 +322,14 @@ def start(
     dashboard restart. A cycle that can't reach AdGuard (not up yet on a
     cold boot, credentials not set) is logged and skipped, never fatal --
     this is a best-effort Report back-fill, never load-bearing.
+
+    Also runs prune_allowed_rows() at most once every
+    `_PRUNE_INTERVAL_SECONDS`, tracked in a plain local (not persisted to
+    the DB) -- a dashboard restart just means the next natural interval
+    handles it, which is fine for a 30-day retention window on a
+    best-effort sample; not worth a settings row to survive a restart
+    that changes nothing about correctness, only which wall-clock minute
+    the next prune happens to land on.
     """
     import os
 
@@ -221,6 +339,7 @@ def start(
 
     def _loop() -> None:
         conn: sqlite3.Connection | None = None
+        last_pruned = 0.0
         while not stop.wait(interval):
             try:
                 if conn is None:
@@ -236,7 +355,14 @@ def start(
                     continue
                 written = correlate_once(conn, url, username, password, block_page_ip)
                 if written:
-                    log.info("back-filled %d DNS-tier hard-deny row(s) into the Report log", written)
+                    log.info("back-filled %d DNS-tier Report row(s) (blocked + allowed)", written)
+                now = time.monotonic()
+                if now - last_pruned >= _PRUNE_INTERVAL_SECONDS:
+                    pruned = prune_allowed_rows(conn)
+                    if pruned:
+                        log.info("pruned %d dns_tier_allowed row(s) past the %d-day retention window",
+                                  pruned, _ALLOWED_RETENTION_DAYS)
+                    last_pruned = now
             except adguard_client.AdGuardError as exc:
                 log.info("querylog poll skipped (AdGuard not reachable yet?): %s", exc)
             except Exception:

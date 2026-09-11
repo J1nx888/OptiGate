@@ -6573,10 +6573,11 @@ REPORT_BODY = """
     <option value="{{ d }}" {{ 'selected' if days==d }}>Last {{ d }} day{{ 's' if d != 1 else '' }}</option>
     {% endfor %}
   </select>
+  <label><input type="checkbox" name="show_routine" value="1" {{ 'checked' if show_routine }}> Show routine DNS-tier activity</label>
   <button class="add" type="submit">Apply</button>
   {% if filters_active %}<a class="btn" href="{{ url_for('report') }}">Clear filters</a>{% endif %}
 </form>
-<p class="hint">Applies to everything below -- the totals, both graphs, and the activity table. Click Allowed or Blocked below to filter to just that.</p>
+<p class="hint">Applies to everything below -- the totals, both graphs, and the activity table. Click Allowed or Blocked below to filter to just that. "Show routine DNS-tier activity" reveals sampled, ordinary browsing from devices that aren't SSL-Bump-enabled (<code>dns_tier_allowed</code> rows) -- hidden by default since there are far more of them than anything needing your attention.</p>
 </div>
 
 <div class="stat-strip">
@@ -6760,6 +6761,8 @@ def _report_redirect_kwargs(source) -> dict:
         kwargs["status"] = source["status"]
     if source.get("days"):
         kwargs["days"] = _parse_report_days(source.get("days"))
+    if source.get("show_routine"):
+        kwargs["show_routine"] = "1"
     return kwargs
 
 
@@ -6808,6 +6811,11 @@ _ACCESS_LOG_REASON_LABELS = {
     "resolution_failed": "couldn't resolve show/episode metadata to check it",
     "show_not_approved": "this specific show hasn't been approved for this user",
     "dns_tier_denied": "blocked at the DNS/category layer (AdGuard) before reaching the proxy",
+    # Added 2026-09-10 alongside finding #9's allowed-traffic back-fill
+    # and its own missing label (dns_hard_deny existed since finding #25
+    # but was never added here -- both fixed together).
+    "dns_hard_deny": "blocked at the DNS/category layer (AdGuard) -- HTTPS, so the block page itself never loaded",
+    "dns_tier_allowed": "routine DNS-tier activity, sampled -- not reviewed or assigned, just visibility",
 }
 
 
@@ -6912,6 +6920,11 @@ def report():
     filtered_user, filtered_group, filtered_device = _get_report_filter(conn, request.args)
     filter_status = request.args.get("status", "")
     days = _parse_report_days(request.args.get("days"))
+    # Finding #9: routine DNS-tier "allowed" rows (adguard_report_sync.py)
+    # are expected to vastly outnumber every other reason code -- hidden
+    # by default so the Report page stays focused on blocks and
+    # proxy-tier traffic, revealed with this one checkbox.
+    show_routine = bool(request.args.get("show_routine"))
     report_target = (
         f"user:{filtered_user['id']}" if filtered_user else
         f"group:{filtered_group['id']}" if filtered_group else
@@ -6940,6 +6953,8 @@ def report():
         where_sql += " AND allowed = 0"
     elif filter_status == "allowed":
         where_sql += " AND allowed = 1"
+    if not show_routine:
+        where_sql += " AND reason IS NOT 'dns_tier_allowed'"
 
     # Real live-testing feedback (RoadMap.md's dated entry): a blocked row
     # for an unauthenticated device shows "(unauthenticated)" as its
@@ -7007,8 +7022,11 @@ def report():
         series_names=series_names,
         reason_label=_reason_label, to_local=to_local, tz_abbr=tz_abbr,
         report_target=report_target, report_filter_combo=_report_filter_combo(all_users, all_groups, all_devices),
-        filter_status=filter_status, days=days, day_options=REPORT_DAY_OPTIONS,
-        filters_active=bool(filtered_user or filtered_group or filtered_device or filter_status or days != REPORT_DEFAULT_DAYS),
+        filter_status=filter_status, days=days, day_options=REPORT_DAY_OPTIONS, show_routine=show_routine,
+        filters_active=bool(
+            filtered_user or filtered_group or filtered_device or filter_status
+            or days != REPORT_DEFAULT_DAYS or show_routine
+        ),
         redirect_kwargs=_report_redirect_kwargs(request.args),
         resolver_error=db.get_setting(conn, "cr_resolver_last_error"),
         total=total, allowed_total=allowed_total, blocked_total=blocked_total, blocked_pct=blocked_pct,

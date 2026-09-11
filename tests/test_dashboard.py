@@ -1025,6 +1025,55 @@ def test_report_page_shows_dash_for_a_row_with_no_device(client, db_conn):
 
 
 # ============================================================
+# Report: routine DNS-tier activity is hidden unless asked for
+# (RoadMap.md finding #9, 2026-09-10)
+# ============================================================
+
+def test_report_hides_dns_tier_allowed_rows_by_default(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'routine-site.example', NULL, 1, 'dns_tier_allowed')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"routine-site.example" not in resp.data
+
+
+def test_report_show_routine_checkbox_reveals_dns_tier_allowed_rows(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'routine-site.example', NULL, 1, 'dns_tier_allowed')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report?show_routine=1", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "routine-site.example" in body
+    assert "routine DNS-tier activity, sampled" in body  # _reason_label() text
+
+
+def test_report_show_routine_does_not_leak_into_other_status_filters_unexpectedly(client, db_conn):
+    """A dns_tier_allowed row is allowed=1 -- confirms it still respects
+    the ordinary Blocked/Allowed status filter once revealed, it isn't a
+    special third bucket outside that filter."""
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'routine-site.example', NULL, 1, 'dns_tier_allowed')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report?show_routine=1&status=blocked", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"routine-site.example" not in resp.data
+
+
+# ============================================================
 # Report: filter by device/group target (added 2026-08-31, GH #9 --
 # access_log.device_id lets rows with no user_id at all still be
 # filtered/acted on)
