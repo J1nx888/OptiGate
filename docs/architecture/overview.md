@@ -115,6 +115,10 @@ controller/                   Python control-plane container (added 2026-08-30, 
                                 local_network, not just already-known-stale ones -- reuses
                                 active_scan.nudge(); admin-configurable interval/on-off from
                                 the dashboard, re-read live, no restart needed)
+  mdns_lookup.py                 best-effort mDNS reverse-PTR hostname lookup for devices on
+                                the "Devices awaiting login" card (hand-rolled DNS wire format,
+                                no CAP_NET_RAW/library needed -- see its own module docstring);
+                                writes device_bindings.hostname, display only
   adguard_sync.py                build_rules()/build_splice_deny_rules()/
                                 build_category_deny_rules()/build_ech_strip_rules()/
                                 sync_category_subscriptions()/sync_safesearch() -- everything
@@ -359,6 +363,35 @@ take effect everywhere.
   without a controller restart. Capped at 4096 host addresses per
   sweep so a misconfigured huge range degrades gracefully instead of
   hanging or flooding the LAN.
+- **mDNS hostname lookup** (`controller/mdns_lookup.py`, added
+  2026-09-11, project owner's direct request after being asked to scope
+  "pre-authentication" down: "I need to see the device type that is
+  trying to connect... to distinguish between an Amazon Echo and an
+  actual laptop/phone") -- sends a reverse-PTR query (`<reversed-ip>.
+  in-addr.arpa`) to the mDNS multicast group (`224.0.0.251:5353`) with
+  the "QU" bit set (RFC 6762 SS5.4), so a responding device unicasts its
+  answer straight back without this process needing `CAP_NET_RAW` or to
+  join the multicast group at all -- same "no special privilege needed"
+  shape as `active_scan.py`'s own UDP-nudge trick, different protocol.
+  The DNS wire format (query build + response parse, including
+  compression-pointer decompression) is hand-rolled rather than pulling
+  in a third-party mDNS library -- small enough to unit-test directly
+  against crafted byte strings (`tests/test_controller_mdns_lookup.py`)
+  and keeps the dependency footprint where it already was. Every
+  response byte is treated as untrusted network input: bounds-checked,
+  a hard cap on compression-pointer jumps (`_MAX_NAME_JUMPS`) to refuse
+  a hostile/corrupt pointer loop, and any parse failure is swallowed the
+  same as a genuine non-response. Not every device answers -- most
+  smart speakers, including Echoes, don't -- so this is a hint, paired
+  with `common/oui_lookup.py`'s MAC-vendor lookup (a pure offline static
+  lookup against a bundled IEEE OUI snapshot, no networking at all) for
+  the "Manufacturer" column. Both are DISPLAY ONLY on the "Devices
+  awaiting login" card (`device_bindings.hostname`, written by this
+  module) -- never consumed for auto-association; see that column's own
+  schema comment in `common/db.py` for why (the v2 roadmap explicitly
+  rules out hostname/vendor-guessing auto-merge). Rate-limited
+  (`--mdns-lookup-limit` pending devices per `--mdns-lookup-interval`,
+  default 5 per 120s), only probing bindings with no hostname yet.
 - **Auto-gating new devices** (`common/identity.py`'s `record_binding()`,
   added 2026-08-31, Phase 4's first milestone) -- a MAC genuinely never
   seen before now gets a brand-new, unassociated `devices` row

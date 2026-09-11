@@ -8177,15 +8177,56 @@ redesign in a dedicated session, not a live quick-patch**.
      test. Not built. Still worth doing for a device whose *general*
      browsing quality matters under full intercept; revisit after a
      longer soak.
-   - **(d) The classifier** -- **not needed for correctness.** The
-     existing `PLAYBACK_URL_RE` matches the modern
+   - **(d) The classifier** -- **not needed for correctness** (the
+     existing `PLAYBACK_URL_RE` already matched the modern
      `/playback/vN/<id>/web/<platform>/play` shape and `series_resolve`
-     mapped media->series, so the playback call is the hard gate and it
-     held. The redesign (new `UP_NEXT` shape, drop the blanket
-     `^/content/v[0-9]+/` / `^/playback/v[0-9]+/` path rules, fail
-     closed on unknown shapes, deny at series-open not press-play) is
-     now a **UX + defence-in-depth polish**, tracked as finding #7's
-     sibling. Plan in `ANALYSIS.md`.
+     mapped media->series, so the playback call was the hard gate and it
+     held), but was still a real, live gap worth closing: **built
+     2026-09-10**, all four items from `ANALYSIS.md`'s redesign
+     direction. `common/cr_urls.py` gained a new `UP_NEXT` classifier
+     (`/content/v\d+/discover/up_next/<seriesId>` -- the series id is
+     already in the path, so no `series_resolve` round-trip, same direct
+     `user_has_show()` check `SERIES_PAGE` gets) and added
+     `/discover/up_next/` to `GUARDED_MARKERS` so a malformed/future
+     variant fails closed as `BLOCKED_SHAPE` instead of falling through.
+     `proxy/authz_helper.py`'s `_decide_crunchyroll()` routes `UP_NEXT`
+     through the same branch as `SERIES_PAGE`.
+     `defaults/seed_defaults.py`'s `CRUNCHYROLL_PATHS` **dropped the two
+     blanket rules** (`^/playback/v[0-9]+/`, `^/content/v[0-9]+/`) --
+     these had been a live gap the whole time: any request under either
+     prefix the classifier didn't specifically recognize (which,
+     pre-`UP_NEXT`, meant every `up_next` request) fell through to the
+     `OTHER`-kind path-allowlist fallback and was blanket-ALLOWED,
+     regardless of show ownership. Replaced with two narrow rules
+     (`^/content/v[0-9]+/discover/(?!up_next/)` for browse/history/
+     personalized-feed, `^/content/v[0-9]+/[^/]+/watchlist`) -- safe to
+     leave the `discover/` replacement this broad specifically because
+     `UP_NEXT_URL_RE` + the new `GUARDED_MARKERS` entry both intercept a
+     real or malformed `up_next` URL before path rules are ever
+     consulted; the negative lookahead is a third, belt-and-suspenders
+     layer on top of those two. **`common/db.py`'s `_migrate()` gained a
+     matching data-repair migration** (INSERT OR IGNORE alone never
+     removes a row an earlier seed already wrote, and `seed_defaults.py`
+     isn't even run automatically at startup) -- deletes exactly those
+     two literal stale patterns off the Crunchyroll domain specifically
+     and seeds the two narrow replacements, idempotent, runs
+     automatically on every dashboard/controller/proxy startup so prod's
+     existing rows get fixed on the next restart with no manual step.
+     **Deliberately NOT built** (per `ANALYSIS.md`'s own open question,
+     resolved in favor of the lower-risk option): gating plain
+     `CMS_OBJECTS` browse/watchlist-card fetches by show ownership --
+     stays unconditionally allowed, matching v1, since gating it would
+     have broken the catalogue UI for cards a kid is only looking at, not
+     playing; `up_next` + `playback` together are still a complete gate
+     (no manifest reachable for a non-approved series either way).
+     Tests: `tests/test_cr_urls.py` (new `UP_NEXT` shapes, malformed ->
+     `BLOCKED_SHAPE`), `tests/test_helpers_protocol.py` (approval-gated
+     end to end, the blanket-removal regression, the lookahead itself),
+     `tests/test_db_crunchyroll_paths_migration.py` (removes stale rows,
+     seeds replacements, idempotent, never touches an unrelated domain or
+     an admin's own added rule). Not yet live-verified against a real
+     trace (needs the next interception window) -- the household
+     pre-authentication gap below is still the actual blocker to that.
 
    **Remaining before a real rollout:** the household-provisioning
    problem (see the 2026-09-11 section) -- every device that should keep
@@ -8469,9 +8510,9 @@ redesign in a dedicated session, not a live quick-patch**.
    - **Firefox setup friction** -- manual proxy + CA import per device;
      document it, or ship a Firefox `policies.json` / autoconfig.
 
-9. **The Report page has no view of a DNS-tier device's ALLOWED
-   traffic** (owner noticed 2026-09-10: Jacob used his tablet during the
-   window, nothing showed on the Report page). Not a bug -- a coverage
+9. **DONE 2026-09-10 -- The Report page has no view of a DNS-tier
+   device's ALLOWED traffic** (owner noticed 2026-09-10: Jacob used his
+   tablet during the window, nothing showed on the Report page). Not a bug -- a coverage
    gap. `access_log` (the Report page's source) is written by exactly
    two things:
    - the Squid helpers (`authz_helper`/`sni_helper`), which log every
@@ -8508,6 +8549,42 @@ redesign in a dedicated session, not a live quick-patch**.
      no unified filtering/approval UX.
    Leans toward the first, gated on the retention design.
 
+   **Built 2026-09-10, owner picked the first option (extend
+   `adguard_report_sync.py`), 30-day retention, hidden by default.**
+   `correlate_once()` now has a second branch alongside the existing
+   hard-deny back-fill: any querylog entry that got a real answer (not
+   NXDOMAIN/SERVFAIL) and resolves to a device this project tracks
+   writes one `access_log` row, `allowed=1, reason="dns_tier_allowed"`,
+   through the same `logging_util.log_access()` every other writer uses.
+   The `domain` column stores a deliberately coarse "site" key
+   (`_dedupe_site_key()` -- last two dot-separated labels, e.g.
+   `static.crunchyroll.com` -> `crunchyroll.com`; not a real
+   public-suffix-aware registrable-domain computation, this project has
+   no PSL dependency) so a page that fans out to a dozen subdomains
+   collapses into log_access()'s existing 5-minute dedupe window instead
+   of writing a dozen rows -- reused infrastructure, no new bucketing
+   code needed. An untracked IP (no `devices` row bound) writes nothing;
+   unlike the hard-deny path there's no raw-IP fallback here, since the
+   whole point is per-device visibility.
+
+   New `prune_allowed_rows(conn, retention_days=30)` deletes
+   `dns_tier_allowed` rows past that window (never touches an actual
+   block, dns_hard_deny/dns_tier_denied/proxy-tier denials keep forever)
+   -- run once an hour from inside `start()`'s existing poll loop, no new
+   thread. Dashboard's Report page hides `dns_tier_allowed` rows by
+   default (a new `where_sql` clause) behind a "Show routine DNS-tier
+   activity" checkbox (`?show_routine=1`, threaded through
+   `_report_redirect_kwargs()` so approve/dismiss actions preserve it) --
+   they're expected to vastly outnumber every block or proxy-tier row.
+   Also added the `dns_hard_deny` label to `_ACCESS_LOG_REASON_LABELS`
+   (finding #25's own reason code, discovered missing while adding
+   `dns_tier_allowed`'s label alongside it).
+   Tests: `tests/test_adguard_report_sync.py` (allowed-row writing,
+   unknown-device skip, subdomain-collapse dedupe, `prune_allowed_rows`
+   retention + custom window) and `tests/test_dashboard.py` (hidden by
+   default, revealed by the checkbox, still respects the Blocked/Allowed
+   status filter once revealed).
+
    Related, small -- **both DONE 2026-09-10** (`dashboard/captive_portal_server.py`):
    - A successful captive-portal login now writes one `info`
      `system_events` row (`source='captive_portal_login'`,
@@ -8526,8 +8603,8 @@ redesign in a dedicated session, not a live quick-patch**.
      Tests: `test_successful_kid_login_logs_one_info_system_event`,
      `test_blank_form_post_is_not_logged_and_does_not_spend_the_rate_limit_budget`.
 
-10. **A manual mode shift ("Shift mode now") does NOT suppress a
-    `lockout_all` bedtime schedule.** Found 2026-09-10 setting up a
+10. **DONE 2026-09-10 -- A manual mode shift ("Shift mode now") does NOT
+    suppress a `lockout_all` bedtime schedule.** Found 2026-09-10 setting up a
     Crunchyroll test: an active `schedule_overrides` row (an operator
     deliberately shifting a kid into Free Time) is honoured only for
     `is_mode = 1` schedules -- `common/schedule_eval.py`'s
@@ -8547,6 +8624,29 @@ redesign in a dedicated session, not a live quick-patch**.
     decision on whether *every* override kind lifts a lockout or only an
     explicit "free time / unlock" one. Workaround for testing: remove
     the user from the Bedtime schedule, or move its start time past now.
+
+    **Fixed 2026-09-10, second fix candidate chosen (fold `lockout_all`
+    into the same override-aware path).** `common/schedule_eval.py`'s
+    `schedule_is_active_for_target()` now takes the override-aware branch
+    for a schedule that's `is_mode = 1` **OR** `lockout_all = 1`, not
+    just `is_mode` ones -- the rationale being that a full lockout is a
+    total blackout incompatible with being "in" any mode at all, so any
+    active shift override for the target lifts it, regardless of whether
+    that lockout schedule itself was ever flagged as a mode. A standing,
+    non-lockout category-block schedule (the actual safety-net case the
+    `is_mode` gate exists to protect) is completely unaffected -- it's
+    still gated on `is_mode` alone, since `build_category_deny_rules()`
+    only ever looks at `lockout_all = 0` schedules and never reaches the
+    lockout branch at all. `is_full_lockout_active()`'s own docstring
+    updated to match; no data migration needed (prod's Bedtime schedules
+    don't need `is_mode` flipped for this to work now).
+    Tests: `test_override_suppresses_a_non_mode_lockout_all_schedule_too`
+    (new), `test_override_does_not_affect_a_non_mode_category_block_schedule`
+    (renamed/rewritten from the old `..._non_mode_schedule` test, which
+    had been locking in the very behavior just fixed -- it used a
+    `lockout_all=1` schedule by the test helper's own default, so it
+    needed a `lockout_all=0` schedule to keep testing the thing it was
+    actually meant to protect).
 
 ### Dashboard feedback batch (2026-09-10, from interception-window use)
 
@@ -8615,3 +8715,106 @@ vault, not a casual config export -- worth a clearer in-UI warning
 than the current hint text if this ever gets used for routine
 day-to-day backups rather than the disaster-recovery case it was built
 for.
+
+---
+
+## "Pre-authentication" scoped down to device visibility: Manufacturer + Hostname (2026-09-11)
+
+Picking up after findings #10 and #9 (both DONE, above) and the
+classifier polish (finding #1d, also DONE): asked what "finalizing the
+Crunchyroll stuff" should mean next, the project owner picked
+household pre-authentication out of the remaining options -- but on
+scoping it, the actual ask turned out narrower than a login-flow
+redesign: **"I think the only change I need made for
+'pre-authentication' is the ability to see the device type that is
+trying to connect... Device Hostname and Manufacturer. This will help
+me distinguish between an Amazon Echo and an actual laptop/phone."**
+The household-provisioning gap itself (23/~44 devices `is_authenticated
+= 0`, stranding them on the captive portal the moment a real cutover
+runs) is NOT solved by this -- still open, still needs a real
+pre-authentication pass or bulk "mark authenticated" action later.
+This session just makes the "Devices awaiting login" card informative
+enough to act on with confidence.
+
+**Manufacturer -- `common/oui_lookup.py` (new).** A pure, offline
+MAC-prefix -> vendor lookup against a bundled snapshot of the IEEE's
+public registries (MA-L /24, MA-M /28, MA-S /36 -- 53,894 entries,
+downloaded live from `standards-oui.ieee.org` 2026-09-11, stored as
+`common/data/oui_prefixes.tsv`). No network call at lookup time, no
+third-party dependency (stdlib-only, matching `common/`'s existing
+discipline) -- computed fresh per request in `dashboard.py`'s
+`devices()` route into a `pending_manufacturers` dict, same shape as
+the pre-existing `pending_login_attempts` dict. Longest-prefix-match
+(9/7/6 hex chars, in that order) so an MA-S/MA-M carve-out correctly
+overrides its broader parent MA-L block.
+
+**Hostname -- `controller/mdns_lookup.py` (new).** Best-effort mDNS
+reverse-PTR lookup: sends a `<reversed-ip>.in-addr.arpa` PTR query to
+`224.0.0.251:5353` with the RFC 6762 SS5.4 "QU" bit set, so a responding
+device unicasts its answer straight back -- no `CAP_NET_RAW`, no
+multicast group join, same "no special privilege needed" shape as
+`active_scan.py`'s own UDP-nudge trick. **Design call made this
+session, worth flagging**: the AskUserQuestion this started from
+assumed hostname resolution would need a new third-party mDNS library;
+building it, a hand-rolled DNS wire-format encode/parse turned out
+small enough to implement and unit-test directly (crafted byte strings
+in `tests/test_controller_mdns_lookup.py`) without one, so that's what
+shipped instead, keeping the dependency footprint exactly where it
+already was. Every response byte is treated as untrusted network input
+-- bounds-checked reads, a hard cap on compression-pointer jumps
+(`_MAX_NAME_JUMPS = 128`) so a hostile/corrupt pointer loop can't hang
+the lookup, any parse failure swallowed the same as a genuine
+non-response. Not every device answers (most smart speakers, including
+Echoes, don't) -- that's expected, Manufacturer is the fallback signal
+for those. Runs as a new rate-limited background loop in
+`controller/main.py` (`--mdns-lookup-interval` default 120s,
+`--mdns-lookup-limit` default 5 pending devices per cycle, `--no-mdns-lookup`
+to disable), wired the same way as `active_scan_task`/`network_sweep_task`.
+Writes onto a new nullable `device_bindings.hostname` column
+(`common/db.py`'s `_migrate()` gained the matching idempotent
+`ALTER TABLE` for an existing database).
+
+**Both are DISPLAY ONLY, by design, not incidentally.**
+`device_bindings`'s own schema comment already ruled out "hostname/
+vendor guessing" as an auto-merge mechanism (a MAC's `device_id` must
+never be auto-associated to an existing `devices` row from network
+data alone) -- both new modules' docstrings and the new schema comments
+say explicitly that a vendor name or resolved hostname is a hint
+rendered next to a MAC for a human to look at, never consumed by any
+policy decision or association logic. Confirmed this doesn't reopen
+that rule: neither module writes `devices.label`, `device_id`, or
+anything else other than the one new `hostname` column read back
+verbatim by the dashboard.
+
+**Dashboard**: `_DEVICE_LIST_SELECT` gained a `current_hostname`
+subquery (same "most-recently-updated `device_bindings` row for this
+MAC" shape as the pre-existing `current_ip`/`binding_source`
+subqueries). `DEVICES_BODY`'s pending-card table gained Manufacturer
+and Hostname columns between MAC address and Current IP, both sortable
+(`data-sortable`), with an updated hint paragraph explaining what each
+means and that neither is authoritative.
+
+**Shipping**: both Dockerfiles needed `COPY common/*.py` extended --
+`dashboard/Dockerfile` now also `COPY common/data /app/data` (the OUI
+data file `oui_lookup.py` reads at `Path(__file__).parent/"data"/...`,
+resolving correctly in both the flattened container layout and a plain
+repo checkout since `__file__` reflects the real on-disk location
+either way); `controller/Dockerfile` doesn't need it since only
+`dashboard` renders Manufacturer.
+
+**Tests**: `tests/test_oui_lookup.py` (table injection for matching
+logic + a few sanity checks against the real bundled data -- Amazon,
+Apple, Espressif prefixes), `tests/test_controller_mdns_lookup.py`
+(DNS wire-format round-trip, compression-pointer following and
+loop-guard, `_FakeSocket`-based `reverse_lookup()`/`lookup_once()`/
+`run_loop()` tests, same pattern as `test_controller_active_scan.py`),
+`tests/test_db_device_bindings_hostname_migration.py` (fresh-DB has the
+column; a simulated pre-2026-09-11 database gets it added without
+losing existing rows; idempotent across repeated `_migrate()` calls),
+plus three new `test_dashboard.py` cases for the rendered
+Manufacturer/Hostname cells. Full suite green after this work.
+
+**Not yet live-verified** against a real device on the household LAN
+(needs the next interception window, itself still blocked on the
+household pre-authentication gap this explicitly did NOT solve --
+still open, next up whenever the owner wants it).

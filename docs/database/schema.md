@@ -37,6 +37,18 @@ session or two; grep the function/constant names instead.)
   constraint in place, rather than adding a new column, still has no
   supported migration path -- that part of the original caution still
   holds.
+- **`_migrate()` isn't only column additions.** Two exceptions, both
+  documented at length in `_migrate()`'s own code: a full table rebuild
+  for `system_events.severity`'s widened `CHECK` constraint (2026-09-09,
+  SQLite has no `ALTER ... MODIFY CONSTRAINT`), and a data-content repair
+  for the Crunchyroll `domain_paths` rows (2026-09-10, RoadMap.md finding
+  #1d) -- `defaults/seed_defaults.py`'s own `INSERT OR IGNORE` reseed
+  never removes a row an earlier run already inserted, and isn't even run
+  automatically at startup, so `_migrate()` is the one place a
+  now-dangerous seeded row (two blanket allow-paths that had turned into
+  a real security gap) can actually get removed from an existing
+  database automatically. Same idempotent-on-every-startup contract as
+  every column-addition check above.
 - **Called from:** `init_db()` runs on every dashboard request that opens a
   connection (`dashboard.get_db()`) and on every proxy container start
   (`proxy/entrypoint.sh`, inline Python heredoc). It's cheap and
@@ -480,6 +492,7 @@ and `controller/policy_state.py`'s desired-state computation, and (as of
 | `source`         | TEXT    | NOT NULL `CHECK IN ('rtnetlink','snapshot','adguard','bettercap','active_scan')` |
 | `confidence`     | REAL    | NOT NULL DEFAULT 1.0 |
 | `active`         | INTEGER | NOT NULL DEFAULT 1 |
+| `hostname`       | TEXT    | nullable |
 |                  |         | `UNIQUE(mac_address, ipv4_address)` |
 
 A device's IP can change (DHCP renewal) and an IP can be reassigned to a
@@ -506,6 +519,13 @@ precedence live `controller/rtnetlink_listener.py` (wired in by default
 alongside `--db-path`, see `--no-rtnetlink`) -- see
 `docs/security/overview.md` §3 for how these two sources bound the
 remaining DHCP-renewal staleness window.
+`hostname` (added 2026-09-11) is `controller/mdns_lookup.py`'s
+best-effort mDNS reverse-PTR result for this row's `ipv4_address` --
+NULL until/unless that device answers, and (like MAC-vendor lookup,
+`common/oui_lookup.py`) DISPLAY ONLY: never consumed for
+auto-association, purely a hint rendered on the dashboard's "Devices
+awaiting login" card next to the MAC address, matching the "no
+hostname/vendor guessing" rule two paragraphs up.
 Indexed on `device_id` and on `(ipv4_address, active)`.
 
 ### `interception_runtime`
@@ -681,7 +701,12 @@ Deliberately opt-in per schedule rather than "an override suspends
 (Adult, Gambling, etc.) should never be silently lifted just because
 someone shifted a kid into Free Time. `0` (the default) means a schedule
 is evaluated purely by the clock, exactly as before this feature existed
-— see `common/schedule_eval.py`'s `schedule_is_active_for_device()`.
+— see `common/schedule_eval.py`'s `schedule_is_active_for_device()`. A
+`lockout_all = 1` schedule is the one exception to needing `is_mode = 1`
+to be override-eligible at all — see `schedule_overrides`'s own comment
+below (fixed 2026-09-10, finding #10): a full lockout is never treated as
+a standing safety-net the way a category block is, so it's always
+override-aware regardless of this column's value.
 
 ### `schedule_categories`
 Which categories are blocked while a (non-`lockout_all`) schedule is
@@ -704,7 +729,7 @@ alternatives considered.
 | Column        | Type    | Constraints |
 |---|---|---|
 | `id`           | INTEGER | PRIMARY KEY |
-| `schedule_id`  | INTEGER | NOT NULL REFERENCES `schedules(id)` ON DELETE CASCADE -- the schedule being forced active. Must itself have `is_mode = 1` and must already target the row's own user/group/device (via `is_global` or the junction tables above); `dashboard.add_schedule_override()` enforces both before ever inserting a row here. |
+| `schedule_id`  | INTEGER | NOT NULL REFERENCES `schedules(id)` ON DELETE CASCADE -- the schedule being forced active. Must itself have `is_mode = 1` and must already target the row's own user/group/device (via `is_global` or the junction tables above); `dashboard.add_schedule_override()` enforces both before ever inserting a row here. (A `lockout_all = 1, is_mode = 0` schedule can still be *suppressed* by an override targeting some other `is_mode` schedule -- see the `is_mode` column note above -- it just can never be the override's own target, since the picker only ever lists `is_mode` schedules.) |
 | `user_id`      | INTEGER | REFERENCES `users(id)` ON DELETE CASCADE, nullable |
 | `group_id`     | INTEGER | REFERENCES `groups(id)` ON DELETE CASCADE, nullable |
 | `device_id`    | INTEGER | REFERENCES `devices(id)` ON DELETE CASCADE, nullable |
@@ -734,12 +759,20 @@ is a device-aware wrapper around `schedule_is_active()` that both
 `controller/adguard_sync.py`'s `build_category_deny_rules()` (DNS-tier
 category blocks) call instead of the bare clock check — one choke point,
 so an override affects both enforcement paths without either module
-needing its own special case. For an `is_mode` schedule: an active
-override for a device means that schedule is active only if the override
-names it specifically; every *other* `is_mode` schedule targeting the
-same device is forced inactive for the override's duration, regardless of
-the clock ("instead of", not "in addition to"). A non-`is_mode` schedule
-is never affected. `controller/adguard_sync.py`'s
+needing its own special case. For a schedule that's `is_mode = 1` **or**
+`lockout_all = 1`: an active override for a device means that schedule
+is active only if the override names it specifically; every *other*
+such schedule targeting the same device is forced inactive for the
+override's duration, regardless of the clock ("instead of", not "in
+addition to"). A standing, non-lockout category-block schedule (neither
+flag set) is never affected — that's the actual safety-net case the
+opt-in `is_mode` gate exists to protect (see the `is_mode` column note
+above). Fixed 2026-09-10 (RoadMap.md finding #10): until then a
+`lockout_all = 1, is_mode = 0` schedule (prod's "Bedtime") couldn't be
+suppressed by an override at all — a full lockout is a total blackout
+incompatible with being "in" any mode, so it's folded into the same
+override-aware path unconditionally now, not gated on `is_mode`.
+`controller/adguard_sync.py`'s
 `sync_category_subscriptions()` (native AdGuard filter subscriptions for
 over-threshold categories) is the one exception — it can only ever
 enable/disable a filter household-wide, so a per-target override
@@ -863,7 +896,7 @@ From `proxy/authz_helper.py` (HTTP layer, bump-mode domains, `path` always popul
 - `global_domain` / `user_domain` / `group_domain` / `device_domain` -- `decide()`: generic bump-mode domain allowed, via whichever axis `device_domain_reason()` matched first (see the SNI-layer entries above for `group_domain`/`device_domain`'s 2026-08-31 history).
 - `show_requires_user` -- `decide()`: a crunchyroll-kind domain IS authorized (via group/device), but no user resolved for this device at all -- `user_shows` is keyed by `user_id` only, so there's no group/device-level show list to check (added 2026-08-31, alongside the `group_domain`/`device_domain` fix).
 - `blocked_shape` -- `_decide_crunchyroll()`: `cr_urls.classify()` recognized the URL as a shape that's always denied.
-- `show_approved` / `show_not_approved` -- `_decide_crunchyroll()` (both the direct `SERIES_PAGE` case and the resolved `WATCH_PAGE`/`PLAYBACK` case): whether `matching.user_has_show()` found this `series_id` in the user's `user_shows`. Logged once per series id when a request references more than one (e.g. a playback request naming multiple objects).
+- `show_approved` / `show_not_approved` -- `_decide_crunchyroll()` (the direct `SERIES_PAGE`/`UP_NEXT` case -- `UP_NEXT` added 2026-09-10, RoadMap.md finding #1d, carries the series id directly in its URL path just like `SERIES_PAGE` -- and the resolved `WATCH_PAGE`/`PLAYBACK` case): whether `matching.user_has_show()` found this `series_id` in the user's `user_shows`. Logged once per series id when a request references more than one (e.g. a playback request naming multiple objects).
 - `resolution_failed` -- `_decide_crunchyroll()`: `series_resolve.resolve_series_ids()` returned `None` (CMS API unreachable and no usable stale-positive cache entry existed for every requested object id) -- fails closed.
 
 From `dashboard/block_page_server.py` (AdGuard-side block page, added
@@ -886,6 +919,19 @@ added 2026-09-09 -- RoadMap.md item 25):
   call and so was invisible on the Report page. Attributed to the
   querying IP's device/user via `device_identity.*`; `path` always NULL
   (DNS has none).
+- `dns_tier_allowed` -- `correlate_once()`, added 2026-09-10 (RoadMap.md
+  finding #9): written for a querylog entry that got a real (non-NXDOMAIN)
+  answer AND resolves to a device this project tracks -- closes the
+  other coverage gap, where a normal authenticated device that's neither
+  SSL-Bump-enabled nor hitting a blocked category produced zero Report
+  rows at all. `domain` is a deliberately coarse "site" key (last two
+  dot-labels, `_dedupe_site_key()`), not the exact queried name, so
+  `log_access()`'s existing 5-minute dedupe collapses a page's fan-out
+  across many subdomains into one row. `allowed = 1` always. Pruned past
+  30 days by `prune_allowed_rows()` (run hourly from the same poll loop)
+  -- the only `access_log` reason code anything ever deletes; hidden by
+  default on the Report page behind a `?show_routine=1` toggle since
+  it's expected to vastly outnumber every other reason code.
 
 `CMS_OBJECTS`-kind Crunchyroll requests (pure metadata) are never logged at
 all -- they're allowed unconditionally and return before reaching any
@@ -932,10 +978,24 @@ left it.
    in depth for request shapes `cr_urls.classify()` doesn't specifically
    recognize -- login/auth/API endpoints, static assets (`css/js/images`),
    discover/browse pages, versioned API paths (`/subs/v\d+/`,
-   `/playback/v\d+/`, `/accounts/v\d+/`, `/content/v\d+/`, etc.), i18n,
-   skip-events, playhead tracking, and personalization/recommendation rows
-   (`/personalization/v\d+/`, added for GH #4's "Top 10" home-page rows).
-   Carried over from v1's flat `allowed_paths.txt`.
+   `/accounts/v\d+/`, etc.), i18n, skip-events, playhead tracking, and
+   personalization/recommendation rows (`/personalization/v\d+/`, added
+   for GH #4's "Top 10" home-page rows). Carried over from v1's flat
+   `allowed_paths.txt`. **2026-09-10 (RoadMap.md finding #1d): the two
+   original blanket rules, `^/playback/v[0-9]+/` and `^/content/v[0-9]+/`,
+   were removed** -- they'd turned into a live security gap (any request
+   under either prefix the classifier didn't specifically recognize was
+   blanket-allowed regardless of show ownership, not denied). Replaced
+   with `^/content/v[0-9]+/discover/(?!up_next/)` (browse/history/
+   personalized-feed rows -- excludes `up_next`, which `cr_urls`'s own
+   `UP_NEXT` classifier + `GUARDED_MARKERS` entry already gate before
+   path rules are ever consulted) and `^/content/v[0-9]+/[^/]+/watchlist`
+   (accountUuid/watchlist, no id to check). `/playback/v\d+/` needed no
+   replacement at all -- `PLAYBACK_URL_RE` already fully covers it as its
+   own hard-gated `RequestKind`. A `common/db.py` `_migrate()` data-repair
+   migration removes the two stale rows from an already-seeded database
+   (this list's own `INSERT OR IGNORE` re-seed never would) and inserts
+   the two replacements, idempotent, on every startup.
 5. **`DEFAULT_CATEGORIES`** (Phase 8, 10 entries) -- Adult, Gambling,
    Drugs, Fraud & Scams, Facebook, TikTok, Twitter/X, WhatsApp (each with
    a real, live-verified `subscription_url` from

@@ -760,7 +760,31 @@ this dashboard route never talks to either enforcement path directly.
     attributed to the querying IP's device/user via the same
     `device_identity.*` path the Squid helpers use, deduped by
     `log_access()`'s own 5-minute window.
-  - `?status=` (`blocked`/`allowed`) -- unchanged.
+  - **2026-09-10 (RoadMap.md finding #9)**: the same poller also
+    back-fills the ALLOWED half of DNS-tier visibility, `reason =
+    'dns_tier_allowed'` -- previously a normal authenticated device that
+    was neither SSL-Bump-enabled nor hitting a blocked category produced
+    zero Report rows at all. `domain` stores a deliberately coarse
+    "site" key (last two dot-labels, `adguard_report_sync._dedupe_site_key()`)
+    rather than the exact queried name, so a page fanning out to a dozen
+    subdomains collapses into one row via the same 5-minute dedupe
+    instead of a dozen. Only written for a querylog entry that got a
+    real answer (not NXDOMAIN) AND resolves to a device this project
+    tracks -- an untracked IP writes nothing (no per-device visibility
+    to gain, unlike the hard-deny path's raw-IP fallback). A new
+    `adguard_report_sync.prune_allowed_rows()` deletes these rows past a
+    30-day retention window, run once an hour from inside the same poll
+    loop -- an actual block is never pruned by this or anything else.
+    `dns_tier_allowed` rows are excluded from every Report query
+    (`WHERE ... AND reason IS NOT 'dns_tier_allowed'`) unless
+    `?show_routine=1` is set (a new "Show routine DNS-tier activity"
+    checkbox in the filter form, threaded through
+    `_report_redirect_kwargs()` so approve/dismiss actions preserve it)
+    -- expected to vastly outnumber every block or proxy-tier row, so
+    hidden by default.
+  - `?status=` (`blocked`/`allowed`) -- unchanged, and still applies on
+    top of the `show_routine` exclusion above (both are separate `AND`
+    clauses on the same shared `where_sql`).
   - **Who/what filter, reworked 2026-08-31 (GH #9)**: the plain
     `<select name="user">` was replaced with the same shared combobox
     widget the Domains page uses (`_report_filter_combo()`, mirrors
@@ -868,6 +892,23 @@ text here still said "not built" until now).
   pagination-independence above. `search_query_args` (`{"q": search}`
   or `{}`) threads `q` through every Prev/Next link and the per-page
   form.
+  **Enriched 2026-09-11** (RoadMap.md, project owner's direct request,
+  after being asked to scope "pre-authentication" down to "let me see
+  the device type that's trying to connect"): the pending card gains
+  **Manufacturer** and **Hostname** columns. Manufacturer is
+  `oui_lookup.vendor_for_mac()` -- a pure, offline MAC-prefix lookup
+  against a bundled IEEE OUI snapshot, computed fresh per request into
+  a `pending_manufacturers` dict (same shape as the pre-existing
+  `pending_login_attempts` dict) and needing no `device_bindings` row at
+  all, since it only depends on the MAC address itself. Hostname reads
+  `current_hostname`, a new subquery on `_DEVICE_LIST_SELECT` (same
+  "most-recently-updated `device_bindings` row for this MAC" shape as
+  `current_ip`/`binding_source`) fed by `controller/mdns_lookup.py`'s
+  background mDNS reverse-PTR probing -- NULL for any device that
+  hasn't answered (most smart speakers, including Echoes, never do).
+  Both are display-only hints, never fed back into any policy decision
+  or auto-association (see `device_bindings.hostname`'s own schema
+  comment in `common/db.py` for why).
 - `POST /devices/add` -> `add_device()` -- form fields `mac_address`
   (validated/normalized via `normalize_mac()`), `label` (optional),
   `assignment` (parsed by `_parse_device_assignment()` into a `(user_id,

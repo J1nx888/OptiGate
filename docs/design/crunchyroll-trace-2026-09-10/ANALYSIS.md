@@ -184,51 +184,72 @@ series → `matching.user_has_show()`.
 ## Redesign direction (for the dedicated session)
 
 Prereqs (must land first, see TL;DR): CR bump reliable on the device +
-`host_verify_strict off`.
+`host_verify_strict off`. **Both confirmed live 2026-09-11.**
 
-Then, in `common/cr_urls.py` + `proxy/authz_helper.py` +
-`defaults/seed_defaults.py` + a live-DB `domain_paths` migration:
+**Built 2026-09-10 (RoadMap.md finding #1d)**, in `common/cr_urls.py` +
+`proxy/authz_helper.py` + `defaults/seed_defaults.py` + a `common/db.py`
+`_migrate()` data-repair migration (not yet live-verified against a real
+trace -- needs the next interception window, currently blocked on the
+household pre-authentication gap, not on this code):
 
-1. **New classifier shape `UP_NEXT`** — regex
+1. **New classifier shape `UP_NEXT`** — DONE. Regex
    `^https://www\.crunchyroll\.com/content/v\d+/discover/up_next/([A-Za-z0-9]+)`
-   → series id in group 1 → check `matching.user_has_show(user_id, id)`
-   directly (no resolver call).
-2. **`CMS_OBJECTS` must stop being blanket-allow.** Today
-   `_decide_crunchyroll` returns `True` for it ("metadata only, matches
-   v1"). Change: resolve every id via `series_resolve.resolve_series_ids`
-   (which itself calls `/content/v2/cms/objects/` — guard against the
-   helper's own call re-entering by keeping the helper's `_OPENER` proxy
-   bypass, already in place) and check each. Allow a `series`-type id
-   whose own id is approved; deny if any id resolves to a non-approved
-   series. Careful: the browse/watchlist/home rows also batch-fetch
-   objects for cards the user is only *looking at*, not playing — decide
-   whether "viewing a card for a non-approved show" should be denied
-   (breaks the catalogue UI) or allowed (only gate the play path).
-   Leaning: gate `up_next` + the playback/streams call; leave plain
-   `cms/objects` browse fetches allowed.
-3. **New classifier shape `PLAYBACK`** — regex
-   `^https://www\.crunchyroll\.com/playback/v\d+/([A-Za-z0-9]+)/`
-   → media id in group 1 → `series_resolve.resolve_series_ids([id])` →
-   `matching.user_has_show()`. This is the hard gate: no manifest, no
-   video. Fail closed on resolution failure (same as v1's contract).
-4. **Drop the blanket `^/content/v[0-9]+/` and `^/playback/v[0-9]+/`
-   path rules** for domain 27. Replace with narrow allows for the
-   genuinely id-free endpoints (`/content/v2/discover/browse`,
-   `/content/v2/discover/*/history`, `/content/v2/*/watchlist`,
-   `/content/v2/discover/*/…` personalised rows, `/f/v1/`,
-   `/personalization/v2/`, `/subs/`, `/accounts/`, `/auth/`,
-   `/config-delta/`, `/metal/v1/`, static). Everything else on
-   `crunchyroll.com` → deny-by-default, so an unrecognised playback shape
-   fails closed.
-5. Tests in `tests/test_cr_urls.py` + `tests/test_helpers_protocol.py`
-   against every shape above (`up_next/<series>`, `cms/objects/<ids>`,
-   `playback/vN/<media>/web/<platform>/play`, and the id-free browse
-   endpoints), plus the "browse a non-approved show's card without
-   playing" case whichever way #2 is decided.
+   → series id in group 1 → checks `matching.user_has_show(user_id, id)`
+   directly (no resolver call). `/discover/up_next/` also added to
+   `cr_urls.GUARDED_MARKERS` so a malformed/future variant fails closed
+   as `BLOCKED_SHAPE` rather than falling through to `OTHER`.
+2. **`CMS_OBJECTS` stays blanket-allow — decided, not changed.** Went
+   with the "leaning" below rather than gating it: `_decide_crunchyroll`
+   still returns `True` unconditionally for `CMS_OBJECTS` ("metadata
+   only, matches v1"). The browse/watchlist/home rows batch-fetch
+   objects for cards a kid is only *looking at*, not playing — gating
+   that would deny-and-break the catalogue UI for no real security
+   benefit, since `up_next` + `playback` together already form a
+   complete gate (see the coverage note below, unchanged). **Leaning
+   taken: gate `up_next` + the playback call; leave plain `cms/objects`
+   browse fetches allowed.**
+3. **New classifier shape `PLAYBACK`** — already existed before this
+   session (confirmed working live 2026-09-11, see RoadMap's "Live-
+   verified" table) — `PLAYBACK_URL_RE` already matched the modern
+   `/playback/v\d+/<id>/web/<platform>/play` shape end to end. No change
+   needed here.
+4. **Dropped the blanket `^/content/v[0-9]+/` and `^/playback/v[0-9]+/`
+   path rules** — DONE, `defaults/seed_defaults.py`'s `CRUNCHYROLL_PATHS`.
+   Replaced with two narrower allows instead of the longer id-free list
+   originally sketched here: `^/content/v[0-9]+/discover/(?!up_next/)`
+   (covers browse, history, and the personalised/home-feed rows in one
+   rule, safe specifically because `UP_NEXT_URL_RE` + the new
+   `GUARDED_MARKERS` entry both intercept a real or malformed `up_next`
+   URL before path rules are ever consulted — the lookahead is a third,
+   belt-and-suspenders layer on top of those two) and
+   `^/content/v[0-9]+/[^/]+/watchlist` (accountUuid/watchlist, no id to
+   check). `/metal/v1/` from the original sketch was deliberately NOT
+   added -- never actually observed in the 2026-09-10 trace or a live
+   probe, and adding an unverified allow rule would cut against the
+   whole point of this change (removing speculative blanket allows); add
+   it for real if a live trace ever shows it denied. A live-DB migration
+   (`common/db._migrate()`) removes the two stale rows and seeds the
+   narrow replacements on every existing database automatically, since
+   `seed_defaults.seed()`'s own `INSERT OR IGNORE` never removes what an
+   earlier run already inserted and isn't even run automatically at
+   startup.
+5. **Tests** — DONE: `tests/test_cr_urls.py` (new `UP_NEXT` shapes,
+   normalization, malformed → `BLOCKED_SHAPE`), `tests/test_helpers_protocol.py`
+   (`up_next` approval-gated end to end via `authz_helper.decide()`, the
+   blanket-removal regression against the new narrow rules, the negative
+   lookahead confirmed directly against `matching.path_allowed()`), and
+   the new `tests/test_db_crunchyroll_paths_migration.py` (migration
+   removes stale rows + seeds replacements, idempotent across repeated
+   calls, never touches an unrelated domain's identical pattern or an
+   admin's own hand-added rule, no-ops when no Crunchyroll domain exists
+   at all). The "browse a non-approved show's card without playing" case
+   from #2 above needed no new test — nothing about `CMS_OBJECTS` changed.
 
-**Coverage note:** with `up_next` + `cms/objects` + `playback` all gated
-and the blanket path rules gone, a non-approved series has no path to a
-manifest: the player can't get `up_next` data, can't fetch the episode
-object, and the `playback` call itself is denied. The `playback` gate
-alone is sufficient for correctness; the other two are defence-in-depth
-+ a cleaner UX (deny at series-open, not at press-play).
+**Coverage note:** with `up_next` + `playback` both gated and the
+blanket path rules gone, a non-approved series has no path to a
+manifest: the player can't get `up_next` data (denied outright), and the
+`playback` call itself is denied even if the player somehow got an
+episode id another way (e.g. `cms/objects` browse metadata, still
+allowed). The `playback` gate alone is sufficient for correctness;
+`up_next` is defence-in-depth + a cleaner UX (deny at series-open, not
+at press-play).
