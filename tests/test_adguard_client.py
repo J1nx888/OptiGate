@@ -38,6 +38,24 @@ def _json_response(payload) -> FakeResponse:
     return FakeResponse(json.dumps(payload).encode("utf-8"))
 
 
+class StatefulFakeResponse(FakeResponse):
+    """Like FakeResponse, but tracks a read position -- matching real
+    http.client.HTTPResponse semantics, where successive .read(n) calls
+    continue from where the last one left off. adguard_client._request's
+    truncation check relies on a second .read(1) call seeing whatever
+    comes AFTER the first MAX_RESPONSE_BYTES, so the plain stateless
+    FakeResponse (which always slices from byte 0) can't exercise it."""
+
+    def __init__(self, body: bytes):
+        super().__init__(body)
+        self._pos = 0
+
+    def read(self, n: int = -1) -> bytes:
+        chunk = self._body[self._pos:] if n is None or n < 0 else self._body[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+
 def test_get_custom_rules_returns_user_rules(monkeypatch):
     captured = {}
 
@@ -321,6 +339,27 @@ def test_get_filters_status_rejects_a_response_missing_the_filters_list(monkeypa
     monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: _json_response({}))
     with pytest.raises(adguard_client.AdGuardError, match="filters"):
         adguard_client.get_filters_status("http://127.0.0.1:3000", "admin", "x")
+
+
+def test_request_raises_a_clear_error_on_a_truncated_response(monkeypatch):
+    """Real production incident (2026-09-11): AdGuard's
+    /control/filtering/status response grew past the old 1 MiB cap,
+    response.read(MAX_RESPONSE_BYTES) silently truncated it, and the
+    truncated body fed to json.loads() failed with a confusing
+    "Unterminated string" error instead of a clear "too large" one."""
+    oversized_body = b'{"filters": [' + b"1" * adguard_client.MAX_RESPONSE_BYTES + b"]}"
+    monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: StatefulFakeResponse(oversized_body))
+    with pytest.raises(adguard_client.AdGuardError, match="exceeded"):
+        adguard_client.get_filters_status("http://127.0.0.1:3000", "admin", "x")
+
+
+def test_request_does_not_false_positive_on_a_response_exactly_at_the_cap(monkeypatch):
+    exact_body = json.dumps({"filters": []}).encode("utf-8")
+    padded = exact_body + b" " * (adguard_client.MAX_RESPONSE_BYTES - len(exact_body))
+    monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: StatefulFakeResponse(padded))
+    # Trailing whitespace inside the cap is valid JSON and must not raise.
+    filters = adguard_client.get_filters_status("http://127.0.0.1:3000", "admin", "x")
+    assert filters == []
 
 
 def test_add_filter_url_posts_the_expected_body(monkeypatch):

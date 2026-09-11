@@ -90,7 +90,16 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 DEFAULT_TIMEOUT = 5.0
-MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+# Raised from 1 MiB (2026-09-11, live production incident): a real
+# household's /control/filtering/status response -- which grows with
+# every subscription filter's rule count and description, unbounded --
+# crossed 1 MiB once enough over-threshold subscription categories
+# existed, and response.read(MAX_RESPONSE_BYTES) silently truncated it
+# instead of erroring, producing a confusing "malformed JSON" failure
+# from json.loads() on a body cut off mid-string. 16 MiB gives real
+# headroom; _request() below now also detects truncation explicitly
+# instead of ever passing a possibly-cut-off body to a JSON parser.
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 # Bypass environment proxy variables -- this client always talks
 # directly to AdGuard Home's own control port, never through Squid or
@@ -151,7 +160,13 @@ def _request(
     request = Request(url, data=data, headers=headers, method=method)
     try:
         with _OPENER.open(request, timeout=timeout) as response:
-            return response.read(MAX_RESPONSE_BYTES)
+            body = response.read(MAX_RESPONSE_BYTES)
+            if len(body) == MAX_RESPONSE_BYTES and response.read(1):
+                raise AdGuardError(
+                    f"response from {url} exceeded the {MAX_RESPONSE_BYTES}-byte cap -- "
+                    "refusing to parse a possibly-truncated body"
+                )
+            return body
     except HTTPError as exc:
         detail = exc.read(300).decode("utf-8", errors="replace")
         raise AdGuardError(f"HTTP {exc.code} from {url}: {detail}", status_code=exc.code) from exc
