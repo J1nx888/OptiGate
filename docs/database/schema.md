@@ -1094,18 +1094,38 @@ left it.
    Drugs, Fraud & Scams, Facebook, TikTok, Twitter/X, WhatsApp (each with
    a real, live-verified `subscription_url` from
    [The Block List Project](https://github.com/blocklistproject/Lists)),
-   plus AI and Weapons (`subscription_url=None` -- no public blocklist
-   exists for either, manual-curation-only). **None are seeded
-   `is_global`** -- the row existing blocks nothing on its own; an admin
-   still has to turn one on and choose who it applies to from the
+   plus AI (see below) and Weapons (`subscription_url=None` -- no public
+   blocklist exists for it at all, manual-curation-only). **None are
+   seeded `is_global`** -- the row existing blocks nothing on its own; an
+   admin still has to turn one on and choose who it applies to from the
    Categories page. **No `category_domains` rows are seeded for the
    subscription-backed categories** -- those only appear once something
    actually calls `common/category_fetch.py`'s `fetch_and_sync_category()`
    (the controller's own daily background loop, or the dashboard's "Sync
    now" button) -- confirmed live: a real, non-mocked sync of the seeded
    WhatsApp URL fetched 226 real domains end-to-end.
-   **AI is the one exception**: it has no `subscription_url` for
-   `category_fetch.py` to sync from, so instead `seed()` inserts a
+   **2026-09-11 (RoadMap.md, project owner's request to rebase this list
+   onto the new "Add category from catalog" v2fly integration)**: every
+   category above was checked against v2fly/domain-list-community's own
+   118-entry catalog before anything was changed. Only **AI** actually
+   had a clean equivalent (v2fly's "AI Services", resolving live to 179
+   real domains) with no tradeoff, and is now seeded with that as a real
+   `subscription_url` -- see the next paragraph for how this coexists
+   with its pre-existing manual snapshot. The other five decisions were
+   deliberate, not oversights: **Adult** stays on BlockListProject
+   (v2fly's own Porn category resolves to only ~6,500 domains, a ~99%
+   coverage drop from BlockListProject's current ~953,000, for the
+   single most safety-critical category here); **Gambling/Drugs/Fraud &
+   Scams/Weapons** have no v2fly equivalent at all; **Facebook/TikTok/
+   Twitter-X/WhatsApp** stay as four separate categories because v2fly
+   only offers one combined "Social Media" category, which would lose
+   per-platform toggling if substituted (that combined category is still
+   available to any admin manually, via the Categories page's own "Add
+   from catalog" picker). See `defaults/seed_defaults.py`'s own comment
+   block above `DEFAULT_CATEGORIES` for the full writeup -- don't
+   revisit any of these six without a specific new reason.
+   **AI is the one category with both kinds of source**: alongside its
+   new v2fly `subscription_url`, `seed()` ALSO still inserts a
    **one-time manual snapshot** of 1,195 domains straight into
    `category_domains` (`source='manual'`), from
    [`defaults/ai_sites_seed.py`](../../defaults/ai_sites_seed.py) --

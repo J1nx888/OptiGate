@@ -9207,3 +9207,79 @@ resolved the real 76-file include chain into 858 real domains.
 **Not done, explicitly deferred**: rebasing `defaults/seed_defaults.py`'s
 own fresh-install category seed set on this catalog -- owner wants to
 revisit this later, not part of this change.
+
+---
+
+## `defaults/seed_defaults.py` rebased onto the v2fly catalog -- but not fully (2026-09-11)
+
+Picking up the deferred item above: "rebase seed_defaults.py on the
+catalog too." Checked every one of the 10 default categories against
+v2fly's real 118-entry catalog before changing anything, rather than
+assuming a clean 1:1 swap:
+
+- **Adult**: v2fly's own "Porn" (`category-porn`) resolves live to
+  only ~6,500 domains vs. BlockListProject's current
+  ~953,000 for Adult -- a ~99% coverage drop for the single most
+  safety-critical category here. **Flagged to the owner before doing
+  anything**; explicit call: not worth it, left unchanged.
+- **Gambling / Drugs / Fraud & Scams / Weapons**: v2fly has no
+  equivalent category for any of these four at all (checked the full
+  118-entry list, not assumed). **Flagged**; explicit call: keep all
+  four on their current sources (or, for Weapons, no source at all)
+  rather than drop real protection with nothing to replace it.
+- **Facebook / TikTok / Twitter-X / WhatsApp**: v2fly only offers one
+  combined "Social Media" category, not per-service ones -- collapsing
+  these four would lose the ability to toggle one platform without
+  touching the others. **Flagged**; explicit call: keep them separate.
+- **AI**: the one category that WAS a clean win. v2fly's "AI Services"
+  (`category-ai-!cn`) resolves live to 179 real domains -- a strict
+  upgrade over the previous `subscription_url=None` (manual-curation-
+  only). **Rebased.** The pre-existing one-time manual snapshot
+  (`defaults/ai_sites_seed.py`, 1,195 domains) stays seeded exactly as
+  it was -- a `manual` row and a `subscription` row-to-be coexist fine
+  on the same category, same as any other category with both.
+
+**Built**: `defaults/seed_defaults.py` now imports `category_catalog_sync`
+and uses `category_catalog_sync.resolve_subscription_url("category-ai-!cn")`
+for AI's `subscription_url` (a pure string function, no network call at
+import/seed time). A long comment block above `DEFAULT_CATEGORIES`
+records all six decisions (the one rebase, the five explicit non-
+rebases) with the live-checked numbers behind each, so a future session
+doesn't have to re-derive or re-litigate them from scratch. Only
+affects genuinely NEW installs going forward -- `seed()`'s own
+`INSERT OR IGNORE` idempotency means an already-seeded household's
+existing "AI" category (or any other) is completely untouched; this
+never retroactively changes anything for the real production household.
+
+**Real gap found while writing tests, not a code bug**: `defaults/`
+already had a full test file for this module
+(`tests/test_seed_idempotent.py`, missed at first because it isn't
+named `test_seed_defaults.py`) -- two of its existing tests broke
+against the AI change, correctly: `test_subscription_categories_have_
+no_domains_until_first_sync` used to assume EVERY category with a
+`subscription_url` has zero `category_domains` until synced, which
+stopped being true for AI specifically now that it has both a
+subscription source AND its pre-existing manual snapshot (1,195 rows,
+immediately present). Fixed by excluding AI from that specific check
+and adding a dedicated test for its hybrid case; the other test simply
+needed its expected `subscription_url` updated from `None` to the new
+v2fly URL. Added 4 new regression-guard tests for the five explicit
+non-rebase decisions (one test covers three of the four no-equivalent
+categories together). 17 tests total in that file, all passing.
+
+**Also flagged separately, out of scope for this change**: while
+debugging the above, found that `tests/conftest.py`'s `block_network`
+safety-net fixture only patches `cr_api._OPENER.open`, with a comment
+claiming that's the only network entry point in the codebase -- stale
+since `common/category_fetch.py` gained its own independent `_OPENER`
+this same session (reused by `category_catalog_sync.py`). Every real
+test in that area already explicitly monkeypatches it, so nothing is
+actually broken today, but the shared fixture no longer truly covers
+it. Spawned as a separate background-task suggestion rather than fixed
+inline here (test-infrastructure hardening, unrelated to this change).
+
+Full suite: 1337 passed / 34 skipped (up from 1333 -- net +4 after
+fixing 2 pre-existing tests and adding 4 new regression guards; the
+separate `test_seed_defaults.py` this work initially added was folded
+into the existing `test_seed_idempotent.py` instead once that file was
+found, to keep one test file per source file).
