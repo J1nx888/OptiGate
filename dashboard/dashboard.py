@@ -47,6 +47,7 @@ import cr_api
 import db
 import matching
 import optigate_rewrite
+import oui_lookup
 import rate_limit
 import schedule_eval
 import system_events
@@ -3289,10 +3290,12 @@ DEVICES_BODY = """
 </p>
 <div class="table-scroll">
 <table data-sortable>
-  <tr><th data-sort>MAC address</th><th data-sort="ip">Current IP</th><th data-sort="date">First seen</th><th data-sort="date">Last seen</th><th data-sort>Seen via</th><th data-sort="num">Login attempts</th><th></th></tr>
+  <tr><th data-sort>MAC address</th><th data-sort>Manufacturer</th><th data-sort>Hostname</th><th data-sort="ip">Current IP</th><th data-sort="date">First seen</th><th data-sort="date">Last seen</th><th data-sort>Seen via</th><th data-sort="num">Login attempts</th><th></th></tr>
   {% for d in pending_devices %}
   <tr>
     <td><code>{{ d.mac_address }}</code></td>
+    <td>{{ pending_manufacturers.get(d.mac_address) or '&mdash;' }}</td>
+    <td>{{ d.current_hostname or '&mdash;' }}</td>
     <td>{{ d.current_ip or '&mdash;' }}</td>
     <td>{{ d.created_at }}</td>
     <td>{{ d.network_last_seen or '&mdash;' }}</td>
@@ -3336,6 +3339,13 @@ DEVICES_BODY = """
   someone tried and couldn't get in, not that they're not trying.
   "Current IP"/"Last seen"/"Seen via" come from the network's own
   observation of this MAC, independent of anything an admin has entered.
+  "Manufacturer" is looked up from the MAC address itself (offline,
+  no network call); "Hostname" is whatever the device answers with,
+  if anything, to a best-effort background mDNS query -- most laptops
+  and phones respond, most smart speakers and simple IoT gadgets don't,
+  so a blank Hostname doesn't mean anything is wrong. Neither is ever
+  used to decide anything automatically -- they're just here to help
+  you tell devices apart.
 </p>
 </div>
 {% endif %}
@@ -5420,7 +5430,13 @@ _DEVICE_LIST_SELECT = (
     "(SELECT last_seen_at FROM device_bindings WHERE mac_address = d.mac_address "
     " ORDER BY last_seen_at DESC LIMIT 1) AS network_last_seen, "
     "(SELECT source FROM device_bindings WHERE mac_address = d.mac_address "
-    " ORDER BY last_seen_at DESC LIMIT 1) AS binding_source "
+    " ORDER BY last_seen_at DESC LIMIT 1) AS binding_source, "
+    # Best-effort mDNS reverse-PTR result for the same "current" binding
+    # row (controller/mdns_lookup.py, 2026-09-11) -- NULL until/unless
+    # that device actually answers an mDNS query. Display only, see
+    # common/db.py's device_bindings.hostname schema comment.
+    "(SELECT hostname FROM device_bindings WHERE mac_address = d.mac_address "
+    " ORDER BY last_seen_at DESC LIMIT 1) AS current_hostname "
     "FROM devices d "
     "LEFT JOIN users u ON u.id = d.user_id "
     "LEFT JOIN groups g ON g.id = d.group_id "
@@ -5511,6 +5527,15 @@ def devices():
         row["mac_address"]: _failed_login_attempts(conn, row["mac_address"])
         for row in pending_devices
     }
+    # Manufacturer (common/oui_lookup.py, 2026-09-11) is a pure function
+    # of the MAC address itself -- no DB storage needed, computed fresh
+    # here same as pending_login_attempts above. current_hostname (the
+    # other half of "let me see the device type") already comes back on
+    # each row via _DEVICE_LIST_SELECT's own subquery.
+    pending_manufacturers = {
+        row["mac_address"]: oui_lookup.vendor_for_mac(row["mac_address"])
+        for row in pending_devices
+    }
     any_devices_exist = bool(conn.execute("SELECT EXISTS(SELECT 1 FROM devices) AS c").fetchone()["c"])
     search_query_args = {"q": search} if search else {}
     return render(
@@ -5519,6 +5544,7 @@ def devices():
             DEVICES_BODY, devices=rows, pending_devices=pending_devices, groups=all_groups,
             assignment_combo=_assignment_combo(all_users, all_groups), current="",
             pending_login_attempts=pending_login_attempts,
+            pending_manufacturers=pending_manufacturers,
             device_count=device_count, page=page, per_page=per_page, total_pages=total_pages,
             page_size_options=LIST_PAGE_SIZE_OPTIONS,
             range_start=0 if device_count == 0 else (page - 1) * per_page + 1,

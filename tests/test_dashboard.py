@@ -3535,6 +3535,47 @@ def test_pending_devices_show_network_info_from_device_bindings(client, db_conn)
     assert b"rtnetlink" in resp.data
 
 
+def test_pending_devices_show_manufacturer_from_mac_prefix(client, db_conn):
+    # RoadMap.md 2026-09-11: project owner's request to see device type
+    # on this card. Manufacturer is a pure MAC-prefix lookup (no
+    # device_bindings row needed at all) -- 84:28:59 is a real
+    # Amazon-registered OUI (see common/data/oui_prefixes.tsv).
+    _add_pending_device(db_conn, "84:28:59:aa:bb:cc")
+
+    resp = client.get("/devices", headers=_auth_header())
+
+    assert b"Amazon Technologies Inc." in resp.data
+
+
+def test_pending_devices_show_unknown_manufacturer_as_a_dash(client, db_conn):
+    # 02:00:00 is the classic locally-administered test prefix -- never
+    # a real IEEE assignment, so the lookup must fail soft rather than
+    # show a wrong/blank cell.
+    _add_pending_device(db_conn, "02:00:00:aa:bb:cc")
+
+    resp = client.get("/devices", headers=_auth_header())
+
+    assert b"Devices awaiting login (1)" in resp.data
+    assert b"&mdash;" in resp.data
+
+
+def test_pending_devices_show_resolved_mdns_hostname(client, db_conn):
+    # controller/mdns_lookup.py writes this onto the device's current
+    # (most-recently-seen) device_bindings row -- same subquery
+    # current_ip/binding_source already use.
+    _add_pending_device(db_conn, "aa:bb:cc:dd:ee:60")
+    db_conn.execute(
+        "INSERT INTO device_bindings (device_id, mac_address, ipv4_address, first_seen_at, last_seen_at, "
+        "source, active, hostname) SELECT id, mac_address, '192.168.1.88', '2026-09-11T00:00:00Z', "
+        "'2026-09-11T12:00:00Z', 'rtnetlink', 1, 'Kids-Tablet' FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:60'"
+    )
+    db_conn.commit()
+
+    resp = client.get("/devices", headers=_auth_header())
+
+    assert b"Kids-Tablet" in resp.data
+
+
 def test_pending_devices_show_none_yet_with_no_failed_logins(client, db_conn):
     _add_pending_device(db_conn, "aa:bb:cc:dd:ee:47")
     resp = client.get("/devices", headers=_auth_header())

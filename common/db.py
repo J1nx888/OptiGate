@@ -426,6 +426,14 @@ CREATE INDEX IF NOT EXISTS idx_schedule_overrides_expires ON schedule_overrides(
 --       pending binding awaiting a human association; ON DELETE SET
 --       NULL means deleting a `devices` row later returns its
 --       bindings to pending rather than discarding the observation.
+--   hostname: nullable, best-effort mDNS reverse-PTR result for this
+--       specific IP (controller/mdns_lookup.py, added 2026-09-11 --
+--       RoadMap.md, project owner's request to see device type on the
+--       "Devices awaiting login" card). DISPLAY ONLY, same rule as
+--       vendor lookup (see common/oui_lookup.py's module docstring):
+--       never consumed for auto-association, only ever rendered next
+--       to a MAC for a human to look at. Left NULL if the device never
+--       answers (most IoT gear, including most smart speakers).
 CREATE TABLE IF NOT EXISTS device_bindings (
     id            INTEGER PRIMARY KEY,
     device_id     INTEGER REFERENCES devices(id) ON DELETE SET NULL,
@@ -436,6 +444,7 @@ CREATE TABLE IF NOT EXISTS device_bindings (
     source        TEXT NOT NULL CHECK (source IN ('rtnetlink', 'snapshot', 'adguard', 'bettercap', 'active_scan')),
     confidence    REAL NOT NULL DEFAULT 1.0,
     active        INTEGER NOT NULL DEFAULT 1,
+    hostname      TEXT,
     UNIQUE(mac_address, ipv4_address)
 );
 
@@ -650,6 +659,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
     if group_columns and "ignored" not in group_columns:
         conn.execute("ALTER TABLE groups ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0")
+
+    binding_columns = {row["name"] for row in conn.execute("PRAGMA table_info(device_bindings)")}
+    if binding_columns and "hostname" not in binding_columns:
+        # 2026-09-11: controller/mdns_lookup.py's best-effort mDNS
+        # reverse-PTR result -- see this column's own schema comment
+        # above for why it's display-only.
+        conn.execute("ALTER TABLE device_bindings ADD COLUMN hostname TEXT")
 
     # system_events.severity's CHECK constraint (added 2026-09-09, see
     # that column's own schema comment for the 'info' severity's

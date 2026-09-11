@@ -56,6 +56,7 @@ import adguard_discovery
 import adguard_sync
 import category_fetch
 import discovery
+import mdns_lookup
 import network_sweep
 import readiness
 import rtnetlink_listener
@@ -123,6 +124,8 @@ def run(
     active_scan_limit: int = 5,
     category_fetch_interval: float | None = None,
     enable_network_sweep: bool = False,
+    mdns_lookup_interval: float | None = None,
+    mdns_lookup_limit: int = 5,
 ) -> None:
     """The main control loop. Runs until SIGTERM/SIGINT.
 
@@ -218,6 +221,18 @@ def run(
     This parameter is only the process-level "start this subsystem at
     all" switch (mirroring enable_rtnetlink's own on/off-only shape,
     not active_scan_interval's configurable-interval shape).
+
+    mdns_lookup_interval, if given (not None), starts
+    controller/mdns_lookup.py's periodic mDNS reverse-PTR hostname
+    lookup on its own background thread and its own DB connection (same
+    reasoning as discovery_interval above) -- 2026-09-11, project owner's
+    request to see a connecting device's type on the "Devices awaiting
+    login" card. Requires no adguard_url/credentials or CAP_NET_RAW
+    (same shape as active_scan_interval above) -- it only sends a plain
+    UDP query to the mDNS multicast group and writes any resolved
+    hostname onto the relevant device_bindings row. mdns_lookup_limit
+    caps how many not-yet-resolved pending devices get probed per
+    cycle, same rate-limiting reasoning as active_scan_limit.
 
     block_page_ip, if given, is threaded through to
     adguard_sync.build_rules() so hard-deny rules also carry a
@@ -455,6 +470,13 @@ def run(
         _on_error, _on_success = _events("network_sweep", "active network sweep failed: %s")
         network_sweep_task = network_sweep.run_loop(on_error=_on_error, on_success=_on_success)
 
+    mdns_lookup_task = None
+    if mdns_lookup_interval is not None:
+        _on_error, _on_success = _events("mdns_lookup", "mDNS hostname lookup failed: %s")
+        mdns_lookup_task = mdns_lookup.run_loop(
+            mdns_lookup_interval, mdns_lookup_limit, on_error=_on_error, on_success=_on_success
+        )
+
     sdnotify.ready()
 
     def _reconnect(reason: str) -> None:
@@ -510,6 +532,8 @@ def run(
             category_fetch_task.stop()
         if network_sweep_task is not None:
             network_sweep_task.stop()
+        if mdns_lookup_task is not None:
+            mdns_lookup_task.stop()
         try:
             client.shutdown("controller_requested")
         except WorkerConnectionError:
@@ -824,6 +848,25 @@ def main(argv: list[str] | None = None) -> int:
         "changed live without a redeploy.",
     )
     parser.add_argument(
+        "--mdns-lookup-interval", type=float, default=120.0,
+        help="Seconds between controller/mdns_lookup.py best-effort mDNS "
+        "reverse-PTR hostname lookups for devices on the 'Devices awaiting "
+        "login' card (only runs at all if --db-path is set). Requires no "
+        "AdGuard config or special privilege -- see --no-mdns-lookup to "
+        "disable it independently.",
+    )
+    parser.add_argument(
+        "--mdns-lookup-limit", type=int, default=5,
+        help="Maximum number of not-yet-resolved pending devices "
+        "controller/mdns_lookup.py probes per cycle -- the rate limit that "
+        "keeps this from generating a burst of mDNS traffic on a large "
+        "household LAN.",
+    )
+    parser.add_argument(
+        "--no-mdns-lookup", action="store_true",
+        help="Disable the mDNS hostname-lookup loop even when --db-path is set.",
+    )
+    parser.add_argument(
         "--dashboard-url",
         help="Same value as the dashboard's own DASHBOARD_URL env var, e.g. "
         "http://192.168.1.50:8787 -- if set (and its host is a plain IPv4 "
@@ -863,6 +906,7 @@ def main(argv: list[str] | None = None) -> int:
     active_scan_interval: float | None = None
     category_fetch_interval: float | None = None
     enable_network_sweep = False
+    mdns_lookup_interval: float | None = None
     adguard_username = args.adguard_username
     adguard_password = args.adguard_password
     if args.db_path:
@@ -930,6 +974,11 @@ def main(argv: list[str] | None = None) -> int:
             # network_sweep.run_loop() opens its own connection
             # internally too, same reasoning as discovery_interval above.
             enable_network_sweep = True
+        if not args.no_mdns_lookup:
+            # mdns_lookup.run_loop() opens its own connection internally
+            # too, same reasoning as active_scan above -- no AdGuard or
+            # CAP_NET_RAW dependency either.
+            mdns_lookup_interval = args.mdns_lookup_interval
     else:
         provider = placeholder_desired_state
 
@@ -955,6 +1004,8 @@ def main(argv: list[str] | None = None) -> int:
         active_scan_limit=args.active_scan_limit,
         category_fetch_interval=category_fetch_interval,
         enable_network_sweep=enable_network_sweep,
+        mdns_lookup_interval=mdns_lookup_interval,
+        mdns_lookup_limit=args.mdns_lookup_limit,
     )
     return 0
 
