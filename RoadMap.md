@@ -8162,6 +8162,27 @@ redesign in a dedicated session, not a live quick-patch**.
    load is already enforced, so skip unless Asura starts serving real
    content there again.
 
+   **Live observation 2026-09-10 (full-cutover test window, `.30` in
+   bump_v4):** the tablet's Chrome showed `ERR_QUIC_PROTOCOL_ERROR` for
+   `asurascans.com` instead of silently falling back to TCP. This is
+   the `udp/443 drop` (`3e381d0`) working -- QUIC is dropped -- but
+   Chrome surfaces the h3 failure as a page error on the first
+   navigation rather than transparently retrying over tcp/443 (it only
+   blacklists h3 for the origin and falls back on a reload / the next
+   attempt). Not Asura-specific: any bump_v4 device hitting any
+   h3-advertising origin can see this once per origin until Chrome
+   marks h3 broken for it. **Mitigation options for the dedicated
+   session:** (a) `reject` udp/443 with an ICMP port-unreachable
+   instead of a silent `drop`, which some clients treat as a cleaner
+   "no QUIC here" signal and fall back faster; (b) pair the drop with
+   the ECH-strip's sibling -- withhold the HTTPS/SVCB DNS record's
+   `alpn="h3"` hint so the browser never advertises/attempts h3 in the
+   first place (AdGuard `$dnstype=HTTPS` already strips the whole record
+   for the 3 ECH domains -- widening that to every bump domain would
+   pre-empt the QUIC attempt entirely and is probably the cleanest
+   fix); (c) accept it as a one-time-per-origin reload. Revisit with
+   finding #7 / the classifier session.
+
 3. **~~`optigate.home` unreachable for `bypass_login` devices~~ --
    CONFIRMED + DOCUMENTED AS INTENDED (2026-09-10).** Owner's read was
    right. `phase3/nftables-manager` `baselineRules()` gives a
