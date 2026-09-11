@@ -162,22 +162,34 @@ def schedule_is_active_for_target(
     page's "what's active right now" display, generalized to accept a
     bare user/group/device id rather than requiring a full device row.
 
-    Only a schedule with `is_mode = 1` is ever affected by an override --
-    see schedules.is_mode's own comment in common/db.py for why this is
-    opt-in rather than "an override suspends every schedule for this
-    target": a standing safety-net category block (not one of a kid's
-    swappable daily modes) must never be silently lifted by someone
-    shifting that kid into Free Time.
+    A schedule is override-eligible if it's `is_mode = 1` OR
+    `lockout_all = 1` -- see schedules.is_mode's own comment in
+    common/db.py for why an ordinary category block is opt-in rather than
+    "an override suspends every schedule for this target": a standing
+    safety-net category block (not one of a kid's swappable daily modes)
+    must never be silently lifted by someone shifting that kid into Free
+    Time. `lockout_all` schedules are folded into the same override-aware
+    path unconditionally, is_mode or not: a full lockout ("Bedtime", say)
+    is a total blackout that's incompatible with being "in" any mode at
+    all, so an admin deliberately shifting the target out of it is always
+    meant to lift it too -- found 2026-09-10 when prod's `lockout_all = 1,
+    is_mode = 0` "Bedtime" schedule couldn't be suppressed by "Shift mode
+    now" at all, stranding the device in quarantine_v4 despite the
+    explicit override (see RoadMap.md finding #10).
 
-    For an is_mode schedule: an active override for this target means
-    the schedule is active only if the override names IT specifically --
-    every other is_mode schedule targeting the same identity is forced
-    INACTIVE for the override's duration, regardless of what the clock
-    says (that's the "instead of", not "in addition to", semantics the
-    feature exists for). No override at all falls through to the normal
-    schedule_is_active() clock check, unchanged.
+    For an override-eligible schedule: an active override for this target
+    means the schedule is active only if the override names IT
+    specifically -- every other override-eligible schedule targeting the
+    same identity is forced INACTIVE for the override's duration,
+    regardless of what the clock says (that's the "instead of", not "in
+    addition to", semantics the feature exists for). A non-mode,
+    non-lockout schedule, or no override at all, falls through to the
+    normal schedule_is_active() clock check, unchanged. (In practice a
+    non-mode lockout_all schedule can only ever be suppressed this way,
+    not manually forced on early -- add_schedule_override()'s target
+    picker still lists is_mode schedules only.)
     """
-    if not schedule_row["is_mode"]:
+    if not (schedule_row["is_mode"] or schedule_row["lockout_all"]):
         return schedule_is_active(schedule_row, now_utc)
     override = active_override_for_target(conn, now_utc, user_id=user_id, group_id=group_id, device_id=device_id)
     if override is not None:
@@ -232,10 +244,14 @@ def is_full_lockout_active(conn: sqlite3.Connection, device: sqlite3.Row, now_ut
     base classification).
 
     "Currently active" is schedule_is_active_for_device(), not the bare
-    clock check -- so a mode-flagged Bedtime schedule can be manually
-    suppressed (shifted into Free Time instead) exactly like a mode-
-    flagged category-block schedule can, via the same schedule_overrides
-    mechanism. A non-mode lockout_all schedule is unaffected either way.
+    clock check -- so a Bedtime schedule can be manually suppressed
+    (shifted into Free Time instead) via the same schedule_overrides
+    mechanism a mode-flagged category-block schedule uses. Unlike a
+    category-block schedule, this override-awareness applies to every
+    lockout_all schedule regardless of its own is_mode flag (fixed
+    2026-09-10, RoadMap.md finding #10) -- a full lockout is a total
+    blackout, not one of several coexisting modes, so any active shift
+    override for the target lifts it too.
     """
     import matching  # local import: keeps schedule_is_active() usable with zero DB dependency
 

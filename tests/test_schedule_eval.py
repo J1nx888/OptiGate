@@ -214,17 +214,42 @@ def test_override_suppresses_a_different_mode_schedule_during_its_own_window(con
     assert schedule_eval.is_full_lockout_active(conn, device, now) is False
 
 
-def test_override_does_not_affect_a_non_mode_schedule(conn):
-    # A standing (is_mode=0) lockout schedule keeps applying by the clock
-    # regardless of any override in effect for the same device.
-    curfew = _insert_schedule(conn, "Emergency curfew", is_mode=0, days="mon,tue,wed,thu,fri,sat,sun",
-                               start="21:00", end="06:00")
+def test_override_does_not_affect_a_non_mode_category_block_schedule(conn):
+    # A standing (is_mode=0), NON-lockout category-block schedule is a
+    # safety net -- it keeps applying by the clock regardless of any
+    # override in effect for the same device. is_full_lockout_active()
+    # only ever looks at lockout_all=1 rows, so this schedule can't
+    # actually cause a lockout either way; this test instead exercises
+    # schedule_is_active_for_device() directly, the same choke point
+    # adguard_sync.py's category-deny path uses.
+    porn_block = _insert_schedule(conn, "Always block adult content", is_mode=0, lockout_all=0,
+                                   days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
     free_time = _insert_schedule(conn, "Free Time", is_mode=1, lockout_all=0,
                                   days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
     device = _insert_device(conn, "aa:bb:cc:dd:ee:12")
     _insert_override(conn, free_time, device_id=device["id"])
     now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
+    porn_block_row = conn.execute("SELECT * FROM schedules WHERE id = ?", (porn_block,)).fetchone()
+    assert schedule_eval.schedule_is_active_for_device(conn, porn_block_row, device, now) is True
+
+
+def test_override_suppresses_a_non_mode_lockout_all_schedule_too(conn):
+    # Regression test for RoadMap.md finding #10 (found 2026-09-10): prod's
+    # "Bedtime" is lockout_all=1, is_mode=0 -- unlike a category-block
+    # safety net, a full lockout is a total blackout incompatible with
+    # being "in" any mode, so a deliberate "Shift mode now" override must
+    # lift it too, even though it was never marked is_mode.
+    bedtime = _insert_schedule(conn, "Bedtime", is_mode=0, lockout_all=1,
+                                days="mon,tue,wed,thu,fri,sat,sun", start="21:00", end="06:00")
+    free_time = _insert_schedule(conn, "Free Time", is_mode=1, lockout_all=0,
+                                  days="mon,tue,wed,thu,fri,sat,sun", start="00:00", end="23:59")
+    device = _insert_device(conn, "aa:bb:cc:dd:ee:17")
+    now = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)  # normally bedtime
+    # Without an override, the non-mode lockout still applies by the clock.
     assert schedule_eval.is_full_lockout_active(conn, device, now) is True
+
+    _insert_override(conn, free_time, device_id=device["id"])
+    assert schedule_eval.is_full_lockout_active(conn, device, now) is False
 
 
 def test_override_expires_and_normal_schedule_resumes(conn):
