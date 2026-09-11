@@ -6129,6 +6129,21 @@ def update_device():
         "bump_enabled = ?, bypass_login = ? WHERE id = ?",
         (label, user_id, group_id, ignored, bump_enabled, bypass_login, device_id),
     )
+    # 2026-09-11, project owner's explicit request: assigning a device to
+    # a user or group from this page is the same "vouching act" as
+    # add_device()'s own manually-typed-MAC case (see that route's
+    # docstring) -- an admin picking a specific kid or group for a
+    # PREAUTH device IS them recognizing it, no less than typing in its
+    # MAC by hand. Previously only dashboard/captive_portal_server.py's
+    # own separate "assign_group" admin action authenticated on
+    # assignment (and only for groups, never users) -- this closes that
+    # inconsistency here on the page an admin actually uses day to day.
+    # Deliberately does NOT fire for `ignored` or "Unassigned" (both
+    # leave user_id and group_id None) -- neither is a vouching act, and
+    # this must never flip an already-authenticated device back to
+    # PREAUTH either, so it only ever sets 1, never clears it.
+    if user_id is not None or group_id is not None:
+        conn.execute("UPDATE devices SET is_authenticated = 1 WHERE id = ?", (device_id,))
     conn.commit()
     return flash_redirect("device_detail", "Saved.", device_id=device_id)
 
@@ -6415,16 +6430,21 @@ def _batch_assign_devices_to_group(conn, device_ids: set[int], group_id) -> None
     since picking a real group is an explicit un-ignore, same as the
     single-device form already does. Label/bump_enabled/bypass_login
     deliberately untouched -- this only ever changes the assignment,
-    nothing else about a device already set up. One explicit transaction
-    for the whole batch (conn opens with isolation_level=None -- see
-    common/db.py -- so an un-wrapped executemany here would autocommit
-    per row, the same bug class common/category_fetch.py's own fix
-    closed at a much larger scale), shared by bulk_add_to_group() and
-    bulk_assign_devices_to_group() below."""
+    nothing else about a device already set up. Also sets
+    is_authenticated = 1 unconditionally (2026-09-11, same reasoning as
+    update_device()'s own comment on this -- unlike that route this
+    function is only ever called with a real group_id, never to
+    unassign, so there's no "should this fire" branch to worry about
+    here). One explicit transaction for the whole batch (conn opens with
+    isolation_level=None -- see common/db.py -- so an un-wrapped
+    executemany here would autocommit per row, the same bug class
+    common/category_fetch.py's own fix closed at a much larger scale),
+    shared by bulk_add_to_group() and bulk_assign_devices_to_group()
+    below."""
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.executemany(
-            "UPDATE devices SET user_id = NULL, group_id = ?, ignored = 0 WHERE id = ?",
+            "UPDATE devices SET user_id = NULL, group_id = ?, ignored = 0, is_authenticated = 1 WHERE id = ?",
             [(group_id, device_id) for device_id in device_ids],
         )
     except BaseException:

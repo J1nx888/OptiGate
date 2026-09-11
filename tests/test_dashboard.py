@@ -3408,11 +3408,72 @@ def test_update_device_bypass_login_default_does_not_refire_on_a_later_save(clie
         headers=_auth_header(),
     )
     assert resp.status_code == 302
-
     row = db_conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
     assert row["bypass_login"] == 1
     assert row["group_id"] == group_id
     assert row["ignored"] == 0
+
+
+def test_update_device_assigning_to_a_user_authenticates_a_preauth_device(client, db_conn):
+    """2026-09-11, project owner's explicit request: assigning a PREAUTH
+    device to a kid from the Manage page is the same vouching act as
+    add_device()'s own manually-typed-MAC case -- it must clear the
+    captive-portal gate, not just set the assignment."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:70")
+
+    client.post(
+        "/devices/update",
+        data={"device_id": device_id, "label": "", "assignment": f"user:{user_id}"},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT is_authenticated FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["is_authenticated"] == 1
+
+
+def test_update_device_assigning_to_a_group_authenticates_a_preauth_device(client, db_conn):
+    client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:71")
+
+    client.post(
+        "/devices/update",
+        data={"device_id": device_id, "label": "", "assignment": f"group:{group_id}"},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT is_authenticated FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["is_authenticated"] == 1
+
+
+def test_update_device_leaving_unassigned_does_not_authenticate_a_preauth_device(client, db_conn):
+    """Unassigning/leaving unassigned is not a vouching act -- must not
+    silently authenticate a device nobody has actually claimed."""
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:72")
+
+    client.post(
+        "/devices/update",
+        data={"device_id": device_id, "label": "renamed only", "assignment": ""},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT is_authenticated FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["is_authenticated"] == 0
+
+
+def test_update_device_ignoring_does_not_authenticate_a_preauth_device(client, db_conn):
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:73")
+
+    client.post(
+        "/devices/update",
+        data={"device_id": device_id, "label": "", "assignment": "ignored"},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT is_authenticated FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["is_authenticated"] == 0
 
 
 def test_device_detail_page_reminds_about_the_ca_cert_before_bump_enable(client, db_conn):
@@ -4286,6 +4347,42 @@ def test_bulk_assign_devices_to_group_applies_to_every_selected_device(client, d
         assert row["ignored"] == 0
     kitchen_cam = db_conn.execute("SELECT label FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:21'").fetchone()
     assert kitchen_cam["label"] == "Kitchen Cam", "must not touch label -- narrow assignment-only update"
+
+
+def test_bulk_assign_devices_to_group_authenticates_preauth_devices(client, db_conn):
+    """2026-09-11, project owner's explicit request: same vouching-act
+    reasoning as update_device()'s own single-device version -- a bulk
+    group assignment from the Devices list must clear the captive-portal
+    gate too, not just apply to devices already authenticated."""
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:74")
+
+    client.post(
+        "/devices/bulk-assign-group",
+        data={"group_id": group_id, "device_ids": [str(device_id)]},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT is_authenticated FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["is_authenticated"] == 1
+
+
+def test_bulk_add_to_group_authenticates_preauth_devices(client, db_conn):
+    """/groups/add-devices shares _batch_assign_devices_to_group() with
+    /devices/bulk-assign-group -- same vouching-act fix applies here."""
+    client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
+    device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:75")
+
+    client.post(
+        "/groups/add-devices",
+        data={"group_id": group_id, "device_ids": [str(device_id)]},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT is_authenticated FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert row["is_authenticated"] == 1
 
 
 def test_bulk_assign_devices_to_group_preserves_bump_and_bypass_flags(client, db_conn):
