@@ -45,6 +45,20 @@ def compute_desired_policy(
     policy. Devices with no active binding contribute nothing -- there's
     no IP to add to any set.
 
+    **Real gap found live 2026-09-11**, same root cause and fix shape as
+    controller/desired_state.py's own dated comment: this used to INNER
+    JOIN `devices`, so a binding orphaned by device deletion
+    (`device_id` NULL, `ON DELETE SET NULL`) contributed to NO set at
+    all rather than falling back to PREAUTH/unauthenticated -- the same
+    "vanishes from enforcement entirely instead of defaulting safe" bug.
+    Now a LEFT JOIN from `device_bindings`: every `d.*` column reads
+    NULL for an orphaned binding, and classify_device()/bump_eligible()
+    already treat every one of those columns as falsy by default
+    (`ignored`/`quarantined_at`/`is_authenticated`/`bypass_login`/
+    `bump_enabled` all None), which resolves to exactly PREAUTH with no
+    bump eligibility -- no special-casing needed here beyond the JOIN
+    direction itself.
+
     **Phase 8 (2026-08-31)**: `now` (defaults to the current UTC instant;
     tests inject a fixed value) drives a second, independent overlay --
     a device whose classify_device() result ISN'T already BYPASS gets
@@ -73,9 +87,10 @@ def compute_desired_policy(
         SELECT d.id, d.user_id, d.group_id, d.ignored, d.quarantined_at, d.is_authenticated,
                d.bump_enabled, d.bypass_login, COALESCE(g.ignored, 0) AS group_ignored,
                b.ipv4_address
-        FROM devices d
-        JOIN device_bindings b ON b.device_id = d.id AND b.active = 1
+        FROM device_bindings b
+        LEFT JOIN devices d ON d.id = b.device_id
         LEFT JOIN groups g ON g.id = d.group_id
+        WHERE b.active = 1
         """
     ).fetchall()
 

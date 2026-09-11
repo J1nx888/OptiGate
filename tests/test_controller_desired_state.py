@@ -138,3 +138,54 @@ def test_brand_new_mac_with_no_pre_existing_devices_row_still_becomes_a_target(c
 def test_full_duplex_flag_passed_through(conn):
     desired = db_backed_desired_state(conn, GATEWAY, full_duplex=True)
     assert desired.full_duplex is True
+
+
+def test_deleting_a_device_does_not_drop_its_active_binding_out_of_scope(conn):
+    """Real gap found live 2026-09-11 (see this module's own dated
+    comment): deleting a device row used to silently remove it from
+    ARP-spoofing scope entirely (device_bindings.device_id -> NULL via
+    ON DELETE SET NULL, invisible to the old INNER JOIN) instead of
+    falling back to the same safe PREAUTH treatment a genuinely-new
+    device gets -- an unconditional bypass for anyone who deletes their
+    own device. The orphaned binding must still become a target."""
+    device = _add_device(conn, "aa:bb:cc:dd:ee:01")
+    identity.record_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21", source="rtnetlink")
+    conn.execute("DELETE FROM devices WHERE id = ?", (device["id"],))
+    conn.commit()
+    assert conn.execute("SELECT device_id FROM device_bindings").fetchone()["device_id"] is None
+
+    desired = db_backed_desired_state(conn, GATEWAY)
+    assert desired.targets == (Target(ip="192.168.1.21", mac="aa:bb:cc:dd:ee:01"),)
+
+
+def test_two_orphaned_bindings_from_different_deleted_devices_both_stay_in_scope(conn):
+    """Regression guard for a real, adjacent bug this fix could have
+    introduced: keying the dedup-by-device set on device_id instead of
+    mac_address would make every orphaned binding collide on the same
+    NULL, silently dropping all but the first deleted device."""
+    device1 = _add_device(conn, "aa:bb:cc:dd:ee:01")
+    device2 = _add_device(conn, "aa:bb:cc:dd:ee:02")
+    identity.record_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21", source="rtnetlink")
+    identity.record_binding(conn, "aa:bb:cc:dd:ee:02", "192.168.1.22", source="rtnetlink")
+    conn.execute("DELETE FROM devices WHERE id IN (?, ?)", (device1["id"], device2["id"]))
+    conn.commit()
+
+    desired = db_backed_desired_state(conn, GATEWAY)
+    assert set(desired.targets) == {
+        Target(ip="192.168.1.21", mac="aa:bb:cc:dd:ee:01"),
+        Target(ip="192.168.1.22", mac="aa:bb:cc:dd:ee:02"),
+    }
+
+
+def test_orphaned_binding_from_a_previously_ignored_device_is_still_excluded_if_recreated_ignored(conn):
+    """Guards the JOIN-direction fix's own COALESCE: an orphaned binding
+    has no devices row at all, so it must default to IN-scope (PREAUTH),
+    never accidentally excluded by a bare `d.ignored = 0` that would
+    silently pass for NULL in a naive rewrite. This pins the opposite,
+    still-correct case: a REAL devices row that says ignored=1 keeps
+    excluding it, same as before this fix."""
+    _add_device(conn, "aa:bb:cc:dd:ee:01", ignored=1)
+    identity.record_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21", source="rtnetlink")
+
+    desired = db_backed_desired_state(conn, GATEWAY)
+    assert desired.targets == ()

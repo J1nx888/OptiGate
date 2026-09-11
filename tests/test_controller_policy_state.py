@@ -164,6 +164,66 @@ def test_brand_new_mac_with_no_pre_existing_devices_row_lands_in_unauthenticated
     assert policy["bypass"] == []
 
 
+def test_deleting_a_device_lands_its_orphaned_binding_in_unauthenticated_not_nowhere(conn):
+    """Real gap found live 2026-09-11 (see this module's own dated
+    comment): deleting a device row used to make its still-active
+    binding vanish from every set -- device_bindings.device_id goes
+    NULL (ON DELETE SET NULL) and the old INNER JOIN dropped it
+    entirely, which functioned as an unconditional bypass (no set
+    membership means no nftables rule restricts it at all). It must now
+    fall back to the same safe PREAUTH/unauthenticated treatment a
+    genuinely-new device gets."""
+    device = _add_device(conn, "aa:bb:cc:dd:ee:01", is_authenticated=1)
+    _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")
+    conn.execute("DELETE FROM devices WHERE id = ?", (device["id"],))
+    conn.commit()
+
+    policy = compute_desired_policy(conn)
+
+    assert policy["unauthenticated"] == ["192.168.1.21"]
+    assert policy["authenticated"] == []
+    assert policy["bypass"] == []
+    assert policy["quarantine"] == []
+    assert policy["bump"] == []
+
+
+def test_deleting_a_bump_enabled_device_does_not_leave_it_bump_eligible(conn):
+    """A deleted device's orphaned binding must never land in the bump
+    set -- bump_eligible() already requires AUTHENTICATED, which an
+    orphaned (device_id NULL) row can never be, but this pins the
+    specific case where the device was bump_enabled right before
+    deletion, guarding against a future regression that special-cases
+    bump_enabled ahead of the AUTHENTICATED check."""
+    device = _add_device(conn, "aa:bb:cc:dd:ee:01", is_authenticated=1, bump_enabled=1)
+    _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")
+    conn.execute("DELETE FROM devices WHERE id = ?", (device["id"],))
+    conn.commit()
+
+    policy = compute_desired_policy(conn)
+
+    assert policy["bump"] == []
+    assert policy["unauthenticated"] == ["192.168.1.21"]
+
+
+def test_orphaned_binding_still_goes_to_quarantine_under_a_global_lockout_schedule(conn):
+    """A deleted device has no id/user_id/group_id for a targeted
+    schedule to match, but a lockout_all is_global=1 schedule applies to
+    everyone regardless -- see matching.schedule_applies_to_target's own
+    is_global short-circuit. Confirms the quarantine overlay still
+    reaches a fully-NULL device row rather than raising or silently
+    skipping it."""
+    _add_lockout_schedule(conn)
+    device = _add_device(conn, "aa:bb:cc:dd:ee:01", is_authenticated=1)
+    _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")
+    conn.execute("DELETE FROM devices WHERE id = ?", (device["id"],))
+    conn.commit()
+
+    policy = compute_desired_policy(conn, now=_DURING_LOCKOUT)
+
+    assert policy["quarantine"] == ["192.168.1.21"]
+    assert policy["unauthenticated"] == []
+
+
 def test_device_with_no_binding_is_excluded_from_every_set(conn):
     _add_device(conn, "aa:bb:cc:dd:ee:01")
     policy = compute_desired_policy(conn)
