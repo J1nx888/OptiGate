@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import category_catalog_sync
 import db
 from ai_sites_seed import AI_SITE_DOMAINS
 
@@ -109,8 +110,10 @@ CRUNCHYROLL_PATHS = [
 ]
 
 
-# Phase 8 starter categories. URLs are all from The Block List Project
-# (https://github.com/blocklistproject/Lists, MIT, actively maintained) --
+# Phase 8 starter categories. URLs are from The Block List Project
+# (https://github.com/blocklistproject/Lists, MIT, actively maintained)
+# for all but "AI" (v2fly/domain-list-community, 2026-09-11 -- see that
+# category's own comment below for why it, and only it, was rebased) --
 # confirmed LIVE 2026-08-31/09-01 (not assumed from its README alone): each
 # fetched, format-checked (AdGuard/adblock rule syntax, matching
 # common/blocklist_parser.py), and entry-counted. Counts shift as the
@@ -132,12 +135,44 @@ CRUNCHYROLL_PATHS = [
 # button), same as a freshly-seeded row with no data until its first real
 # fetch.
 #
-# No public blocklist exists for "AI" or "Weapons" (confirmed via research
-# the same session) -- both seeded with subscription_url=None,
-# manual-curation-only, ready for an admin (or a future pass) to add
-# domains to directly from the category's Manage page.
+# No public blocklist exists for "Weapons" (confirmed via research the
+# same session this list was written) -- seeded with subscription_url=
+# None, manual-curation-only, ready for an admin (or a future pass) to
+# add domains to directly from the category's Manage page.
 _BLOCKLISTPROJECT_ADGUARD = "https://blocklistproject.github.io/Lists/adguard/{}-ags.txt"
 
+# 2026-09-11 (RoadMap.md, project owner's direct request to rebase this
+# list onto the new "Add category from catalog" v2fly integration):
+# checked every category below against v2fly/domain-list-community's
+# own catalog before changing anything, rather than assuming a rebase
+# was a clean swap. Only "AI" actually was:
+#   - AI: v2fly's "AI Services" (category-ai-!cn) resolves to 179 real
+#     domains (confirmed live 2026-09-11) -- a strict upgrade over the
+#     previous subscription_url=None (manual-curation-only, see
+#     AI_SITE_DOMAINS below, which stays seeded alongside this; a
+#     'manual' row and a 'subscription' row coexist fine, same as any
+#     other category that has both).
+#   - Adult: v2fly's "Porn" resolves to only ~6,500 domains vs.
+#     BlockListProject's current ~953,000 (confirmed live 2026-09-11) --
+#     a ~99% coverage drop for the single most safety-critical
+#     category here. Owner's explicit call: NOT worth it for catalog
+#     consistency alone. Left on BlockListProject, unchanged.
+#   - Gambling/Drugs/Fraud & Scams/Weapons: v2fly has no equivalent
+#     category for any of these at all (confirmed by searching the full
+#     118-entry catalog, not assumed from a quick guess). Owner's
+#     explicit call: keep all four on their current BlockListProject
+#     sources (or, for Weapons, no source at all) rather than drop real
+#     protection with nothing to replace it.
+#   - Facebook/TikTok/Twitter/X/WhatsApp: v2fly only offers one combined
+#     "Social Media" category, not per-service ones -- collapsing these
+#     four into it would lose the ability to toggle one platform
+#     without touching the others. Owner's explicit call: keep them
+#     separate, unchanged. (v2fly's combined Social Media category is
+#     still available to any admin who wants it, manually, via the
+#     Categories page's own "Add from catalog" picker.)
+# Do not revisit any of these five decisions without a specific new
+# reason -- they were each checked against real, live catalog data
+# before this comment was written, not assumed.
 DEFAULT_CATEGORIES = [
     ("Adult", _BLOCKLISTPROJECT_ADGUARD.format("porn")),
     ("Gambling", _BLOCKLISTPROJECT_ADGUARD.format("gambling")),
@@ -147,7 +182,7 @@ DEFAULT_CATEGORIES = [
     ("TikTok", _BLOCKLISTPROJECT_ADGUARD.format("tiktok")),
     ("Twitter/X", _BLOCKLISTPROJECT_ADGUARD.format("twitter")),
     ("WhatsApp", _BLOCKLISTPROJECT_ADGUARD.format("whatsapp")),
-    ("AI", None),
+    ("AI", category_catalog_sync.resolve_subscription_url("category-ai-!cn")),
     ("Weapons", None),
 ]
 

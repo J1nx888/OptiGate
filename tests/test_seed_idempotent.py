@@ -45,16 +45,23 @@ def test_default_categories_seeded_not_global(conn):
 
 
 def test_subscription_categories_have_no_domains_until_first_sync(conn):
-    """Every OTHER starter category (has a subscription_url) gets no
-    category_domains rows until something actually calls
-    common/category_fetch.py's fetch_and_sync_category() (the controller's
-    own daily loop, or the dashboard's "Sync now" button) -- unlike AI,
-    which is a manual snapshot seeded with its domains already in place."""
+    """Every subscription-based starter category gets no category_domains
+    rows until something actually calls common/category_fetch.py's
+    fetch_and_sync_category() (the controller's own daily loop, or the
+    dashboard's "Sync now" button). AI is deliberately excluded from this
+    check (unlike before 2026-09-11): it's the one category that carries
+    BOTH a real subscription_url (v2fly's AI Services, rebased the same
+    day) AND a manual domain snapshot seeded with its domains already in
+    place -- see test_ai_category_seeded_with_manual_and_subscription_source
+    below for that hybrid case specifically."""
     seed_defaults.seed(conn)
     conn.commit()
     subscribed_ids = [
-        r["id"] for r in conn.execute("SELECT id FROM categories WHERE subscription_url IS NOT NULL")
+        r["id"] for r in conn.execute(
+            "SELECT id FROM categories WHERE subscription_url IS NOT NULL AND name != 'AI'"
+        )
     ]
+    assert subscribed_ids, "expected at least one non-AI subscription category to actually check"
     for category_id in subscribed_ids:
         count = conn.execute(
             "SELECT COUNT(*) c FROM category_domains WHERE category_id = ?", (category_id,)
@@ -62,15 +69,22 @@ def test_subscription_categories_have_no_domains_until_first_sync(conn):
         assert count == 0
 
 
-def test_ai_category_seeded_with_manual_domain_snapshot(conn):
-    """AI has no public subscription list (confirmed via research) -- it's
-    seeded from a one-time manual snapshot (defaults/ai_sites_seed.py,
-    sourced from Microsoft Purview's published AI-sites list) instead, all
-    tagged source='manual' so a re-seed never touches or duplicates them."""
+def test_ai_category_seeded_with_manual_and_subscription_source(conn):
+    """2026-09-11 (RoadMap.md, project owner's request to rebase the
+    default category seed onto the new v2fly catalog): AI was the one
+    category with a clean v2fly equivalent (AI Services, category-ai-!cn,
+    confirmed live to resolve to 179 real domains) -- it now carries a
+    real subscription_url ON TOP OF (not instead of) the pre-existing
+    one-time manual snapshot (defaults/ai_sites_seed.py, sourced from
+    Microsoft Purview's published AI-sites list), which stays exactly as
+    it was: a 'manual' row and a 'subscription' row-to-be coexist fine on
+    the same category, same as any other category with both."""
+    import category_catalog_sync
+
     seed_defaults.seed(conn)
     conn.commit()
     ai_row = conn.execute("SELECT id, subscription_url FROM categories WHERE name = 'AI'").fetchone()
-    assert ai_row["subscription_url"] is None
+    assert ai_row["subscription_url"] == category_catalog_sync.resolve_subscription_url("category-ai-!cn")
 
     rows = conn.execute(
         "SELECT pattern, source FROM category_domains WHERE category_id = ?", (ai_row["id"],)
@@ -81,6 +95,68 @@ def test_ai_category_seeded_with_manual_domain_snapshot(conn):
     patterns = {r["pattern"] for r in rows}
     for domain in ("chatgpt.com", "claude.ai", "anthropic.com", "character.ai", "midjourney.co"):
         assert re.escape(domain) in patterns
+
+
+def test_adult_category_deliberately_stays_on_blocklistproject(conn):
+    """2026-09-11 explicit decision, not an oversight: v2fly's own Porn
+    category resolves to ~99% fewer domains than BlockListProject's
+    current Adult list (confirmed live) -- a real coverage regression for
+    the single most safety-critical category here, so this one was NOT
+    rebased despite AI being rebased the same session. Regression guard
+    against someone "finishing the rebase" later without re-checking that
+    tradeoff."""
+    seed_defaults.seed(conn)
+    conn.commit()
+    row = conn.execute("SELECT subscription_url FROM categories WHERE name = 'Adult'").fetchone()
+    assert "blocklistproject" in row["subscription_url"]
+    assert "v2fly" not in row["subscription_url"]
+
+
+def test_gambling_drugs_fraud_and_weapons_are_not_rebased(conn):
+    """2026-09-11 explicit decision: v2fly has no equivalent category for
+    any of these four at all -- rebasing would drop real protection with
+    nothing to replace it. Weapons keeps subscription_url=None (no public
+    list exists for it at all, from either source)."""
+    seed_defaults.seed(conn)
+    conn.commit()
+    for name in ("Gambling", "Drugs", "Fraud & Scams"):
+        row = conn.execute("SELECT subscription_url FROM categories WHERE name = ?", (name,)).fetchone()
+        assert "blocklistproject" in row["subscription_url"]
+    weapons = conn.execute("SELECT subscription_url FROM categories WHERE name = 'Weapons'").fetchone()
+    assert weapons["subscription_url"] is None
+
+
+def test_facebook_tiktok_twitter_whatsapp_stay_separate_not_collapsed(conn):
+    """2026-09-11 explicit decision: v2fly only offers one combined
+    'Social Media' category -- collapsing these four into it would lose
+    per-platform toggling. Each must still exist as its own category on
+    its original BlockListProject source (still available manually via
+    the Categories page's own "Add from catalog" picker for an admin who
+    wants the all-in-one version instead)."""
+    seed_defaults.seed(conn)
+    conn.commit()
+    for name in ("Facebook", "TikTok", "Twitter/X", "WhatsApp"):
+        row = conn.execute("SELECT subscription_url FROM categories WHERE name = ?", (name,)).fetchone()
+        assert row is not None, f"{name} must still exist as its own category"
+        assert "blocklistproject" in row["subscription_url"]
+
+
+def test_seed_never_overwrites_an_already_existing_categorys_subscription_url(conn):
+    """Idempotent contract this whole file's own docstring claims -- an
+    admin who already picked a different source for a category (or a
+    future version of DEFAULT_CATEGORIES that changes a URL again) must
+    never have that silently overwritten by re-seeding."""
+    conn.execute(
+        "INSERT INTO categories (name, subscription_url, is_global, created_at) VALUES (?, ?, 0, ?)",
+        ("AI", "https://example.invalid/admin-picked-this-instead.txt", db.now_iso()),
+    )
+    conn.commit()
+
+    seed_defaults.seed(conn)
+    conn.commit()
+
+    row = conn.execute("SELECT subscription_url FROM categories WHERE name = 'AI'").fetchone()
+    assert row["subscription_url"] == "https://example.invalid/admin-picked-this-instead.txt"
 
 
 def test_ai_category_reseed_preserves_admin_added_domain(conn):
