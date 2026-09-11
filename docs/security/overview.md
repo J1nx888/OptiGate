@@ -409,6 +409,34 @@ client falls back to a plain A/AAAA lookup with a real, visible SNI that
 Squid can validate. Verified working on the exact production AdGuard
 version (v0.107.79).
 
+**QUIC fallback UX, part 2 -- Alt-Svc response header stripped for bumped
+connections (2026-09-11, RoadMap.md finding #2):** the DNS-side ECH/h3
+strip above didn't fully solve the "Chrome shows ERR_QUIC_PROTOCOL_ERROR"
+symptom -- confirmed live in the same 2026-09-11 window that verified
+item 17 working. Chrome also learns an origin supports HTTP/3 from a
+real `Alt-Svc: h3=...` HTTP response header, cached independently of DNS
+for hours/days; a real household device almost always has this already
+cached from browsing the origin unfiltered before any interception
+window ran, so the DNS-side fix can't retroactively clear it. Closes the
+other channel at its source: `proxy/squid.conf.template` now has
+`reply_header_access Alt-Svc deny bumped` (`acl bumped ssl::bumped`,
+true only for a connection Squid actually decrypted -- a spliced
+connection is raw TCP relay, never HTTP-parsed, so this can't touch it).
+Bump-mode connections never speak HTTP/2 upstream either (`ssl_bump`
+restricts the offered ALPN to `http/1.1`), so there's no HTTP/2 response
+framing to complicate this. **Not yet live-verified**: Squid's header
+table only specially recognizes a fixed set of header names, and an
+unrecognized name falls into a generic "Other" bucket that a blanket
+deny would be far too broad for -- `squid -k parse` only checks this
+directive's syntax, not which bucket "Alt-Svc" resolves to. Needs a real
+request against an h3-advertising origin to confirm only Alt-Svc goes
+missing from the response and nothing else does. This can only prevent
+a *fresh* browser profile from ever learning h3 support for a bump-mode
+domain through this proxy -- it cannot retroactively un-cache what a
+real device already learned before interception started; that's a
+one-time-per-origin Chrome quirk that self-heals (Chrome marks h3
+"broken" for an origin after one failed attempt).
+
 **Traffic to the box's own IP no longer detours through Squid
 (2026-09-09, RoadMap.md item 7):** `bump_v4`'s baseline redirect used to
 match on source IP and destination port only. A bump-eligible device's

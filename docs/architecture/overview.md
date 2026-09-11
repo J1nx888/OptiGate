@@ -127,7 +127,10 @@ controller/                   Python control-plane container (added 2026-08-30, 
                                 (2026-09-09, RoadMap.md item 17) adds a $dnstype=HTTPS rule per
                                 bump-mode domain, scoped to its authorized client IPs, so an
                                 ECH-carrying HTTPS/SVCB DNS record can't defeat SSL-Bump on a
-                                Cloudflare-fronted site (forces an A/AAAA + visible-SNI fallback)
+                                Cloudflare-fronted site (forces an A/AAAA + visible-SNI fallback).
+                                Also happens to withhold the alpn="h3" QUIC hint -- the DNS half
+                                of finding #2's QUIC-fallback-UX fix, see proxy/squid.conf.template's
+                                own reply_header_access Alt-Svc strip for the other (HTTP-header) half
   adguard_discovery.py           reads AdGuard's own query log to refresh device_bindings.last_seen_at
   health.py / readiness.py      interception_runtime health-column writer / worker+AdGuard
                                 startup readiness waits

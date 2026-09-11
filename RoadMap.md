@@ -8452,6 +8452,50 @@ redesign in a dedicated session, not a live quick-patch**.
    browsing, so `.30` should run with **SSL-Bump OFF** (DNS-tier only)
    outside of a supervised test.
 
+   **2026-09-11: revisited, deliberately NOT building either sketched
+   approach.** Owner's framing: don't want every domain bumped if it
+   doesn't have to be, and this box runs unattended for months at a
+   time, so whatever gets built has to hold up under that, not just
+   work once in a supervised test. Both original options have real
+   problems under that lens:
+   - **Per-domain IP-set resolution -- likely broken for the exact
+     domains this exists for.** Crunchyroll and Asurascans/Webtoons are
+     Cloudflare-fronted: their IPs are shared anycast addresses used by
+     millions of unrelated sites, and they rotate continuously. Matching
+     by destination IP isn't "occasionally stale," it's structurally the
+     wrong signal for a CDN-fronted domain -- a stale/incomplete set
+     either lets real Crunchyroll traffic slip through unbumped (a
+     security gap) or bumps an unrelated site sharing the same IP at
+     that moment.
+   - **Custom kernel-level SNI pre-filter -- real, ongoing engineering
+     liability for a problem not yet measured.** The 2026-09-11 CR test
+     (finding #1, above) ran `.30` full-bump cleanly once the OTHER real
+     bugs were fixed (host_verify_strict, untrusted CA) -- Squid's own
+     peek-and-splice for a non-bump domain is cheap (accept, read the
+     ClientHello, decide, relay bytes), and a home LAN's connection
+     volume is trivial load for this box. A bespoke SNI-sniffing Go/eBPF
+     component would need to run correctly, unattended, for months --
+     a real maintenance burden to take on speculatively.
+
+   **If a real need ever shows up** (a genuine soak test measuring
+   actual CPU/memory/connection counts on the box while a bump_v4
+   device is in normal use, not assumed), the right shape is still
+   SNI-based, not IP-based -- but reach for a proven, boring,
+   long-uptime-friendly existing tool instead of writing one:
+   **nginx's `stream` module with `ssl_preread`** (or the standalone
+   `sniproxy` tool) already does exactly this -- peeks the TLS
+   ClientHello's SNI and either relays raw bytes straight to the
+   destination (zero Squid involvement for non-bump domains) or hands
+   the connection into Squid's bump port for bump-mode ones. Mature,
+   minimal-maintenance software built for unattended operation, unlike
+   a custom component built from scratch for this one project.
+
+   **Decision: hold off entirely.** Nothing is built or planned here
+   until a real soak test actually shows full-bump degrading a device's
+   general browsing -- not before. Revisit with the nginx/sniproxy
+   shape specifically if that day comes; the two originally-sketched
+   options above are considered closed, not just deferred.
+
 8. **~~FOLLOW-UP -- "two-browser split"~~ -- NOT NEEDED as the primary
    path (2026-09-11).** Option A works once the CA is system-trusted
    (finding #1), so this stays on the shelf as a **fallback only** for a
@@ -8818,3 +8862,72 @@ Manufacturer/Hostname cells. Full suite green after this work.
 (needs the next interception window, itself still blocked on the
 household pre-authentication gap this explicitly did NOT solve --
 still open, next up whenever the owner wants it).
+
+---
+
+## Finding #2, part 2 -- QUIC fallback UX: the DNS-side fix alone wasn't enough (2026-09-11)
+
+Asked to pick a direction for finding #2 (Chrome shows
+`ERR_QUIC_PROTOCOL_ERROR` for a `bump_v4` device on first navigation to
+an h3-advertising origin, instead of silently retrying over tcp/443).
+The owner initially picked "strip the h3 hint at DNS" -- but before
+building anything, checked `controller/adguard_sync.py`'s
+`build_ech_strip_rules()` (item 17) and found **it already does
+exactly that**, unscoped across every `mode='bump'` domain
+(`WHERE mode = 'bump'`, not a hardcoded "ECH domains" list), and it was
+already live and verified working during the very 2026-09-11 window
+that ALSO observed the QUIC error for `asurascans.com`. So the option
+picked was already shipped, and had already been proven insufficient
+by itself -- flagged this back to the owner rather than re-doing
+already-done work or claiming a fix that the session's own live
+evidence contradicted.
+
+**Root cause, on reflection**: Chrome's per-origin HTTP/3 support isn't
+only DNS-driven. It's also cached from a real `Alt-Svc: h3=...` HTTP
+response header the origin sends once, independent of DNS, for
+hours/days. Any real household device has almost certainly already
+cached that header from browsing the origin unfiltered (Bark Home /
+DNS-tier-only) before any interception window ever touched it -- the
+DNS-side strip can't retroactively un-cache what the browser already
+knows. Owner asked me to investigate whether Squid's own bump path
+could strip the header at its source instead.
+
+**Investigated + confirmed feasible**: this project pins Squid 5.7
+(`squid-openssl` on Debian bookworm, `proxy/Dockerfile`).
+`reply_header_access <name> deny <acl>` is a real, unchanged-since-3.x
+Squid directive; `ssl::bumped` is a real ACL, true only for a
+transaction actually decrypted via `ssl_bump` (a spliced connection is
+raw TCP relay, never HTTP-parsed, so this can't and doesn't need to
+touch it). Confirmed `ssl_bump` restricts the offered upstream ALPN to
+`http/1.1`, so there's no HTTP/2 response framing on a bumped
+connection to complicate header stripping.
+
+**Built**: `proxy/squid.conf.template` gains a new "RESPONSE HEADER
+HYGIENE" section, after the `ssl_bump` decision chain: `acl bumped
+ssl::bumped` + `reply_header_access Alt-Svc deny bumped`. Together with
+item 17's DNS-side strip, this closes both channels a *fresh* browser
+profile could ever learn h3 support through while behind this proxy.
+Test: `tests/test_squid_conf_regressions.py`'s new
+`test_alt_svc_response_header_is_stripped_for_bumped_connections`
+(text/structure guard, same style as this file's other Squid-config
+regression tests -- Squid's own ACL semantics aren't something a plain
+Python test can exercise).
+
+**Not yet live-verified, and one real caveat flagged in the config's
+own comment**: Squid's header table only specially recognizes a fixed
+set of header names; an unrecognized name falls into a generic "Other"
+bucket, and denying "Other" would be far too broad. `squid -k parse`
+only checks this directive's syntax, not which bucket "Alt-Svc"
+actually resolves to in this Squid build -- needs a real request
+against an h3-advertising origin in the next interception window (or a
+disposable smoke-test rig) to confirm ONLY Alt-Svc goes missing from
+the response and every other header survives untouched.
+
+**Residual limitation, inherent, not fixable server-side**: this can
+only prevent a browser that's never visited the origin before from
+learning h3 support through this proxy. It cannot retroactively clear
+a real device's already-cached Alt-Svc knowledge from before
+interception started -- that's a one-time-per-origin Chrome quirk that
+self-heals on its own (Chrome marks h3 "broken" for an origin after one
+failed attempt and stops retrying it until its own cache expires).
+Accepted as the practical ceiling for this fix.
