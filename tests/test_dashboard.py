@@ -808,6 +808,50 @@ def test_report_page_lists_logged_rows(client, db_conn):
     assert b"<th>Result</th>" in resp.data
 
 
+def test_report_times_are_shown_in_the_configured_household_timezone(client, db_conn):
+    """Owner bug 2026-09-11: the Report page rendered stored UTC
+    timestamps verbatim while Settings had the household on US/Eastern.
+    Now the activity table + pending card localise to
+    `household_time_zone` and the column header names the zone."""
+    import datetime as _dt
+    import zoneinfo as _zi
+    import db as db_mod
+
+    db_mod.set_setting(db_conn, "household_time_zone", "America/New_York")
+    ny = _zi.ZoneInfo("America/New_York")
+    utc_dt = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=3)).replace(microsecond=0)
+    stored = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    local = utc_dt.astimezone(ny)
+
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) VALUES (?, NULL, 'kid1', 'tzcheck.example', '/', 1, 'global_domain')",
+        (stored,),
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert f"Time ({local.strftime('%Z')})" in body       # header names the zone (EST/EDT)
+    assert "Time (UTC)" not in body
+    assert local.strftime("%H:%M:%S") in body              # localised wall time is rendered
+    assert local.strftime("%Y-%m-%d") in body
+
+
+def test_report_falls_back_to_utc_for_a_bad_timezone_value(client, db_conn):
+    import db as db_mod
+    db_mod.set_setting(db_conn, "household_time_zone", "Not/ARealZone")
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'tzfallback.example', '/', 1, 'global_domain')"
+    )
+    db_conn.commit()
+    resp = client.get("/report", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"Time (UTC)" in resp.data  # unrecognised zone -> UTC, page still renders
+    assert b"tzfallback.example" in resp.data
+
+
 def test_html_pages_are_sent_no_store_but_static_assets_are_not(client):
     for path in ("/report", "/devices", "/users", "/settings"):
         cc = client.get(path, headers=_auth_header()).headers.get("Cache-Control", "")

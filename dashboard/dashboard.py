@@ -6508,10 +6508,10 @@ REPORT_BODY = """
 <p class="hint">Someone tapped "Request approval" on a blocked page. These stay listed (regardless of the filter below) until you act on them.</p>
 <div class="table-scroll">
 <table>
-  <tr><th>Requested (UTC)</th><th>Kid</th><th>Domain</th><th>Show / Path</th><th></th></tr>
+  <tr><th>Requested ({{ tz_abbr }})</th><th>Kid</th><th>Domain</th><th>Show / Path</th><th></th></tr>
   {% for row in pending_requests %}
   <tr>
-    <td>{{ row.approval_requested_at }}</td>
+    <td class="nowrap">{{ to_local(row.approval_requested_at) }}</td>
     <td>{{ row.username }}</td>
     <td><code>{{ row.domain }}</code></td>
     {% set show_name = row.series_name or series_names.get(row.series_id) %}
@@ -6619,10 +6619,10 @@ REPORT_BODY = """
 </p>
 <div class="table-scroll">
 <table>
-  <tr><th>Time (UTC)</th><th>User</th><th>Device</th><th>Domain</th><th>Show / Path</th><th>Result</th><th></th></tr>
+  <tr><th>Time ({{ tz_abbr }})</th><th>User</th><th>Device</th><th>Domain</th><th>Show / Path</th><th>Result</th><th></th></tr>
   {% for row in rows %}
   <tr>
-    {% set _ts = row.ts or '' %}
+    {% set _ts = to_local(row.ts) %}
     <td class="nowrap">{{ _ts[:10] }}<br><span class="hint" style="font-size:.85em;">{{ _ts[11:19] }}</span></td>
     <td>{{ row.username }}</td>
     <td>
@@ -6817,6 +6817,36 @@ def _reason_label(reason: str | None) -> str | None:
     return _ACCESS_LOG_REASON_LABELS.get(reason, reason)
 
 
+def _household_tz(conn):
+    """The dashboard's configured display timezone (`household_time_zone`
+    setting, same one the Settings page and schedules use). Falls back to
+    UTC for an unset or unrecognised value."""
+    name = (db.get_setting(conn, "household_time_zone", "UTC") or "UTC").strip()
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except Exception:
+        return zoneinfo.ZoneInfo("UTC")
+
+
+def _make_ts_localizer(tz):
+    """Returns `to_local(ts)` -- turns a stored UTC ISO-8601 timestamp
+    (`2026-09-11T00:42:00Z`, or the space-separated `datetime('now')`
+    form) into `YYYY-MM-DD HH:MM:SS` wall time in `tz`. Empty/None ->
+    "". String in, string out, in the same layout, so the Report
+    template's existing `[:10]` / `[11:19]` slicing keeps working. All
+    `access_log` timestamps are written UTC (see `db.now_iso()`)."""
+    def to_local(ts):
+        if not ts:
+            return ""
+        s = str(ts).strip().replace("T", " ").replace("Z", "")
+        try:
+            dt = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return str(ts)
+        return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+    return to_local
+
+
 # How many series titles one Report render will try to resolve from the
 # Crunchyroll API (each is one network round-trip on a cold cache). The
 # far-more-common `user_shows` lookup below is free and uncapped; this
@@ -6941,15 +6971,23 @@ def report():
         params,
     ).fetchall()
 
-    today = datetime.now(timezone.utc).date()
+    tz = _household_tz(conn)
+    to_local = _make_ts_localizer(tz)
+    tz_abbr = datetime.now(tz).strftime("%Z") or "UTC"
+
+    # Bucket the daily chart by LOCAL calendar day, not UTC -- otherwise a
+    # 9pm-Eastern event lands on tomorrow's bar and disagrees with the
+    # activity table right below it. SQLite has no real tz support, so
+    # pull the raw timestamps for the window and bucket in Python (a home
+    # LAN's row count over the chart window is small).
+    today = datetime.now(tz).date()
     chart_days = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
-    daily_rows = conn.execute(
-        f"SELECT substr(ts,1,10) day, allowed, COUNT(*) c FROM access_log {where_sql} "
-        "GROUP BY day, allowed ORDER BY day",
-        params,
-    ).fetchall()
-    allowed_by_day = {r["day"]: r["c"] for r in daily_rows if r["allowed"]}
-    blocked_by_day = {r["day"]: r["c"] for r in daily_rows if not r["allowed"]}
+    allowed_by_day: dict[str, int] = {}
+    blocked_by_day: dict[str, int] = {}
+    for r in conn.execute(f"SELECT ts, allowed FROM access_log {where_sql}", params):
+        day = to_local(r["ts"])[:10]
+        bucket = allowed_by_day if r["allowed"] else blocked_by_day
+        bucket[day] = bucket.get(day, 0) + 1
 
     # Independent of the user/status/days filter above -- this is a
     # persistent "needs attention" list, not part of the filtered activity
@@ -6967,7 +7005,7 @@ def report():
     body = render_template_string(
         REPORT_BODY, rows=rows, all_users=all_users, pending_requests=pending_requests,
         series_names=series_names,
-        reason_label=_reason_label,
+        reason_label=_reason_label, to_local=to_local, tz_abbr=tz_abbr,
         report_target=report_target, report_filter_combo=_report_filter_combo(all_users, all_groups, all_devices),
         filter_status=filter_status, days=days, day_options=REPORT_DAY_OPTIONS,
         filters_active=bool(filtered_user or filtered_group or filtered_device or filter_status or days != REPORT_DEFAULT_DAYS),
