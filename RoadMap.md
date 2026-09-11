@@ -8863,6 +8863,30 @@ Manufacturer/Hostname cells. Full suite green after this work.
 household pre-authentication gap this explicitly did NOT solve --
 still open, next up whenever the owner wants it).
 
+**Follow-up question, same day: when does Hostname actually populate?**
+Manufacturer is immediate -- pure MAC-prefix lookup computed live in
+the `dashboard` container (base stack, always running), no interception
+needed at all. Hostname is not: `controller/mdns_lookup.py` only runs
+while the `controller` container is up, and `controller`
+`depends_on: arp-worker` with all three interception containers sharing
+`profiles: ["interception"]` in `docker-compose.yml` -- so today,
+getting Hostname data means bringing up the SAME full interception
+profile (ARP poisoning + nftables redirects) that carries the
+household pre-authentication risk, not something lighter. Once up,
+it's not a "full probe" in the Crunchyroll-testing sense: `mdns_lookup`
+runs its first cycle immediately on startup (then every 120s, up to 5
+pending devices/cycle) against each device's last-known IP already on
+file -- no fresh discovery needs to fire first.
+
+Flagged that this coupling isn't functionally necessary --
+`mdns_lookup.py` needs no ARP/nftables machinery at all, just host
+networking and DB access -- only that docker-compose's `profiles`/
+`depends_on` wiring (a deliberate choice for the actually-risky
+containers, made before this feature existed) happens to bundle it in.
+**Asked the owner whether to decouple it into a standalone,
+non-enforcing mode; explicitly declined -- leave it coupled to a real
+interception window for now.** Not revisited unless asked again.
+
 ---
 
 ## Finding #2, part 2 -- QUIC fallback UX: the DNS-side fix alone wasn't enough (2026-09-11)
