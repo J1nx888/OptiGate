@@ -9283,3 +9283,89 @@ fixing 2 pre-existing tests and adding 4 new regression guards; the
 separate `test_seed_defaults.py` this work initially added was folded
 into the existing `test_seed_idempotent.py` instead once that file was
 found, to keep one test file per source file).
+
+## Real production incident: `--full-duplex` was never passed to the controller (2026-09-11)
+
+A planned short supervised interception window (see "One-pass
+interception-window runbook" above) turned into an hours-long live
+debugging session after the kernel/glibc fix and the AdGuard-truncation
+fix below. The actual symptom: household devices lost general internet
+partway through the window -- worked initially, degraded over roughly
+10 minutes, then failed almost completely, recovering instantly the
+moment the `interception` profile came down. Bump-enabled (Squid-proxied)
+traffic and already-established connections were unaffected throughout,
+which is exactly why the failure looked device-/timing-dependent rather
+than a clean on/off break.
+
+**Two real, unrelated bugs were found and fixed live before the actual
+root cause, both worth keeping**:
+
+- The beelink box had a kernel (`7.0.0-30` -> `7.0.0-31-generic`) and
+  `libc6` upgrade installed via an automatic apt run at 06:25 AM the same
+  day, never applied because the box hadn't rebooted
+  (`/var/run/reboot-required` was set the whole time). Running a stale
+  kernel against upgraded userspace networking libraries for hours
+  produced its own, now-resolved, systemic raw-forwarding failure
+  (100% of non-bump devices' new connections got zero replies, proven
+  via `dst host <device>` captures showing literally nothing arriving
+  back on the box's own interface). Fixed by rebooting the host --
+  confirmed via `.102` and `.10` both establishing real connections
+  immediately after.
+- `common/adguard_client.py`'s `_request()` had `MAX_RESPONSE_BYTES = 1
+  MiB` and silently truncated any larger response instead of erroring
+  (`f80169d`). Once AdGuard's `/control/filtering/status` response grew
+  past that (today's new v2fly/StevenBlack-sourced subscription
+  categories almost certainly pushed it over), every `adguard_sync` cycle
+  hit a confusing "malformed JSON" `AdGuardError`. Worse, logging that
+  error itself hit a `sqlite3.OperationalError: database is locked`
+  (real, if rare, multi-writer contention) which escaped **uncaught**
+  out of the periodic-task error handler and permanently killed that
+  background thread -- and the main reconcile loop froze the same way
+  moments later, silently, with no further log output at all, leaving
+  household devices on a stale policy snapshot indefinitely. Fixed by
+  raising the cap to 16 MiB and making `_request()` explicitly detect an
+  exactly-at-cap read and raise a clear error instead of ever handing a
+  possibly-truncated body to `json.loads()`. The separate
+  uncaught-exception-in-error-handler pattern (`system_events.log_event()`
+  can itself raise, and nothing catches that) is a real, still-open gap
+  worth a dedicated look -- flagged, not fixed tonight.
+
+**The actual root cause**, found only after conntrack/nftables policy,
+NIC/kernel offloads, and the Orbi mesh's own security settings were all
+individually ruled out with live evidence: **`controller`'s
+`--full-duplex` flag has never been passed in `docker-compose.yml`**,
+so `phase3/arp-worker/internal/worker/worker.go`'s `sendGratuitousReply`
+loop only ever poisoned the *device's* view of the gateway (`"gateway is
+at my MAC" -> told to the client`), never the *gateway's* view of the
+device (`"client is at my MAC" -> told to the gateway`, gated behind
+`if fullDuplex`). Without that second half, the real gateway resolves a
+device's true MAC completely normally and delivers replies **directly**
+to it, bypassing the box's own interface entirely. That's individually
+harmless to the device (TCP doesn't care which physical path a reply
+takes) -- the real damage is that the box's *own* conntrack table, which
+only tracks what crosses its own interface, never observes the reply
+direction and never advances a connection's state past `SYN_SENT`. A
+later packet on that same connection (an ACK, a data segment, a
+retried SYN once the client already believes the handshake completed)
+then interacts with that stuck conntrack entry unpredictably -- worse
+the more connections pile up in that state, which is exactly the
+"starts fine, degrades over minutes" curve observed live.
+
+Proven, not guessed: reproduced from scratch in a fully isolated
+Docker bridge/veth harness (`br-arptest`, unrelated Azure virtual NIC
+hardware, no household, no Orbi mesh anywhere in the loop) using this
+session's real `arp-worker`/`nftables-manager`/`controller` images.
+Without `--full-duplex`: 30/30 rapid-fire connections stuck at
+`SYN_SENT [UNREPLIED]` forever, reproducing the exact production
+degradation curve down to a single isolated connection eventually
+failing outright. With `--full-duplex` added to the controller's
+invocation (nothing else changed): 31/31 connections completed
+cleanly, `TIME_WAIT [ASSURED]` every time. `docker-compose.yml`'s
+`controller` service now passes `--full-duplex` unconditionally, with
+the full incident context inline as a comment next to it.
+
+**Not yet done**: redeploying this fix to production and re-running a
+supervised window to confirm it holds under real household load (the
+isolated harness proves the mechanism, not the specific box/network).
+The uncaught-exception-in-periodic-task-error-handler gap noted above
+is also still open.

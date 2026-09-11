@@ -291,6 +291,25 @@ services:
       - --db-path=/config/optigate.db
       - --gateway-ip=${GATEWAY_IP:-}
       - --gateway-mac=${GATEWAY_MAC:-}
+      # Real production incident (2026-09-11): this flag had never been
+      # passed here, so arp-worker only ever poisoned the DEVICE's view
+      # of the gateway, never the GATEWAY's view of the device (see
+      # worker.go's own "if fullDuplex" branch). Without it, the real
+      # gateway resolves a device's true MAC normally and replies to it
+      # DIRECTLY, bypassing this box entirely -- so this box's own
+      # conntrack never observes the reply direction and a connection's
+      # tracked state never advances past SYN_SENT. Later packets on
+      # that same connection then fail unpredictably, worse over time as
+      # more connections pile into that stuck state; already-established
+      # connections and bump/Squid-proxied traffic (which never depends
+      # on this raw-forward path) were unaffected, which is exactly why
+      # the failure looked device-/timing-dependent rather than a clean
+      # on/off break. Reproduced cleanly in an isolated bridge/veth
+      # harness (unrelated hardware, no real gateway involved): 30/30
+      # connections stuck at SYN_SENT without this flag, 31/31 completed
+      # cleanly (TIME_WAIT [ASSURED]) with it. See RoadMap.md's dated
+      # entry for the full incident writeup.
+      - --full-duplex
       - --adguard-url=${ADGUARD_URL:-http://127.0.0.1:3000}
       # No --adguard-username/--adguard-password here on purpose: the
       # controller reads them from the `adguard_username`/`adguard_password`
