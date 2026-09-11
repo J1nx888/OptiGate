@@ -694,6 +694,30 @@ threshold (`matching.MAX_SCOPED_CATEGORY_DOMAINS`) enforced below.
   checked = blocked by this schedule. No backend change was needed: the
   route already accepted `category_ids` as a plain list of checked
   values.
+- `POST /schedules/bulk-access` -> `bulk_update_schedule_access()` --
+  **2026-09-11, project owner's explicit request: "I need the ability
+  to bulk assign schedules to users, devices, or groups."** Schedules
+  list's "Manage access" bulk action, same shape as
+  `bulk_update_category_access()`: `schedule_ids` (checkboxes collected
+  client-side into hidden inputs right before submit, same as
+  `bulk_delete_schedules()` already does, to avoid nesting `<form>`
+  elements around each row's own Delete form) plus the same
+  `is_global`/`user_ids`/`group_ids`/`device_ids` fields as
+  `update_schedule()`'s own access section. One `BEGIN IMMEDIATE`
+  transaction for the whole batch via the new shared
+  `_replace_schedule_access()` helper (factored out of
+  `update_schedule()`, which now calls it too) -- **replaces** each
+  checked schedule's entire target set, same grant-and-revoke-are-the-
+  same-action shape as the category equivalent. Never touches
+  `schedule_categories`, `lockout_all`, or `is_mode` -- bulk-assigning
+  targets to several schedules at once must not silently change what
+  any of them block while active, only who they apply to. No
+  `matching.MAX_SCOPED_CATEGORY_DOMAINS`-style size check (that limit
+  exists because AdGuard Home can't scope a huge domain list to
+  specific clients -- schedule targeting is enforced in Python via
+  `schedule_eval.py`, never pushed to AdGuard, so it has no equivalent
+  constraint). A nonexistent schedule id in the submitted set is
+  silently skipped, not an error.
 - `POST /schedules/override` -> `add_schedule_override()` -- Phase 12's
   "Shift mode now". Form fields `schedule_id`, `target` (single-select
   combobox, `"user:<id>"`/`"group:<id>"`/`"device:<id>"`, decoded by

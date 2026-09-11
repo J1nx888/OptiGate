@@ -8955,3 +8955,66 @@ interception started -- that's a one-time-per-origin Chrome quirk that
 self-heals on its own (Chrome marks h3 "broken" for an origin after one
 failed attempt and stops retrying it until its own cache expires).
 Accepted as the practical ceiling for this fix.
+
+---
+
+## Bulk-assign schedules to users/devices/groups (2026-09-11)
+
+Project owner's direct request: "I need the ability to bulk assign
+schedules to users, devices, or groups." A schedule could already
+multi-target (one schedule -> many users/groups/devices, or
+`is_global` for everyone) via its own detail page's `BLOCK_ACCESS_SELECTS`
+multi-select comboboxes -- what was missing was a BULK entry point.
+Two directions existed as precedent in this codebase (Categories page's
+"pick categories, then targets" bulk-access vs. Devices page's "pick
+devices, then one group" bulk-assign); owner picked the Categories
+shape: from the Schedules list, select one or more schedules, then
+assign the same target set to all of them at once.
+
+**Built, following `bulk_update_category_access()` almost verbatim**:
+- New `_replace_schedule_access(conn, schedule_id, is_global, user_ids,
+  group_ids, device_ids)` helper in `dashboard/dashboard.py` -- same
+  delete-then-reinsert-per-junction-table shape as
+  `_replace_category_access()`, for `schedule_users`/`schedule_groups`/
+  `schedule_devices` instead of the `category_*` tables. `update_schedule()`
+  (the single-schedule Save) refactored to call this too, rather than
+  duplicating the same six lines inline.
+- New `POST /schedules/bulk-access` -> `bulk_update_schedule_access()` --
+  `schedule_ids` (checkboxes, collected client-side into hidden inputs
+  right before submit, same as `bulk_delete_schedules()` already does)
+  plus `is_global`/`user_ids`/`group_ids`/`device_ids`. One
+  `BEGIN IMMEDIATE` transaction for the whole batch. Deliberately never
+  touches `schedule_categories`, `lockout_all`, or `is_mode` -- bulk-
+  assigning WHO a schedule applies to must never silently change WHAT
+  it blocks while active. No `MAX_SCOPED_CATEGORY_DOMAINS`-style size
+  check needed (schedule targeting is enforced in Python via
+  `schedule_eval.py`, never pushed to AdGuard, so it has no domain-count
+  constraint to worry about).
+- Schedules list (`SCHEDULES_BODY`) gains a "Manage access" toggle
+  button in its existing bulk toolbar (next to the pre-existing bulk
+  Delete), revealing a panel with the same `BLOCK_ACCESS_SELECTS` macro
+  the single-schedule detail page already uses -- reused verbatim,
+  including its "Block for Everyone" wording (schedule targeting isn't
+  literally a block, but the single-schedule page already made this
+  same wording choice; kept consistent rather than inventing new
+  copy). `schedules()` route now passes the combo/preselected context
+  that macro needs (it didn't before, since the list page never
+  rendered it until now).
+
+**Tests**: 8 new `tests/test_dashboard.py` cases -- applies to every
+selected schedule, sets `is_global`, REPLACES rather than adds
+(a schedule previously assigned to one user, bulk-assigned to a
+different user, ends up with only the new one), leaves
+`lockout_all`/`is_mode` completely untouched, silently skips a
+nonexistent schedule id, empty-selection error, admin-auth-required,
+and the toolbar itself renders. All 40 schedule-related dashboard
+tests (old + new) still green after the `update_schedule()` refactor.
+Full suite: 1292 passed / 34 skipped.
+
+**Browser-verified end to end** (dev server, not just unit tests):
+created two schedules with different days/windows, bulk-selected both,
+assigned a user via the panel -- both schedules' own detail pages
+confirmed the user landed correctly while each schedule's own
+days/window stayed exactly as configured; repeated with "Block for
+Everyone" checked, both schedules' "Applies to" column correctly
+flipped to "Everyone".
