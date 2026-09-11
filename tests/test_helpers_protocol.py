@@ -629,3 +629,40 @@ def test_authz_records_client_ip_through_decide_crunchyroll(conn):
     row = _last_log(conn)
     assert row["reason"] == "show_not_approved"
     assert row["ip_address"] == _CLIENT_IP
+
+
+def test_authz_stamps_the_show_name_on_the_row_when_any_user_has_it_approved(conn):
+    """Owner request 2026-09-11: the Report page needs the show NAME next
+    to the id on a blocked row. If any user has the show approved, its
+    title is on file in user_shows -- authz_helper stamps it onto the
+    access_log row for free (cheap indexed lookup, no network)."""
+    watcher = _add_user(conn, "kid1", "pw")
+    other = _add_user(conn, "kid2", "pw")
+    _bind_ip_to_user(conn, watcher["id"], _CLIENT_IP)
+    _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    conn.execute(
+        "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?, 'GRE50KV36', 'Black Clover')",
+        (other["id"],),
+    )
+    conn.commit()
+
+    # kid1 has NOT approved Black Clover -> denied, but the name is known.
+    assert authz_helper.decide(
+        conn, _CLIENT_IP, "www.crunchyroll.com:443", "/series/GRE50KV36/black-clover"
+    ) is False
+    row = _last_log(conn)
+    assert row["reason"] == "show_not_approved"
+    assert row["series_id"] == "GRE50KV36"
+    assert row["series_name"] == "Black Clover"
+
+
+def test_authz_leaves_series_name_null_when_no_one_has_the_show(conn):
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], _CLIENT_IP)
+    _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    assert authz_helper.decide(
+        conn, _CLIENT_IP, "www.crunchyroll.com:443", "/series/GUNKNOWN99/whatever"
+    ) is False
+    row = _last_log(conn)
+    assert row["series_id"] == "GUNKNOWN99"
+    assert row["series_name"] is None  # Report page back-fills this via cr_api at render time

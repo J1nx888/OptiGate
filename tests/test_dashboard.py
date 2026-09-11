@@ -889,6 +889,70 @@ def test_report_page_explains_why_a_blocked_row_was_blocked(client, db_conn):
     assert b"not a domain configured anywhere in this system" in resp.data
 
 
+def test_report_shows_the_show_name_next_to_the_id_from_user_shows(client, db_conn):
+    """Owner request 2026-09-11: a blocked Crunchyroll row only carried
+    the raw series id (`GRE50KV36`). If ANY user has that show approved,
+    its title is already on file in user_shows -- surface it, and
+    back-fill the access_log row so it's a one-time lookup."""
+    client.post("/users/add", data={"username": "kidA", "password": "pw"}, headers=_auth_header())
+    uid = db_conn.execute("SELECT id FROM users WHERE username = 'kidA'").fetchone()[0]
+    db_conn.execute(
+        "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?, 'GRE50KV36', 'Black Clover')",
+        (uid,),
+    )
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, series_id, series_name, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kidB', 'www.crunchyroll.com', '/playback/v3/x/web/chrome/play', "
+        "'GRE50KV36', NULL, 0, 'show_not_approved')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"Black Clover" in resp.data
+    assert b"GRE50KV36" in resp.data  # id still shown alongside the name
+    backfilled = db_conn.execute(
+        "SELECT series_name FROM access_log WHERE series_id = 'GRE50KV36'"
+    ).fetchone()[0]
+    assert backfilled == "Black Clover"
+
+
+def test_report_resolves_a_show_name_via_cr_api_when_nobody_approved_it(client, db_conn, monkeypatch):
+    import dashboard
+    monkeypatch.setattr(dashboard.cr_api, "series_title", lambda sid, timeout=5.0: "Solo Leveling")
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, series_id, series_name, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kidC', 'www.crunchyroll.com', '/playback/v3/y/web/chrome/play', "
+        "'GXYZ12345', NULL, 0, 'show_not_approved')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"Solo Leveling" in resp.data
+    assert db_conn.execute(
+        "SELECT series_name FROM access_log WHERE series_id = 'GXYZ12345'"
+    ).fetchone()[0] == "Solo Leveling"
+
+
+def test_report_series_name_lookup_survives_a_cr_api_failure(client, db_conn, monkeypatch):
+    import dashboard
+
+    def boom(sid, timeout=5.0):
+        raise RuntimeError("CR API down")
+
+    monkeypatch.setattr(dashboard.cr_api, "series_title", boom)
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, series_id, series_name, allowed, reason) "
+        "VALUES (datetime('now'), NULL, 'kidD', 'www.crunchyroll.com', '/watch/z', 'GNOPE00000', NULL, 0, 'show_not_approved')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"GNOPE00000" in resp.data  # falls back to the bare id, page still renders
+
+
 def test_report_page_shows_the_raw_reason_code_for_an_unrecognized_value(client, db_conn):
     """_reason_label() falls back to the raw code rather than silently
     hiding an unmapped value -- e.g. a future reason this label map

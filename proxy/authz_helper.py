@@ -94,6 +94,23 @@ def _split_host_port(dst: str) -> str:
     return dst.split(":", 1)[0]
 
 
+def _series_name(conn, series_id: str | None) -> str | None:
+    """Best-effort human title for a Crunchyroll series id, stored on the
+    access_log row so the Report page can show the name next to the id
+    (owner request, 2026-09-11). Cheap, indexed, no network: if ANY user
+    has this show approved, `user_shows.series_name` already holds its
+    title. A blocked show nobody has approved returns None here -- the
+    Report page resolves and back-fills that case via cr_api at render
+    time, off the request path."""
+    if not series_id:
+        return None
+    row = conn.execute(
+        "SELECT series_name FROM user_shows WHERE series_id = ? AND series_name <> '' LIMIT 1",
+        (series_id,),
+    ).fetchone()
+    return row["series_name"] if row else None
+
+
 def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
     hostname = _split_host_port(dst)
     path = path or "/"
@@ -263,7 +280,7 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain, client_ip:
                 conn, user_id=user["id"], username=username, domain=hostname, ip_address=client_ip,
                 path=path, allowed=show_ok,
                 reason="show_approved" if show_ok else "show_not_approved",
-                series_id=series_id,
+                series_id=series_id, series_name=_series_name(conn, series_id),
             )
             if not show_ok:
                 allowed = False
@@ -286,7 +303,7 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain, client_ip:
             conn, user_id=user["id"], username=username, domain=hostname, ip_address=client_ip,
             path=path, allowed=show_ok,
             reason="show_approved" if show_ok else "show_not_approved",
-            series_id=series_id,
+            series_id=series_id, series_name=_series_name(conn, series_id),
         )
         if not show_ok:
             ok = False

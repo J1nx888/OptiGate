@@ -6514,7 +6514,11 @@ REPORT_BODY = """
     <td>{{ row.approval_requested_at }}</td>
     <td>{{ row.username }}</td>
     <td><code>{{ row.domain }}</code></td>
-    <td>{{ row.series_name or row.series_id or row.path or '' }}</td>
+    {% set show_name = row.series_name or series_names.get(row.series_id) %}
+    <td>
+      {% if row.series_id %}{{ show_name or row.series_id }}{% if show_name %} <code class="hint" style="font-size:.8em;">{{ row.series_id }}</code>{% endif %}
+      {% else %}{{ row.path or '' }}{% endif %}
+    </td>
     <td>
       {% if row.reason == 'path_not_allowed' %}
       <form class="inline" method="post" action="{{ url_for('approve_from_report') }}">
@@ -6631,8 +6635,13 @@ REPORT_BODY = """
       {% else %}&mdash;{% endif %}
     </td>
     <td><code class="cell-truncate cell-truncate-sm" title="{{ row.domain }}">{{ row.domain }}</code></td>
-    {% set sp = row.series_name or row.series_id or row.path or '' %}
-    <td>{% if sp %}<span class="cell-truncate" title="{{ sp }}">{{ sp }}</span>{% endif %}</td>
+    {% set show_name = row.series_name or series_names.get(row.series_id) %}
+    <td>
+      {% if row.series_id %}
+        <span class="cell-truncate" title="{{ show_name or row.series_id }}">{{ show_name or row.series_id }}</span>
+        {% if show_name %}<br><code class="hint" style="font-size:.8em;">{{ row.series_id }}</code>{% endif %}
+      {% elif row.path %}<span class="cell-truncate" title="{{ row.path }}">{{ row.path }}</span>{% endif %}
+    </td>
     <td>
       <span class="badge {{ 'allowed' if row.allowed else 'blocked' }}">{{ 'allowed' if row.allowed else 'blocked' }}</span>
       {% set label = reason_label(row.reason) %}
@@ -6808,6 +6817,64 @@ def _reason_label(reason: str | None) -> str | None:
     return _ACCESS_LOG_REASON_LABELS.get(reason, reason)
 
 
+# How many series titles one Report render will try to resolve from the
+# Crunchyroll API (each is one network round-trip on a cold cache). The
+# far-more-common `user_shows` lookup below is free and uncapped; this
+# only bounds the fallback for a series nobody has ever approved.
+_SERIES_TITLE_LOOKUP_CAP = 12
+
+
+def _resolve_series_names(conn, rows) -> dict:
+    """series_id -> display title, for the Report page's "Show / Path"
+    column. A blocked row only carries the raw series id (`GRE50KV36`);
+    the owner asked to see the name next to it. Resolution order, cheap
+    first: (1) the `series_name` already stored on the row, (2) any
+    `user_shows` row for that id -- if ANY user has the show approved,
+    its title is on file, (3) a best-effort `cr_api.series_title()`
+    call (bounded by `_SERIES_TITLE_LOOKUP_CAP`, cached in-process),
+    for a show nobody approved. A title found via (2)/(3) is written
+    back onto every matching `access_log` row so it's a one-time cost
+    and older rows get the name too."""
+    wanted = {
+        r["series_id"] for r in rows
+        if r["series_id"] and not (r["series_name"] or "").strip()
+    }
+    if not wanted:
+        return {}
+
+    names: dict[str, str] = {}
+    placeholders = ",".join("?" * len(wanted))
+    for r in conn.execute(
+        f"SELECT DISTINCT series_id, series_name FROM user_shows WHERE series_id IN ({placeholders})",
+        tuple(wanted),
+    ):
+        if r["series_name"]:
+            names[r["series_id"]] = r["series_name"]
+
+    unresolved = [sid for sid in wanted if sid not in names]
+    for sid in unresolved[:_SERIES_TITLE_LOOKUP_CAP]:
+        try:
+            title = cr_api.series_title(sid)
+        except Exception:  # display-only enrichment -- never break the page
+            title = None
+        if title:
+            names[sid] = title
+
+    if names:
+        try:
+            for sid, title in names.items():
+                conn.execute(
+                    "UPDATE access_log SET series_name = ? "
+                    "WHERE series_id = ? AND (series_name IS NULL OR series_name = '')",
+                    (title, sid),
+                )
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+
+    return names
+
+
 @app.route("/report")
 @require_admin
 def report():
@@ -6892,11 +6959,14 @@ def report():
         "ORDER BY approval_requested_at DESC"
     ).fetchall()
 
+    series_names = _resolve_series_names(conn, list(rows) + list(pending_requests))
+
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
     all_devices = conn.execute("SELECT * FROM devices ORDER BY COALESCE(label, mac_address)").fetchall()
     body = render_template_string(
         REPORT_BODY, rows=rows, all_users=all_users, pending_requests=pending_requests,
+        series_names=series_names,
         reason_label=_reason_label,
         report_target=report_target, report_filter_combo=_report_filter_combo(all_users, all_groups, all_devices),
         filter_status=filter_status, days=days, day_options=REPORT_DAY_OPTIONS,
