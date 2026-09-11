@@ -188,3 +188,44 @@ def test_failure_recovery_callbacks_are_independent_per_source(conn):
 
     rows = conn.execute("SELECT source, severity FROM system_events").fetchall()
     assert [(r["source"], r["severity"]) for r in rows] == [("adguard_sync", "error")]
+
+
+# ============================================================
+# Real production incident, 2026-09-11 (see this module's own dated
+# docstring on failure_recovery_callbacks()): log_event()'s own write
+# can itself raise (sqlite3.OperationalError: database is locked, on a
+# real box with several containers hitting the shared DB at once) --
+# and since on_error's whole JOB is reporting some OTHER failure, that
+# second exception used to have nowhere to go, escaping uncaught and
+# killing the periodic task's entire background thread. Neither
+# callback may ever raise, regardless of what log_event does.
+# ============================================================
+
+def test_on_error_never_raises_even_if_log_event_itself_fails(conn, monkeypatch, caplog):
+    def _boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(system_events, "log_event", _boom)
+    on_error, _ = system_events.failure_recovery_callbacks("adguard_sync")
+
+    on_error(RuntimeError("the original failure being reported"))  # must not raise
+
+    assert "failed to record its own failure event" in caplog.text
+
+
+def test_on_success_never_raises_even_if_log_event_itself_fails(conn, monkeypatch, caplog):
+    # Real, un-monkeypatched log_event here, so the first on_error()
+    # genuinely records a failure and sets state["failing"] = True --
+    # otherwise on_success() would short-circuit before ever reaching
+    # log_event() at all, and this test would prove nothing.
+    on_error, on_success = system_events.failure_recovery_callbacks("adguard_sync")
+    on_error(RuntimeError("boom"))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(system_events, "log_event", _boom)
+
+    on_success()  # must not raise
+
+    assert "failed to record its own recovery event" in caplog.text

@@ -11,8 +11,11 @@ of this; see its own docstring.
 """
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Callable
+
+log = logging.getLogger(__name__)
 
 
 class PeriodicTask:
@@ -33,6 +36,24 @@ class PeriodicTask:
     given success is notable; this class makes no judgment about that,
     it just reports every non-raising cycle the same way it reports
     every raising one via `on_error`.
+
+    **Real production incident, 2026-09-11**: `on_error`/`on_success`
+    themselves used to be called unguarded. Every real caller's
+    `on_error` (see `system_events.failure_recovery_callbacks()`) writes
+    a row to the shared SQLite DB -- and on a real production box with
+    several containers touching that DB at once, `conn.execute()` can
+    itself raise `sqlite3.OperationalError: database is locked`. That
+    second exception had nowhere to go: it escaped `_tick()` uncaught,
+    which killed this task's entire background thread outright (visible
+    as Python's own "Exception in thread ...:" traceback) -- the one
+    failure mode this class exists specifically to prevent, just one
+    level removed. Confirmed live: this is exactly what silently froze
+    the main controller reconcile loop for the rest of a session, with
+    zero further log output, while the container kept reporting
+    healthy. `_tick()` below now wraps both callbacks in their own
+    try/except, logging via the stdlib `logging` module (which never
+    touches the DB, so it can't fail the same way) rather than letting
+    either one bring the loop down.
     """
 
     def __init__(
@@ -94,7 +115,22 @@ class PeriodicTask:
             # reported via on_error and the loop keeps ticking so a
             # transient failure doesn't permanently stop the task.
             if self._on_error is not None:
-                self._on_error(exc)
+                self._safe_report(self._on_error, exc)
         else:
             if self._on_success is not None:
-                self._on_success()
+                self._safe_report(self._on_success)
+
+    def _safe_report(self, callback: Callable[..., None], *args: object) -> None:
+        """Calls `callback` (on_error or on_success), swallowing and
+        logging anything IT raises instead of letting that escape --
+        see this class's own docstring for the real incident this
+        guards against. `callback` failing to report a result is
+        strictly less severe than it killing the whole periodic task
+        over it."""
+        try:
+            callback(*args)
+        except Exception:  # noqa: BLE001 -- deliberately broad, see above
+            log.exception(
+                "%s: on_error/on_success callback itself raised -- swallowed to keep the task alive",
+                self._thread_name,
+            )

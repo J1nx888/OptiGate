@@ -9,16 +9,50 @@ the shared singleton row.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 import db
+
+log = logging.getLogger(__name__)
+
+
+def _safe_write(conn: sqlite3.Connection, label: str, sql: str, params: tuple) -> None:
+    """Runs one health-status INSERT/UPSERT, catching and logging
+    (via stdlib `logging`, which never touches the DB) anything it
+    raises instead of letting it propagate.
+
+    **Real production incident, 2026-09-11**: every report_*() function
+    below used to execute+commit directly. On a real box with several
+    containers touching the shared SQLite DB at once, that write can
+    itself raise `sqlite3.OperationalError: database is locked` --
+    and since these functions are most often called FROM an except
+    block already handling some other failure (controller/main.py's
+    run_cycle()), that second exception had nowhere to go: it escaped
+    uncaught, past the try/except that was already handling the
+    original problem, and crashed the entire caller (the main reconcile
+    loop itself, in the incident that motivated this fix -- confirmed
+    live: one "reconcile cycle failed" warning logged, then the whole
+    loop silently died with zero further output, while the container
+    kept reporting "Up" and healthy). A failure to WRITE a health
+    status is strictly less severe than whatever it was trying to
+    report, or than killing the loop that would have retried next
+    cycle -- so every function here now goes through this helper
+    instead of calling conn.execute()/commit() directly."""
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    except Exception:  # noqa: BLE001 -- deliberately broad, see docstring above
+        log.exception("%s: failed to write health status -- swallowed to avoid killing the caller", label)
 
 
 def report_healthy(conn: sqlite3.Connection, applied_generation: int) -> None:
     """Call this once per successful reconciliation cycle (see
     controller/main.py's run())."""
     now = db.now_iso()
-    conn.execute(
+    _safe_write(
+        conn,
+        "report_healthy",
         "INSERT INTO interception_runtime "
         "(singleton_id, applied_generation, mode, last_healthy_at, fail_open_reason) "
         "VALUES (1, ?, 'running', ?, NULL) "
@@ -27,7 +61,6 @@ def report_healthy(conn: sqlite3.Connection, applied_generation: int) -> None:
         "last_healthy_at = excluded.last_healthy_at, fail_open_reason = NULL",
         (applied_generation, now),
     )
-    conn.commit()
 
 
 def report_fail_open(
@@ -52,7 +85,9 @@ def report_fail_open(
     understating a real, true value on the very first fail_open cycle
     -- caught by this fix's own test suite, not by inspection."""
     if applied_generation is None:
-        conn.execute(
+        _safe_write(
+            conn,
+            "report_fail_open",
             "INSERT INTO interception_runtime (singleton_id, mode, fail_open_reason) "
             "VALUES (1, 'fail_open', ?) "
             "ON CONFLICT(singleton_id) DO UPDATE SET mode = 'fail_open', "
@@ -60,7 +95,9 @@ def report_fail_open(
             (reason,),
         )
     else:
-        conn.execute(
+        _safe_write(
+            conn,
+            "report_fail_open",
             "INSERT INTO interception_runtime (singleton_id, applied_generation, mode, fail_open_reason) "
             "VALUES (1, ?, 'fail_open', ?) "
             "ON CONFLICT(singleton_id) DO UPDATE SET "
@@ -68,7 +105,6 @@ def report_fail_open(
             "fail_open_reason = excluded.fail_open_reason",
             (applied_generation, reason),
         )
-    conn.commit()
 
 
 def report_repair_only(conn: sqlite3.Connection, reason: str) -> None:
@@ -95,11 +131,12 @@ def report_repair_only(conn: sqlite3.Connection, reason: str) -> None:
     report_fail_open's own None-generation case: the worker's own
     internal state changed here, not the IPC round-trip that would
     produce a fresh generation to report."""
-    conn.execute(
+    _safe_write(
+        conn,
+        "report_repair_only",
         "INSERT INTO interception_runtime (singleton_id, mode, fail_open_reason) "
         "VALUES (1, 'repair_only', ?) "
         "ON CONFLICT(singleton_id) DO UPDATE SET mode = 'repair_only', "
         "fail_open_reason = excluded.fail_open_reason",
         (reason,),
     )
-    conn.commit()

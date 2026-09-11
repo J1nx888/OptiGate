@@ -2,7 +2,7 @@
 controller<->ARP-worker pipeline (Milestone 6)."""
 from __future__ import annotations
 
-from health import report_fail_open, report_healthy
+from health import report_fail_open, report_healthy, report_repair_only
 
 
 def _row(conn):
@@ -78,3 +78,41 @@ def test_report_fail_open_without_generation_still_preserves_the_prior_value(con
     row = _row(conn)
     assert row["mode"] == "fail_open"
     assert row["applied_generation"] == 9
+
+
+def test_report_repair_only_sets_mode_and_reason(conn):
+    report_healthy(conn, applied_generation=2)
+    report_repair_only(conn, "worker lease expired, already self-corrected")
+    row = _row(conn)
+    assert row["mode"] == "repair_only"
+    assert row["fail_open_reason"] == "worker lease expired, already self-corrected"
+    assert row["applied_generation"] == 2, "repair_only must not clobber the last-known-good generation"
+
+
+# ============================================================
+# Real production incident, 2026-09-11: a health-status write itself
+# failing (e.g. sqlite3.OperationalError: database is locked, on a real
+# box with several containers hitting the shared DB at once) used to
+# propagate straight out of these functions -- most dangerously when
+# called from an except block already handling some OTHER failure
+# (controller/main.py's run_cycle()), where the second exception had
+# nowhere to go and killed the entire caller. None of these three
+# functions may ever raise, regardless of what the connection does.
+# ============================================================
+
+def test_report_healthy_never_raises_even_if_the_write_fails(conn, caplog):
+    conn.close()  # simplest reliable way to make the next execute() raise
+    report_healthy(conn, applied_generation=1)  # must not raise
+    assert "failed to write health status" in caplog.text
+
+
+def test_report_fail_open_never_raises_even_if_the_write_fails(conn, caplog):
+    conn.close()
+    report_fail_open(conn, "some reason")  # must not raise
+    assert "failed to write health status" in caplog.text
+
+
+def test_report_repair_only_never_raises_even_if_the_write_fails(conn, caplog):
+    conn.close()
+    report_repair_only(conn, "some reason")  # must not raise
+    assert "failed to write health status" in caplog.text

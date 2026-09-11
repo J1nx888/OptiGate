@@ -50,10 +50,13 @@ constraint entirely.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Callable
 
 import db
+
+log = logging.getLogger(__name__)
 
 _VALID_SEVERITIES = ("error", "recovery", "info")
 
@@ -126,6 +129,21 @@ def failure_recovery_callbacks(source: str) -> tuple[Callable[[Exception], None]
     created them, and these callbacks run on the loop's OWN background
     thread, not necessarily the same one that opened whatever
     connection the loop's task body itself uses internally).
+
+    **Real production incident, 2026-09-11**: `on_error`/`on_success`
+    below used to let `log_event()`'s own `conn.execute()` raise
+    straight through them. On a real box with several containers
+    hitting the shared DB at once, that write can itself fail with
+    `sqlite3.OperationalError: database is locked` -- which is exactly
+    what happened live: `adguard_sync`'s periodic task hit an unrelated
+    real error, this `on_error` tried to record THAT failure, the
+    recording write itself hit lock contention, and the resulting
+    uncaught exception killed the whole background thread outright
+    (`controller/periodic.py`'s own docstring has the fuller incident
+    writeup and the matching fix on that side of the boundary). Both
+    callbacks below now catch and log via stdlib `logging` (never the
+    DB) instead of letting a failure to RECORD a failure become a
+    second, worse failure.
     """
     state = {"failing": False}
 
@@ -134,6 +152,8 @@ def failure_recovery_callbacks(source: str) -> tuple[Callable[[Exception], None]
         conn = db.get_conn()
         try:
             log_event(conn, source, "error", f"{source} failed: {exc}")
+        except Exception:  # noqa: BLE001 -- deliberately broad, see docstring below
+            log.exception("%s: failed to record its own failure event -- swallowed", source)
         finally:
             conn.close()
 
@@ -144,6 +164,8 @@ def failure_recovery_callbacks(source: str) -> tuple[Callable[[Exception], None]
         conn = db.get_conn()
         try:
             log_event(conn, source, "recovery", f"{source} recovered")
+        except Exception:  # noqa: BLE001 -- deliberately broad, see docstring below
+            log.exception("%s: failed to record its own recovery event -- swallowed", source)
         finally:
             conn.close()
 

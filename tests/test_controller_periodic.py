@@ -162,6 +162,62 @@ def test_on_success_is_not_called_when_task_raises():
     assert count == 0, "on_success must never fire for a cycle that raised"
 
 
+def test_on_error_itself_raising_does_not_kill_the_loop(caplog):
+    """Real production incident, 2026-09-11 (see this module's own
+    dated docstring): a real caller's on_error writes to the shared DB
+    (common/system_events.py's failure_recovery_callbacks()), and that
+    write can itself raise (sqlite3.OperationalError: database is
+    locked, on a real box with several containers hitting the DB at
+    once). That second exception used to have nowhere to go -- it
+    escaped uncaught and killed the whole background thread outright,
+    which is exactly what silently froze a real reconcile loop in
+    production. The loop must survive an on_error that itself raises."""
+    task_calls = []
+    lock = threading.Lock()
+
+    def task():
+        with lock:
+            task_calls.append(1)
+        raise RuntimeError("original failure")
+
+    def bad_on_error(exc):
+        raise RuntimeError("on_error itself blew up")
+
+    pt = PeriodicTask(0.02, task, on_error=bad_on_error)
+    pt.start()
+    time.sleep(0.1)
+    pt.stop()
+
+    with lock:
+        count = len(task_calls)
+    assert count >= 2, f"expected the loop to keep ticking despite on_error raising, got {count}"
+    assert "on_error/on_success callback itself raised" in caplog.text
+
+
+def test_on_success_itself_raising_does_not_kill_the_loop(caplog):
+    """Same guard as the on_error case above, for symmetry -- on_success
+    is called via the exact same _safe_report() path."""
+    task_calls = []
+    lock = threading.Lock()
+
+    def task():
+        with lock:
+            task_calls.append(1)
+
+    def bad_on_success():
+        raise RuntimeError("on_success itself blew up")
+
+    pt = PeriodicTask(0.02, task, on_success=bad_on_success)
+    pt.start()
+    time.sleep(0.1)
+    pt.stop()
+
+    with lock:
+        count = len(task_calls)
+    assert count >= 2, f"expected the loop to keep ticking despite on_success raising, got {count}"
+    assert "on_error/on_success callback itself raised" in caplog.text
+
+
 def test_on_success_and_on_error_alternate_correctly_across_a_transition():
     """A real regression class: on_success firing for a FAILED cycle (or
     vice versa) would silently corrupt system_events.py's own
