@@ -8388,6 +8388,28 @@ redesign in a dedicated session, not a live quick-patch**.
      Tests: `test_successful_kid_login_logs_one_info_system_event`,
      `test_blank_form_post_is_not_logged_and_does_not_spend_the_rate_limit_budget`.
 
+10. **A manual mode shift ("Shift mode now") does NOT suppress a
+    `lockout_all` bedtime schedule.** Found 2026-09-10 setting up a
+    Crunchyroll test: an active `schedule_overrides` row (an operator
+    deliberately shifting a kid into Free Time) is honoured only for
+    `is_mode = 1` schedules -- `common/schedule_eval.py`'s
+    `is_full_lockout_active()` iterates `schedules WHERE lockout_all = 1`
+    and its own docstring is explicit: *"A non-mode lockout_all schedule
+    is unaffected either way"* by the override mechanism. Prod's
+    "Bedtime" / "Bedtime (Weekends)" are `lockout_all = 1, is_mode = 0`,
+    so a shift can't lift them: `compute_desired_policy()` still drops
+    the device into `quarantine_v4` (all traffic dropped) even though
+    the admin explicitly overrode the schedule. **Expected:** an active
+    shift override should suppress a `lockout_all` schedule too, not
+    just `is_mode` ones -- the admin overriding bedtime is a deliberate
+    act. **Fix candidates:** have `is_full_lockout_active()` short-circuit
+    when `schedule_eval.active_override_for_device()` returns a
+    non-lockout override for the target; or fold `lockout_all` into the
+    same override-aware path `is_mode` schedules already use. Needs a
+    decision on whether *every* override kind lifts a lockout or only an
+    explicit "free time / unlock" one. Workaround for testing: remove
+    the user from the Bedtime schedule, or move its start time past now.
+
 ### Dashboard feedback batch (2026-09-10, from interception-window use)
 
 Project owner's testing turned up five dashboard items. All
