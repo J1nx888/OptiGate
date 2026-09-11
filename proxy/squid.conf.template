@@ -247,6 +247,57 @@ ssl_bump terminate step2 all
 
 
 # ==========================================================
+# RESPONSE HEADER HYGIENE
+# ==========================================================
+# finding #2 (RoadMap.md, QUIC fallback UX): a bump_v4 device shows
+# Chrome's ERR_QUIC_PROTOCOL_ERROR on first navigation to an
+# h3-advertising origin, because nftables-manager drops udp/443 for
+# that device (correctly refusing QUIC) but Chrome still ATTEMPTS it.
+# controller/adguard_sync.py's build_ech_strip_rules() (item 17)
+# already withholds the DNS HTTPS/SVCB record's alpn="h3" hint for
+# every mode='bump' domain -- but confirmed live 2026-09-11 (the same
+# window that verified item 17 working) that this alone did NOT stop
+# the error: Chrome also learns "this origin speaks h3" from a real
+# `Alt-Svc: h3=...` HTTP response header, cached independently of DNS
+# for hours/days. Any real household device has almost certainly
+# already cached that header from browsing the origin unfiltered
+# before an interception window ever ran, so the DNS-side fix alone
+# can't retroactively un-cache it.
+#
+# This strips the header at its OTHER source: once a bump-mode
+# connection is fully decrypted, Squid parses it as an ordinary HTTP/1.1
+# response (ssl_bump restricts the upstream ALPN offer to http/1.1, so
+# there is no HTTP/2 response framing here to complicate this) and
+# reply_header_access can deny individual headers from ever reaching
+# the client. `ssl::bumped` is true only for a transaction Squid
+# actually decrypted via ssl_bump -- a spliced (raw TCP relay)
+# connection is never HTTP-parsed at all, so this can't and doesn't
+# need to touch splice-mode traffic.
+#
+# **Needs live verification, not yet done**: Squid's header table only
+# recognizes a fixed set of header names specially; an unrecognized
+# name falls into its generic "Other" bucket, and denying "Other"
+# would be far too broad (it would strip every header Squid doesn't
+# specifically enumerate, not just Alt-Svc). `squid -k parse` only
+# checks this directive's syntax, not which bucket "Alt-Svc" actually
+# resolves to -- confirm with a real request against an h3-advertising
+# origin in the next interception window (or a disposable smoke-test
+# rig) that ONLY Alt-Svc is missing from the response and every other
+# header survives untouched.
+acl bumped ssl::bumped
+reply_header_access Alt-Svc deny bumped
+
+# Together with item 17's DNS-side strip, this closes both channels a
+# FRESH browser profile (no prior unfiltered visit to the origin) could
+# ever learn h3 support through while behind this proxy. It cannot
+# retroactively clear a real device's pre-existing Alt-Svc cache from
+# before interception started -- that's a one-time-per-origin Chrome
+# quirk that self-heals on its own (Chrome marks h3 "broken" for an
+# origin after one failed attempt and stops retrying it), not something
+# any server-side config can un-cache.
+
+
+# ==========================================================
 # PERFORMANCE
 # ==========================================================
 

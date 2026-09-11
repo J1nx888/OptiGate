@@ -193,6 +193,28 @@ def test_http_access_catchall_is_still_deny_not_allow():
     )
 
 
+def test_alt_svc_response_header_is_stripped_for_bumped_connections():
+    """RoadMap.md finding #2 (QUIC fallback UX): controller/adguard_sync.py's
+    build_ech_strip_rules() (item 17) already withholds the DNS HTTPS
+    record's alpn="h3" hint for every bump-mode domain, but that alone was
+    confirmed live 2026-09-11 NOT to stop Chrome's ERR_QUIC_PROTOCOL_ERROR
+    -- Chrome also caches h3 support from a real Alt-Svc response header,
+    independent of DNS. reply_header_access denies that header specifically
+    for any transaction Squid actually decrypted (ssl::bumped is false for
+    spliced/raw-relayed traffic, which Squid never HTTP-parses at all), so
+    a fresh browser profile behind this proxy can never learn h3 support
+    for a bump-mode domain through either channel."""
+    text = TEMPLATE_PATH.read_text()
+    assert re.search(r"^acl\s+bumped\s+ssl::bumped\s*$", text, re.MULTILINE), (
+        "expected an `acl bumped ssl::bumped` line -- see squid.conf.template's "
+        "RESPONSE HEADER HYGIENE section"
+    )
+    assert re.search(r"^reply_header_access\s+Alt-Svc\s+deny\s+bumped\s*$", text, re.MULTILINE), (
+        "expected `reply_header_access Alt-Svc deny bumped` -- see squid.conf.template's "
+        "RESPONSE HEADER HYGIENE section"
+    )
+
+
 def test_host_verify_strict_is_off_for_intercept_mode():
     """RoadMap.md finding #6 (2026-09-10): with Squid's stricter host
     verification, an intercepted connection to a large multi-IP CDN gets
