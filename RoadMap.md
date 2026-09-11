@@ -9369,3 +9369,103 @@ supervised window to confirm it holds under real household load (the
 isolated harness proves the mechanism, not the specific box/network).
 The uncaught-exception-in-periodic-task-error-handler gap noted above
 is also still open.
+
+## Bug found live, not fixed: deleting a device drops it out of ARP-spoofing scope entirely (2026-09-11)
+
+Found while re-testing after the `--full-duplex` fix above. Deleting a
+device row (dashboard "Jonathan S25", `192.168.1.57`,
+`e6:fb:4e:5b:ef:a5`) does not fall it back to `unauthenticated_v4`
+(captive-portal-only, the safe default for an unknown device) -- it
+removes the device from ARP-spoofing scope **entirely**. Confirmed live:
+zero ARP traffic to/from that IP/MAC at all post-deletion (no spoofed
+replies in either direction), meaning its ARP cache resolves the real
+gateway normally and it talks directly to the internet with zero
+interception, zero filtering, zero enforcement -- while the device is
+still physically present on the network. The underlying
+`device_bindings` row is left behind as an orphan (`device_id` nulled,
+not deleted or reclassified) rather than triggering any fallback
+classification.
+
+Net effect: deleting a device functions as an unconditional bypass, not
+a safe default. Not fixed live -- needs a proper decision on intended
+behavior (should a deleted-but-still-present device default to
+unauthenticated, get quarantined, or something else) before
+implementing, per this project's standing practice for real defects
+found via hands-on testing.
+
+## Feature gap, not built yet: bump-only domains have no fallback block for non-bump devices (2026-09-11)
+
+Surfaced live while re-testing after the `--full-duplex` fix: `.102`
+(not bump-enabled) had full, unrestricted access to crunchyroll.com.
+Root cause of THAT specific instance was a stray, unassigned
+"Entertainment" v2fly category left over from testing the category-catalog
+feature earlier the same day (`is_global=0`, no user/device/group
+assignment -- enforces nothing for anyone; left alone per owner's
+request, to be configured properly later) -- not itself a bug.
+
+But it surfaced a real, standing design gap the owner explicitly called
+out: **any domain configured for bump-tier filtering (e.g. Crunchyroll's
+per-series whitelist, `proxy/authz_helper.py`'s `_decide_crunchyroll()`)
+currently has no corresponding block for devices that are NOT
+bump-enabled.** Bump-based filtering only works by decrypting HTTPS via
+Squid, which non-bump devices never touch at all -- so today, a bump
+domain is enforced ONLY on the specific devices an admin flips
+`bump_enabled` on, and is otherwise fully reachable, unrestricted, from
+every other device on the network. This is a real bypass: a
+household member can trivially defeat any bump-based restriction just
+by using a different, non-bump device to reach the same site.
+
+**Not built tonight** -- needs proper design (likely: every domain
+governed by a bump-scoped rule also needs an automatic, paired DNS-tier
+hard-deny applied to every device that is NOT bump-enabled for that
+domain, kept in sync as bump-enabled status changes per device) before
+implementing, per this project's standing practice.
+
+### Session close-out (2026-09-11): post-fix performance, still open
+
+After `--full-duplex` was deployed and confirmed fixing the core
+connectivity failure, live re-testing surfaced a narrower, real
+performance problem that was NOT resolved tonight:
+
+- **Sustained high-throughput uploads fail.** speedtest.net's download
+  test eventually completes (after a slow, ~1-minute "connecting"
+  phase); its upload test reliably fails with "a socket error occurred
+  during the upload test." General browsing (small requests, typical
+  page loads) works acceptably. Root cause not identified -- full-duplex
+  relay makes every packet in both directions physically transit the
+  box now (previously only the outbound leg did), and this is presumably
+  the box's own forwarding throughput/CPU capacity (or something more
+  specific to sustained one-directional volume) becoming the limiting
+  factor, not a correctness bug like the one this session found and
+  fixed. Needs real investigation in a dedicated session -- likely
+  worth profiling the box's own CPU/interrupt load during an actual
+  sustained transfer, not just point-in-time `uptime` snapshots (which
+  showed low load both before and after, telling us little about
+  transient saturation during the transfer itself).
+- **Disabling GRO/GSO/TSO on `enp1s0` measurably improved general
+  browsing responsiveness** (owner-confirmed: reverting them made
+  browsing slow again; re-disabling fixed it) but did **not** fix the
+  upload failure either way. This is a real, live-confirmed data point,
+  not a settled fix -- it was tested with `ethtool -K enp1s0 gro off
+  gso off tso off`, which is **runtime-only and does not persist across
+  a reboot**. Left reverted to the default (all on) when interception
+  was torn down for the night, since leaving a fragile, undocumented,
+  non-persistent setting live overnight (with no service depending on
+  it running) seemed worse than losing the improvement until the next
+  session. Whoever picks this up next should: (a) decide whether to
+  make this persistent (a systemd unit, a udev rule, or the interception
+  containers' own startup) once the upload issue is also understood,
+  since disabling these offloads on a hairpin-forwarding interface is a
+  well-documented general practice, not a one-off hack, and (b) verify
+  it doesn't just mask the upload problem for smaller devices while
+  still failing under real sustained load.
+
+**End state for the night**: `interception` profile torn down
+(`controller`/`arp-worker`/`nftables-manager` stopped, base stack
+dashboard/proxy/adguard left running), NIC offloads reverted to
+default. `--full-duplex` fix is committed, pushed, and deployed --
+it stays in `docker-compose.yml` and will apply automatically next time
+the profile comes up. The device-deletion bug and the bump-domain
+fallback-block gap above are both logged with tracked follow-up tasks;
+this performance item is not yet tracked as a separate task and should
+be before the next supervised window.
