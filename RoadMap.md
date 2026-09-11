@@ -9018,3 +9018,54 @@ confirmed the user landed correctly while each schedule's own
 days/window stayed exactly as configured; repeated with "Block for
 Everyone" checked, both schedules' "Applies to" column correctly
 flipped to "Everyone".
+
+---
+
+## Assigning a device to a user/group now authenticates it too (2026-09-11)
+
+Project owner's direct question: **"When a device is assigned to a
+group, it should no logon require logon, is that the case today?"**
+Checked before assuming -- it was NOT the case. `dashboard.py`'s
+`update_device()` (the Manage page's Save), `_batch_assign_devices_to_group()`
+(shared by `bulk_assign_devices_to_group()` and `bulk_add_to_group()`)
+never touched `is_authenticated` at all: assigning a PREAUTH device to
+a kid or group left it exactly as gated as before, still redirected to
+the captive portal, still showing on "Devices awaiting login."
+Meanwhile `dashboard/captive_portal_server.py`'s own SEPARATE
+"assign_group" admin action (reachable only by standing at the gated
+device itself and re-entering admin credentials on that page) already
+DID set `is_authenticated = 1` on a group assignment, with its own
+comment explaining that a group assignment "reads more clearly as...
+authenticated" than a bypass side effect. The main dashboard -- the
+page an admin actually uses day to day -- was simply inconsistent with
+its own rarely-used side panel.
+
+**Important distinction, called out explicitly so this doesn't get
+second-guessed later**: this is NOT the same question as
+`docs/database/schema.md`'s existing "do not fix this asymmetry" note
+about `add_device()`/`import_devices()` (creating a brand-new device --
+schema default of `is_authenticated = 1` is correct there, an admin
+typing in a MAC is itself the vouching act, and IoT devices that can
+never render the portal page would be permanently locked out
+otherwise). This fix is about a DIFFERENT moment: assigning an
+*already-existing* (commonly PREAUTH) device to a user or group. Owner
+confirmed: yes, fix it, for both users and groups, for consistency.
+
+**Built**: `update_device()` now sets `is_authenticated = 1` whenever
+its `assignment` field resolves to a real user or group (never for
+`ignored` or "Unassigned" -- neither is a vouching act -- and only
+ever sets it, never clears an already-authenticated device back to 0).
+`_batch_assign_devices_to_group()` now sets it unconditionally, since
+that function is only ever called with a real `group_id`, never to
+unassign -- covers both `bulk_assign_devices_to_group()` (Devices list)
+and `bulk_add_to_group()` (Group detail page) in one place.
+
+**Tests**: 6 new `tests/test_dashboard.py` cases -- assigning to a user
+authenticates a PREAUTH device, assigning to a group does too, leaving
+unassigned does NOT, picking "Ignore" does NOT, and both bulk-group
+routes authenticate PREAUTH devices. All 149 device/group-related
+dashboard tests green (caught and fixed a self-inflicted bug while
+writing these: an Edit accidentally split an existing test's body,
+orphaning its trailing assertions -- found immediately by the test
+actually failing, not silently, and fixed by restoring them to the
+right function before moving on). Full suite: 1298 passed / 34 skipped.

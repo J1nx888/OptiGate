@@ -979,6 +979,20 @@ text here still said "not built" until now).
   fires once per transition, so a later save with `bypass_login` already
   on never re-forces `ignored` back over an admin's own subsequent
   "actually, assign it somewhere" edit.
+  **Also sets `is_authenticated = 1` when this submission's `assignment`
+  resolves to a real user or group (added 2026-09-11, project owner's
+  direct question: "when a device is assigned to a group, it should no
+  longer require logon, is that the case today?")** -- it wasn't:
+  assigning a PREAUTH device left it gated behind the captive portal
+  unchanged, while `dashboard/captive_portal_server.py`'s own separate
+  "assign_group" admin action already authenticated on assignment. Same
+  "admin assignment IS the vouching act" reasoning `add_device()`
+  already uses for a brand-new MAC (see `docs/database/schema.md`'s
+  `devices.is_authenticated` section for the full writeup and why this
+  is a DIFFERENT case from that one's own "do not fix this asymmetry"
+  note). Never fires for `ignored` or "Unassigned" (neither is a
+  vouching act), and only ever sets 1, never clears an already-
+  authenticated device back to 0.
 - `POST /devices/bypass_login` -> `bypass_login_device()` (added
   2026-08-31) -- form field `device_id`. Sets `bypass_login = 1` and
   nothing else -- deliberately a single-column `UPDATE`, not a wholesale
@@ -1072,9 +1086,12 @@ text here still said "not built" until now).
   `data-mode="multi"`). Batch-`UPDATE`s every listed device's
   `user_id`/`group_id`/`ignored` (mirrors `update_device()`'s own
   `"group:<id>"` assignment semantics exactly, never touching
-  label/`bump_enabled`/`bypass_login`). Redirects to `group_detail` with
-  an error flash if no devices were selected or the group no longer
-  exists.
+  label/`bump_enabled`/`bypass_login`) -- **also sets
+  `is_authenticated = 1` unconditionally (added 2026-09-11, same fix as
+  `update_device()`'s own entry above)**, since this function is only
+  ever called with a real `group_id`, never to unassign. Redirects to
+  `group_detail` with an error flash if no devices were selected or the
+  group no longer exists.
 - `POST /devices/bulk-assign-group` -> `bulk_assign_devices_to_group()`
   (added 2026-09-07, live-testing follow-up to `/groups/add-devices`
   above -- its combobox needs devices' exact labels/MACs to find them,

@@ -458,6 +458,31 @@ way an auto-discovered MAC is. Admin-entered = known/trusted = the
 vouching act itself, the same way "never seen this MAC before" is
 treated as not-vouched-for and gated. Do not "fix" this asymmetry.
 
+**A related but DIFFERENT case, actually fixed 2026-09-11**: the above
+is about *creating* a device (`add_device()`/`import_devices()`) --
+this paragraph is about *assigning an already-existing* device (most
+commonly a PREAUTH one sitting on the "Devices awaiting login" card)
+to a user or group via `update_device()` (the Manage page's Save),
+`_batch_assign_devices_to_group()` (shared by
+`bulk_assign_devices_to_group()` and `bulk_add_to_group()`). Before
+this date neither ever touched `is_authenticated` -- an admin could
+assign a PREAUTH device to a kid or group and it would STILL show up
+gated behind the captive portal, unchanged. Meanwhile
+`dashboard/captive_portal_server.py`'s own separate "assign_group"
+admin action (reachable only by standing at the gated device itself)
+already DID set `is_authenticated = 1` on a group assignment, with an
+explicit comment that a group assignment "reads more clearly as...
+authenticated" than a bypass side effect -- the main dashboard was
+simply inconsistent with its own other surface. Project owner's direct
+question ("when a device is assigned to a group, it should no longer
+require logon, is that the case today?") surfaced this; now fixed on
+both dashboard paths (user or group, single or bulk) to match: picking
+a real assignment for an existing device is the SAME vouching act as
+`add_device()`'s manually-typed MAC, just applied one step later in
+that device's life. Only ever sets `is_authenticated` to 1, never
+clears it back to 0 -- and does NOT fire for `ignored` or "Unassigned"
+(neither is a vouching act).
+
 `bypass_login` = exempts a
 device from the LOGIN requirement specifically (not from interception
 or policy generally, unlike `ignored`) -- **real bug found and fixed
