@@ -4704,7 +4704,15 @@ SCHEDULES_BODY = """
         onsubmit="return confirm('Delete every checked schedule? This cannot be undone.');">
     <button class="danger small" type="submit" disabled>Delete</button>
   </form>
-  <span class="hint" id="scheduleBulkCount" style="margin:0;">Check schedules below to delete several at once.</span>
+  <button class="btn small" type="button" id="scheduleBulkManageToggle" disabled>Manage access</button>
+  <span class="hint" id="scheduleBulkCount" style="margin:0;">Check schedules below to act on several at once.</span>
+</div>
+<div id="scheduleBulkManagePanel" hidden style="margin:-.3rem 0 .6rem;">
+  <p class="hint">Pick who the checked schedules apply to, then apply -- replaces the ENTIRE target set for every schedule checked (same as editing each one's own Manage page, just all at once). Doesn't touch what any of them block (their days/window/categories/lockout stay whatever they already were) -- only who they apply to.</p>
+  <form id="bulkScheduleAccessForm" class="add-form" method="post" action="{{ url_for('bulk_update_schedule_access') }}">
+""" + BLOCK_ACCESS_SELECTS + """
+    <button class="add small" type="submit">Apply to checked schedules</button>
+  </form>
 </div>
 {% endif %}
 {% if schedules %}<input type="search" data-filter-table="schedulesTable" placeholder="Search schedules&hellip;" style="margin-bottom:.6rem; width:100%; max-width:280px;">{% endif %}
@@ -4737,14 +4745,17 @@ SCHEDULES_BODY = """
   var selectAll = document.getElementById("scheduleSelectAll");
   var countLabel = document.getElementById("scheduleBulkCount");
   var toolbar = document.getElementById("scheduleBulkToolbar");
+  var manageToggle = document.getElementById("scheduleBulkManageToggle");
+  var managePanel = document.getElementById("scheduleBulkManagePanel");
 
   function updateToolbarState() {
     if (!toolbar) return;
     var n = document.querySelectorAll(".bulk-schedule-check:checked").length;
     toolbar.querySelectorAll("button").forEach(function (btn) { btn.disabled = n === 0; });
+    if (n === 0 && managePanel) managePanel.hidden = true;
     if (countLabel) {
       countLabel.textContent = n === 0
-        ? "Check schedules below to delete several at once."
+        ? "Check schedules below to act on several at once."
         : n + " schedule" + (n === 1 ? "" : "s") + " selected.";
     }
   }
@@ -4760,9 +4771,23 @@ SCHEDULES_BODY = """
   });
   updateToolbarState();
 
-  var form = document.getElementById("bulkScheduleDeleteForm");
-  if (form) {
+  // "Manage access" doesn't submit anything itself -- it reveals the
+  // access-assign panel below, same toggle-reveals-a-panel pattern as
+  // the Categories page's own "Manage access" button.
+  if (manageToggle && managePanel) {
+    manageToggle.addEventListener("click", function () {
+      managePanel.hidden = !managePanel.hidden;
+    });
+  }
+
+  function wireBulkForm(formId) {
+    var form = document.getElementById(formId);
+    if (!form) return;
     form.addEventListener("submit", function (event) {
+      // The row checkboxes live in #schedulesTable, not inside any bulk
+      // form -- nesting a <form> around the table would break each row's
+      // own Delete form (HTML forms can't nest) -- so they're collected
+      // into hidden inputs here instead, right before submit.
       var checked = Array.prototype.slice.call(document.querySelectorAll(".bulk-schedule-check:checked"));
       if (!checked.length) {
         event.preventDefault();
@@ -4779,6 +4804,8 @@ SCHEDULES_BODY = """
       });
     });
   }
+  wireBulkForm("bulkScheduleDeleteForm");
+  wireBulkForm("bulkScheduleAccessForm");
 })();
 </script>
 
@@ -4986,6 +5013,11 @@ def schedules():
         mode_schedules=[s for s in rows if s["is_mode"]],
         override_target_combo=_override_target_combo(all_users, all_groups, all_devices),
         active_overrides=active_overrides,
+        is_global_checked=False,
+        all_users_combo=_entity_combo(all_users, lambda u: u["display_name"]),
+        all_groups_combo=_entity_combo(all_groups, lambda g: g["name"]),
+        all_devices_combo=_entity_combo(all_devices, lambda dev: dev["label"] or dev["mac_address"]),
+        preselected_user_ids=set(), preselected_group_ids=set(), preselected_device_ids=set(),
     )
     return render("schedules", body)
 
@@ -5196,6 +5228,85 @@ def schedule_detail(schedule_id: int):
     return render("schedules", body)
 
 
+def _replace_schedule_access(conn, schedule_id, is_global: int, user_ids: set[int], group_ids: set[int], device_ids: set[int]) -> None:
+    """Replaces one schedule's entire target set (Everyone + users +
+    groups + devices) with exactly what's passed in -- same grant-and-
+    revoke-are-the-same-action shape as _replace_category_access(), just
+    for schedule_users/schedule_groups/schedule_devices instead of the
+    category_* junction tables. Shared by update_schedule() (one
+    schedule, from its own Manage page) and bulk_update_schedule_access()
+    (many schedules at once, from the Schedules list) -- deliberately no
+    conn.commit() here, so the bulk caller can wrap its whole loop in one
+    transaction rather than committing (and fsyncing) once per schedule.
+    Never touches schedule_categories -- that's what a schedule BLOCKS,
+    a separate concern from who it applies to, and bulk-assigning targets
+    to several schedules at once shouldn't silently change what any of
+    them do while active."""
+    conn.execute("UPDATE schedules SET is_global = ? WHERE id = ?", (is_global, schedule_id))
+    conn.execute("DELETE FROM schedule_users WHERE schedule_id = ?", (schedule_id,))
+    for uid in user_ids:
+        conn.execute("INSERT OR IGNORE INTO schedule_users (schedule_id, user_id) VALUES (?,?)", (schedule_id, uid))
+    conn.execute("DELETE FROM schedule_groups WHERE schedule_id = ?", (schedule_id,))
+    for gid in group_ids:
+        conn.execute("INSERT OR IGNORE INTO schedule_groups (schedule_id, group_id) VALUES (?,?)", (schedule_id, gid))
+    conn.execute("DELETE FROM schedule_devices WHERE schedule_id = ?", (schedule_id,))
+    for did in device_ids:
+        conn.execute("INSERT OR IGNORE INTO schedule_devices (schedule_id, device_id) VALUES (?,?)", (schedule_id, did))
+
+
+@app.route("/schedules/bulk-access", methods=["POST"])
+@require_admin
+def bulk_update_schedule_access():
+    """Schedules list's "Manage access" bulk action -- 2026-09-11, project
+    owner's explicit request: "I need the ability to bulk assign
+    schedules to users, devices, or groups." Same shape as
+    bulk_update_category_access(): checkboxes on the list (collected
+    client-side, since the checkboxes live in the table, not inside this
+    form, to avoid nesting <form> elements around each row's own Delete
+    form) plus the same is_global/user_ids/group_ids/device_ids fields as
+    the single-schedule form. One BEGIN IMMEDIATE transaction for the
+    whole batch via the shared _replace_schedule_access() helper, same
+    "one commit, not one per row" discipline as every other bulk route in
+    this file.
+
+    Unlike bulk_update_category_access(), there's no
+    matching.MAX_SCOPED_CATEGORY_DOMAINS-style size check to apply here --
+    that limit exists because AdGuard Home can't scope a huge domain list
+    to specific clients, which has no schedule equivalent (schedule
+    targeting is enforced in Python via schedule_eval.py, not pushed to
+    AdGuard at all)."""
+    schedule_ids = {int(x) for x in request.form.getlist("schedule_ids") if x.isdigit()}
+    is_global = 1 if request.form.get("is_global") else 0
+    user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
+    group_ids = {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}
+    device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
+
+    if not schedule_ids:
+        return flash_redirect("schedules", "No schedules selected.", error=True)
+
+    conn = get_db()
+    placeholders = ",".join("?" * len(schedule_ids))
+    existing_ids = {
+        row["id"] for row in conn.execute(
+            f"SELECT id FROM schedules WHERE id IN ({placeholders})", tuple(schedule_ids)
+        )
+    }
+
+    if existing_ids:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for schedule_id in existing_ids:
+                _replace_schedule_access(conn, schedule_id, is_global, user_ids, group_ids, device_ids)
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.commit()
+
+    message = f"Access updated for {len(existing_ids)} schedule{'s' if len(existing_ids) != 1 else ''}."
+    return flash_redirect("schedules", message, error=not existing_ids)
+
+
 @app.route("/schedules/update", methods=["POST"])
 @require_admin
 def update_schedule():
@@ -5242,18 +5353,10 @@ def update_schedule():
     conn = get_db()
     conn.execute(
         "UPDATE schedules SET days_of_week = ?, start_time = ?, end_time = ?, time_zone = ?, "
-        "lockout_all = ?, is_mode = ?, is_global = ? WHERE id = ?",
-        (days, start_time, end_time, time_zone, lockout_all, is_mode, is_global, schedule_id),
+        "lockout_all = ?, is_mode = ? WHERE id = ?",
+        (days, start_time, end_time, time_zone, lockout_all, is_mode, schedule_id),
     )
-    conn.execute("DELETE FROM schedule_users WHERE schedule_id = ?", (schedule_id,))
-    for uid in user_ids:
-        conn.execute("INSERT OR IGNORE INTO schedule_users (schedule_id, user_id) VALUES (?,?)", (schedule_id, uid))
-    conn.execute("DELETE FROM schedule_groups WHERE schedule_id = ?", (schedule_id,))
-    for gid in group_ids:
-        conn.execute("INSERT OR IGNORE INTO schedule_groups (schedule_id, group_id) VALUES (?,?)", (schedule_id, gid))
-    conn.execute("DELETE FROM schedule_devices WHERE schedule_id = ?", (schedule_id,))
-    for did in device_ids:
-        conn.execute("INSERT OR IGNORE INTO schedule_devices (schedule_id, device_id) VALUES (?,?)", (schedule_id, did))
+    _replace_schedule_access(conn, schedule_id, is_global, user_ids, group_ids, device_ids)
     if categories_section_present:
         conn.execute("DELETE FROM schedule_categories WHERE schedule_id = ?", (schedule_id,))
         for cid in category_ids:

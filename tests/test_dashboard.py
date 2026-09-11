@@ -5506,6 +5506,132 @@ def test_bulk_update_category_access_requires_admin_auth(client):
     assert resp.status_code == 401
 
 
+def _add_schedule(client, name, **overrides):
+    data = {
+        "name": name, "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        "start_time": "21:00", "end_time": "06:00", "time_zone": "UTC",
+    }
+    data.update(overrides)
+    client.post("/schedules/add", data=data, headers=_auth_header())
+
+
+def test_bulk_update_schedule_access_applies_to_every_selected_schedule(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    _add_schedule(client, "Sched1")
+    _add_schedule(client, "Sched2")
+    schedule_ids = [r["id"] for r in db_conn.execute("SELECT id FROM schedules WHERE name IN ('Sched1','Sched2')")]
+
+    resp = client.post(
+        "/schedules/bulk-access",
+        data={"schedule_ids": [str(i) for i in schedule_ids], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"].startswith("/schedules")
+    for schedule_id in schedule_ids:
+        assert db_conn.execute(
+            "SELECT 1 FROM schedule_users WHERE user_id = ? AND schedule_id = ?", (user_id, schedule_id)
+        ).fetchone() is not None
+
+
+def test_bulk_update_schedule_access_can_set_global(client, db_conn):
+    _add_schedule(client, "Sched1")
+    _add_schedule(client, "Sched2")
+    schedule_ids = [r["id"] for r in db_conn.execute("SELECT id FROM schedules")]
+
+    client.post(
+        "/schedules/bulk-access",
+        data={"schedule_ids": [str(i) for i in schedule_ids], "is_global": "on"},
+        headers=_auth_header(),
+    )
+
+    rows = db_conn.execute("SELECT is_global FROM schedules").fetchall()
+    assert all(r["is_global"] == 1 for r in rows)
+
+
+def test_bulk_update_schedule_access_replaces_rather_than_adds(client, db_conn):
+    """Same "grant and revoke are the same action" contract as
+    _replace_category_access() -- a schedule previously assigned to one
+    user, bulk-assigned to a different user, ends up with ONLY the new
+    user, not both."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    client.post("/users/add", data={"username": "kid2", "password": "pw"}, headers=_auth_header())
+    kid1_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    kid2_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid2'").fetchone()["id"]
+    _add_schedule(client, "Sched1")
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Sched1'").fetchone()["id"]
+    db_conn.execute("INSERT INTO schedule_users (schedule_id, user_id) VALUES (?, ?)", (schedule_id, kid1_id))
+    db_conn.commit()
+
+    client.post(
+        "/schedules/bulk-access",
+        data={"schedule_ids": [str(schedule_id)], "user_ids": [str(kid2_id)]},
+        headers=_auth_header(),
+    )
+
+    targets = {r["user_id"] for r in db_conn.execute(
+        "SELECT user_id FROM schedule_users WHERE schedule_id = ?", (schedule_id,)
+    )}
+    assert targets == {kid2_id}
+
+
+def test_bulk_update_schedule_access_does_not_touch_what_a_schedule_blocks(client, db_conn):
+    """Bulk-assigning targets must leave lockout_all/is_mode/schedule_categories
+    completely untouched -- only who the schedule applies to changes."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    _add_schedule(client, "Bedtime", lockout_all="on", is_mode="on")
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Bedtime'").fetchone()["id"]
+
+    client.post(
+        "/schedules/bulk-access",
+        data={"schedule_ids": [str(schedule_id)], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    row = db_conn.execute("SELECT lockout_all, is_mode FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
+    assert row["lockout_all"] == 1
+    assert row["is_mode"] == 1
+
+
+def test_bulk_update_schedule_access_ignores_a_nonexistent_schedule_id(client, db_conn):
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    _add_schedule(client, "Sched1")
+    schedule_id = db_conn.execute("SELECT id FROM schedules WHERE name = 'Sched1'").fetchone()["id"]
+
+    resp = client.post(
+        "/schedules/bulk-access",
+        data={"schedule_ids": [str(schedule_id), "999999"], "user_ids": [str(user_id)]},
+        headers=_auth_header(),
+    )
+
+    assert "error=1" not in resp.headers["Location"]
+    assert db_conn.execute(
+        "SELECT 1 FROM schedule_users WHERE user_id = ? AND schedule_id = ?", (user_id, schedule_id)
+    ).fetchone() is not None
+
+
+def test_bulk_update_schedule_access_without_selection_shows_error(client, db_conn):
+    resp = client.post("/schedules/bulk-access", data={"is_global": "on"}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+
+
+def test_bulk_update_schedule_access_requires_admin_auth(client):
+    resp = client.post("/schedules/bulk-access", data={"schedule_ids": ["1"], "is_global": "on"})
+    assert resp.status_code == 401
+
+
+def test_schedules_page_shows_bulk_manage_access_toolbar(client, db_conn):
+    _add_schedule(client, "Sched1")
+    resp = client.get("/schedules", headers=_auth_header())
+    body = resp.data.decode()
+    assert "scheduleBulkManageToggle" in body
+    assert "bulk_update_schedule_access" in body or "/schedules/bulk-access" in body
+
+
 def test_bulk_sync_categories_syncs_every_selected_subscribed_category(client, db_conn, monkeypatch):
     import category_fetch
 
