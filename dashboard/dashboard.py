@@ -42,6 +42,7 @@ import adguard_client
 import adguard_config_sync
 import auth
 import backup
+import category_catalog_sync
 import category_fetch
 import cr_api
 import db
@@ -608,7 +609,18 @@ document.addEventListener("input", function (event) {
       if (mode === "single") {
         root.dataset.value = item.id;
         var hidden = root.querySelector("[data-combobox-hidden]");
-        if (hidden) hidden.value = item.id;
+        if (hidden) {
+          hidden.value = item.id;
+          // selectItem() never fired any DOM event on this input before
+          // 2026-09-11 -- fine for every prior single-mode combobox,
+          // which only ever needed the value to ride along with a form
+          // submit, but the Categories page's new "Add from catalog"
+          // picker needs to react to a pick immediately (pre-filling
+          // two OTHER fields), not just on submit. A genuine 'change'
+          // event, not a custom one, so any future single-mode
+          // combobox can hook into a pick the normal way.
+          hidden.dispatchEvent(new Event("change", { bubbles: true }));
+        }
         renderCurrent();
         input.value = "";
         results.style.display = "none";
@@ -3787,11 +3799,54 @@ CATEGORIES_BODY = """
 })();
 </script>
 
+{% if category_catalog_combo %}
+<div class="combobox" data-combobox data-mode="single" id="categoryCatalogPicker" style="max-width:360px; margin-bottom:.5rem;">
+  <div class="combobox-current" data-combobox-current></div>
+  <input type="search" class="combobox-input" data-combobox-input placeholder="Add from catalog: search Gaming, Entertainment, Social Media&hellip;">
+  <div class="combobox-results" data-combobox-results></div>
+  <input type="hidden" data-combobox-hidden value="">
+  <script type="application/json" data-combobox-items>{{ category_catalog_combo|tojson }}</script>
+</div>
+<p class="hint" style="margin:-.2rem 0 .6rem;">
+  Pick a result to fill in the name and subscription URL below -- from
+  <a href="https://github.com/v2fly/domain-list-community" target="_blank" rel="noopener">v2fly/domain-list-community</a>,
+  a curated set of ready-made category lists.
+  {% if not show_region_specific_categories %}Region-specific entries (China, Russia, etc.) are hidden -- turn them on from <a href="{{ url_for('settings_page') }}">Settings</a> if you need one.{% endif %}
+  Still just an ordinary category once added -- you can edit or delete it like any other.
+</p>
+{% endif %}
 <form class="add-form" method="post" action="{{ url_for('add_category') }}">
-  <input type="text" name="name" placeholder="e.g. Gambling" required>
-  <input type="text" name="subscription_url" placeholder="Subscription URL (optional -- leave blank for a manual-only category)" style="flex:1; min-width:320px;">
+  <input type="text" name="name" id="categoryNameInput" placeholder="e.g. Gambling" required>
+  <input type="text" name="subscription_url" id="categorySubscriptionUrlInput" placeholder="Subscription URL (optional -- leave blank for a manual-only category)" style="flex:1; min-width:320px;">
   <button class="add" type="submit">Add category</button>
 </form>
+{% if category_catalog_combo %}
+<script>
+(function () {
+  // Placed AFTER the form above, deliberately -- a <script> tag runs
+  // synchronously the moment the parser reaches it, and
+  // categoryNameInput/categorySubscriptionUrlInput don't exist in the
+  // DOM yet if this ran any earlier (confirmed live: an earlier
+  // placement before the form left this whole IIFE silently
+  // returning on its own !nameInput guard, every single time).
+  var picker = document.getElementById("categoryCatalogPicker");
+  var nameInput = document.getElementById("categoryNameInput");
+  var urlInput = document.getElementById("categorySubscriptionUrlInput");
+  if (!picker || !nameInput || !urlInput) return;
+  var hidden = picker.querySelector("[data-combobox-hidden]");
+  var itemsEl = picker.querySelector("[data-combobox-items]");
+  var items = itemsEl ? JSON.parse(itemsEl.textContent || "[]") : [];
+  var byId = {};
+  items.forEach(function (item) { byId[item.id] = item; });
+  hidden.addEventListener("change", function () {
+    var item = byId[hidden.value];
+    if (!item) return;
+    nameInput.value = item.label;
+    urlInput.value = item.url;
+  });
+})();
+</script>
+{% endif %}
 <p class="hint">A category over {{ max_scoped }} domains (a large subscribed list) can only ever be blocked for Everyone -- AdGuard Home has no way to scope a list that size to specific people/devices. Smaller categories can be assigned however you like.</p>
 <p class="hint">
   <strong>Subscription URL must be a raw domain-list file, not a webpage.</strong>
@@ -3857,6 +3912,26 @@ def _category_row_context(conn, category) -> dict:
     return {**dict(category), "domain_count": domain_count}
 
 
+def _category_catalog_combo(conn, show_region_specific: bool) -> list[dict]:
+    """Items for the Categories page's "Add from catalog" picker --
+    `url` (the real v2fly raw-content URL, pre-resolved here so the
+    page's own JS never has to know how a catalog entry's file_path
+    maps to one) rides along in each item alongside the usual id/label
+    the shared combobox widget already expects, since the widget passes
+    its whole `items` array through to the page untouched. Region-
+    specific entries (region NOT NULL) are excluded entirely unless the
+    admin turned on "show region-specific categories" in Settings --
+    filtered here, not just visually hidden, so a family that's
+    genuinely irrelevant to this household doesn't even cost a wasted
+    search-result slot."""
+    where = "" if show_region_specific else "WHERE region IS NULL"
+    rows = conn.execute(f"SELECT * FROM category_catalog {where} ORDER BY display_name").fetchall()
+    return [
+        {"id": row["slug"], "label": row["display_name"], "url": category_catalog_sync.resolve_subscription_url(row["file_path"])}
+        for row in rows
+    ]
+
+
 @app.route("/categories")
 @require_admin
 def categories():
@@ -3867,6 +3942,7 @@ def categories():
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
     all_devices = conn.execute("SELECT * FROM devices ORDER BY COALESCE(label, mac_address)").fetchall()
+    show_region_specific_categories = db.get_setting(conn, "show_region_specific_categories", "0") == "1"
     body = render_template_string(
         CATEGORIES_BODY,
         categories=[_category_row_context(conn, c) for c in rows],
@@ -3877,6 +3953,8 @@ def categories():
         all_groups_combo=_entity_combo(all_groups, lambda g: g["name"]),
         all_devices_combo=_entity_combo(all_devices, lambda dev: dev["label"] or dev["mac_address"]),
         preselected_user_ids=set(), preselected_group_ids=set(), preselected_device_ids=set(),
+        category_catalog_combo=_category_catalog_combo(conn, show_region_specific_categories),
+        show_region_specific_categories=show_region_specific_categories,
     )
     return render("categories", body)
 
@@ -7650,6 +7728,31 @@ SETTINGS_BODY = """
 </div>
 
 <div class="card">
+<h2>Category Catalog</h2>
+<p class="hint">
+  Powers the Categories page's "Add from catalog" search -- a
+  ready-made list of subscription sources (Gaming, Entertainment,
+  Social Media, and more) from <a href="https://github.com/v2fly/domain-list-community" target="_blank" rel="noopener">v2fly/domain-list-community</a>,
+  so you don't have to go find a raw blocklist URL yourself for a
+  common category. Refreshes automatically in the background; use the
+  button below to check right now instead of waiting.
+  {% if category_catalog_last_synced_at %}
+  Last refreshed: {{ category_catalog_last_synced_at }}.
+  {% else %}
+  Not yet refreshed live -- using the bundled starter list.
+  {% endif %}
+</p>
+<form method="post" action="{{ url_for('refresh_category_catalog') }}">
+  <button class="add" type="submit">Refresh catalog now</button>
+</form>
+<form method="post" action="{{ url_for('update_category_catalog_settings') }}" style="margin-top:.6rem;">
+  <label><input type="checkbox" name="show_region_specific_categories" value="1" {{ 'checked' if show_region_specific_categories }}> Show region-specific categories (e.g. "Games (China)") in the catalog search</label>
+  <p class="hint">Off by default -- most of v2fly's catalog entries with a region tag (China, Russia, Iran, and a few others) aren't relevant outside that region. Turn this on if you specifically want to browse or add one.</p>
+  <button class="add" type="submit">Save</button>
+</form>
+</div>
+
+<div class="card">
 <h2>Filtering &amp; AdGuard</h2>
 
 <div class="settings-subsection">
@@ -8223,6 +8326,10 @@ def settings_page():
             conn, "optigate_hostname_prefix", db.DEFAULT_OPTIGATE_HOSTNAME_PREFIX
         ),
         optigate_rewrite_status=_optigate_rewrite_status(conn, adguard_url, admin_username, adguard_password),
+        show_region_specific_categories=db.get_setting(conn, "show_region_specific_categories", "0") == "1",
+        category_catalog_last_synced_at=conn.execute(
+            "SELECT MAX(updated_at) AS t FROM category_catalog"
+        ).fetchone()["t"],
     )
     return render("settings", body)
 
@@ -8363,6 +8470,36 @@ def refresh_adguard_filters():
     if updated:
         return flash_redirect("settings_page", f"Checked now -- {updated} list(s) had new content.{rewrite_note}")
     return flash_redirect("settings_page", f"Checked now -- everything was already up to date.{rewrite_note}")
+
+
+@app.route("/settings/category-catalog/refresh", methods=["POST"])
+@require_admin
+def refresh_category_catalog():
+    """One-off "check now" for the Categories page's "Add from catalog"
+    picker -- same shape as refresh_adguard_filters() above: an
+    immediate, synchronous call against the live source, independent of
+    category_catalog_sync.py's own background refresh loop (which
+    already runs in this same dashboard process, so no cross-process
+    "write a timestamp and let the other process notice it" indirection
+    is needed here, unlike controller/network_sweep.py's own "Run now").
+    A failure here leaves the existing catalog (bundled seed or last
+    successful live sync) completely untouched."""
+    conn = get_db()
+    try:
+        count = category_catalog_sync.sync_category_catalog(conn)
+    except category_fetch.CategoryFetchError as exc:
+        return flash_redirect("settings_page", f"Couldn't reach the category catalog source: {exc}", error=True)
+    return flash_redirect("settings_page", f"Checked now -- catalog has {count} categories.")
+
+
+@app.route("/settings/category-catalog", methods=["POST"])
+@require_admin
+def update_category_catalog_settings():
+    show_region_specific = "1" if request.form.get("show_region_specific_categories") else "0"
+    conn = get_db()
+    db.set_setting(conn, "show_region_specific_categories", show_region_specific)
+    conn.commit()
+    return flash_redirect("settings_page", "Saved.")
 
 
 @app.route("/settings/device-stale-days", methods=["POST"])
@@ -8642,6 +8779,17 @@ def main() -> None:
 
         captive_portal_server.start(host="0.0.0.0", port=3131)
         print("captive portal server listening on http://0.0.0.0:3131", file=sys.stderr, flush=True)
+
+    # Categories page's "Add category from catalog" picker -- unlike
+    # adguard_report_sync above, this has nothing to do with the block
+    # page and must work regardless of whether DASHBOARD_URL is set, so
+    # it's unconditional. Deliberately started from dashboard (always
+    # running), not controller/main.py's own category_fetch.run_loop()
+    # (gated behind the interception profile) -- browsing/adding
+    # categories has nothing to do with interception either. See
+    # category_catalog_sync.py's own module docstring.
+    category_catalog_sync.start()
+    print("category catalog sync poller started", file=sys.stderr, flush=True)
 
     print(f"dashboard listening on http://{host}:{port}", file=sys.stderr, flush=True)
     serve(app, host=host, port=port, threads=8)

@@ -6167,6 +6167,113 @@ def test_add_category_then_appears(client, db_conn):
     assert row["is_global"] == 0
 
 
+def test_categories_page_shows_the_catalog_picker_with_bundled_entries(client, db_conn):
+    """common/db.py's _migrate() seeds category_catalog from the bundled
+    v2fly snapshot on first init -- the picker should show a well-known
+    global entry (Games) without any test setup at all."""
+    resp = client.get("/categories", headers=_auth_header())
+    body = resp.data.decode()
+    assert "categoryCatalogPicker" in body
+    assert "Games" in body
+    assert "raw.githubusercontent.com/v2fly/domain-list-community" in body
+
+
+def test_categories_page_hides_region_specific_catalog_entries_by_default(client, db_conn):
+    resp = client.get("/categories", headers=_auth_header())
+    assert "Games (China)" not in resp.data.decode()
+
+
+def test_categories_page_shows_region_specific_catalog_entries_when_enabled(client, db_conn):
+    import db
+
+    db.set_setting(db_conn, "show_region_specific_categories", "1")
+    db_conn.commit()
+
+    resp = client.get("/categories", headers=_auth_header())
+
+    assert "Games (China)" in resp.data.decode()
+
+
+def test_refresh_category_catalog_replaces_the_table(monkeypatch, client, db_conn):
+    import json as _json
+
+    import category_fetch
+
+    def fake_open(request, timeout=None):
+        class _Resp:
+            def read(self, n=-1):
+                return _json.dumps({
+                    "truncated": False,
+                    "tree": [{"path": "data/category-porn", "type": "blob"}],
+                }).encode()
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp()
+
+    monkeypatch.setattr(category_fetch._OPENER, "open", fake_open)
+
+    resp = client.post("/settings/category-catalog/refresh", headers=_auth_header())
+
+    assert resp.status_code == 302
+    rows = [r["slug"] for r in db_conn.execute("SELECT slug FROM category_catalog")]
+    assert rows == ["porn"]
+
+
+def test_refresh_category_catalog_failure_leaves_existing_catalog_untouched(monkeypatch, client, db_conn):
+    import category_fetch
+
+    monkeypatch.setattr(
+        category_fetch._OPENER, "open",
+        lambda request, timeout=None: (_ for _ in ()).throw(category_fetch.URLError("unreachable")),
+    )
+    before = db_conn.execute("SELECT COUNT(*) c FROM category_catalog").fetchone()["c"]
+
+    resp = client.post("/settings/category-catalog/refresh", headers=_auth_header())
+
+    assert "error=1" in resp.headers["Location"]
+    after = db_conn.execute("SELECT COUNT(*) c FROM category_catalog").fetchone()["c"]
+    assert after == before
+
+
+def test_refresh_category_catalog_requires_admin_auth(client):
+    resp = client.post("/settings/category-catalog/refresh")
+    assert resp.status_code == 401
+
+
+def test_update_category_catalog_settings_saves_the_toggle(client, db_conn):
+    import db
+
+    resp = client.post(
+        "/settings/category-catalog", data={"show_region_specific_categories": "1"}, headers=_auth_header()
+    )
+    assert resp.status_code == 302
+    assert db.get_setting(db_conn, "show_region_specific_categories") == "1"
+
+    client.post("/settings/category-catalog", data={}, headers=_auth_header())
+    assert db.get_setting(db_conn, "show_region_specific_categories") == "0"
+
+
+def test_update_category_catalog_settings_requires_admin_auth(client):
+    resp = client.post("/settings/category-catalog", data={"show_region_specific_categories": "1"})
+    assert resp.status_code == 401
+
+
+def test_settings_page_shows_category_catalog_section(client, db_conn):
+    resp = client.get("/settings", headers=_auth_header())
+    body = resp.data.decode()
+    assert "Category Catalog" in body
+    assert "Refresh catalog now" in body
+    assert "show_region_specific_categories" in body
+
+
 def test_add_category_requires_a_name(client, db_conn):
     resp = client.post("/categories/add", data={"name": ""}, headers=_auth_header())
     assert "error=1" in resp.headers["Location"]

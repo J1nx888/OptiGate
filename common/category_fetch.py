@@ -84,6 +84,86 @@ def _fetch(url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+# v2fly/domain-list-community's own "include:<name>" convention (see
+# common/blocklist_parser.py's own docstring for the sibling domain:/
+# full:/@attribute conventions this shares) -- a line that names another
+# file in the SAME directory to pull in wholesale, rather than a domain
+# of its own. Confirmed live 2026-09-11: that project's own "category"
+# files (e.g. data/category-games, data/category-entertainment) are
+# entirely made of these -- zero literal domains -- so fetching one
+# directly and handing it straight to parse_hostlist() would silently
+# produce zero domains. Deliberately matched generically (not gated on
+# the URL being v2fly-specific) since parse_hostlist() already silently
+# ignores an include: line either way -- this is a no-op, zero-extra-
+# fetch case for any source that never uses the convention.
+_INCLUDE_LINE_RE = re.compile(r"^include:(\S+)", re.IGNORECASE)
+_INCLUDE_ATTR_RE = re.compile(r"(?:\s+@\S+)+\s*$")
+
+# Refuses to chase an unbounded/malicious include chain -- a category's
+# subscription_url is admin-supplied and fetched automatically by an
+# unattended background job with no further checks (same SSRF-adjacent
+# trust boundary dashboard.py's _validate_subscription_url() already
+# documents), so an include graph needs the same "don't trust it to be
+# well-behaved" discipline as the response-size cap above. 300
+# comfortably covers every real category in v2fly's own catalog (the
+# largest confirmed live, category-entertainment, resolves to 156
+# files) with headroom, while still refusing a pathological/hostile one.
+MAX_INCLUDED_FILES = 300
+
+
+def _resolve_includes(
+    base_url: str, text: str, timeout: float, _visited: set[str] | None = None
+) -> str:
+    """Recursively follows any `include:<name>` lines in `text`,
+    fetching each named sibling file (same directory as `base_url`) and
+    appending its content, so a caller's later `parse_hostlist()` call
+    sees every actual domain line a v2fly-style *category* file's own
+    include graph ultimately resolves to -- not just the top-level
+    file's own lines (often none at all for one of these).
+
+    `_visited` is a shared set across the whole recursion (seeded with
+    `base_url` itself on the outermost call) -- doubles as both the
+    cycle guard (a file that includes something already merged in is
+    silently skipped, not re-fetched or re-appended) and the
+    `MAX_INCLUDED_FILES` accounting. An include naming an unreachable or
+    malformed file is logged and skipped, same "one bad source doesn't
+    abort the whole sync" discipline as sync_all_categories() itself --
+    a partial category from a mostly-working include graph is better
+    than none at all.
+    """
+    if _visited is None:
+        _visited = {base_url}
+    base_dir = base_url.rsplit("/", 1)[0]
+    merged = [text]
+    for raw_line in text.splitlines():
+        if len(_visited) >= MAX_INCLUDED_FILES:
+            log.warning(
+                "include chain from %s exceeded the %d-file cap -- stopping early with a partial result",
+                base_url, MAX_INCLUDED_FILES,
+            )
+            break
+        line = raw_line.strip()
+        if not line or line.startswith(("#", "!")):
+            continue
+        match = _INCLUDE_LINE_RE.match(line)
+        if not match:
+            continue
+        name = _INCLUDE_ATTR_RE.sub("", match.group(1)).strip()
+        if not name:
+            continue
+        sibling_url = f"{base_dir}/{name}"
+        if sibling_url in _visited:
+            continue
+        _visited.add(sibling_url)
+        try:
+            sibling_text = _fetch(sibling_url, timeout=timeout)
+        except CategoryFetchError as exc:
+            log.warning("skipping unreachable include %r from %s: %s", name, base_url, exc)
+            continue
+        merged.append(_resolve_includes(sibling_url, sibling_text, timeout, _visited))
+    return "\n".join(merged)
+
+
 def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, timeout: float = DEFAULT_TIMEOUT) -> int:
     """Fetches `category['subscription_url']`, parses it, and replaces
     that category's `source='subscription'` rows with the result --
@@ -100,6 +180,7 @@ def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, tim
         raise CategoryFetchError(f"category {category['name']!r} has no subscription_url set")
 
     text = _fetch(url, timeout=timeout)
+    text = _resolve_includes(url, text, timeout=timeout)
     domains = parse_hostlist(text)
 
     now = db.now_iso()

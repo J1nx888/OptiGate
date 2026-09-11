@@ -176,6 +176,154 @@ def test_size_cap_exceeded_raises(monkeypatch, conn):
         category_fetch.fetch_and_sync_category(conn, category)
 
 
+def test_resolve_includes_is_a_no_op_when_no_include_lines_are_present(monkeypatch):
+    """No extra fetch at all for the common case -- a source that never
+    uses the v2fly include: convention must not pay any extra cost."""
+    def _boom(url, timeout=None):
+        raise AssertionError(f"must not fetch anything, tried {url!r}")
+
+    monkeypatch.setattr(category_fetch, "_fetch", _boom)
+
+    result = category_fetch._resolve_includes(
+        "https://example.invalid/data/category-porn", "||porn.example.com^\n", timeout=5.0
+    )
+
+    assert result == "||porn.example.com^\n"
+
+
+def test_resolve_includes_follows_a_single_include(monkeypatch):
+    def fake_fetch(url, timeout=None):
+        assert url == "https://example.invalid/data/sibling"
+        return "||real.example.com^\n"
+
+    monkeypatch.setattr(category_fetch, "_fetch", fake_fetch)
+
+    result = category_fetch._resolve_includes(
+        "https://example.invalid/data/category-games", "include:sibling\n", timeout=5.0
+    )
+
+    assert "real.example.com" in result
+
+
+def test_resolve_includes_follows_nested_includes_recursively(monkeypatch):
+    files = {
+        "https://example.invalid/data/a": "include:b\n",
+        "https://example.invalid/data/b": "include:c\n",
+        "https://example.invalid/data/c": "||deeply.nested.example^\n",
+    }
+
+    def fake_fetch(url, timeout=None):
+        return files[url]
+
+    monkeypatch.setattr(category_fetch, "_fetch", fake_fetch)
+
+    result = category_fetch._resolve_includes(
+        "https://example.invalid/data/top", "include:a\n", timeout=5.0
+    )
+
+    assert "deeply.nested.example" in result
+
+
+def test_resolve_includes_strips_trailing_attribute_tags(monkeypatch):
+    """v2fly include lines can carry the same trailing ' @attribute'
+    tags a domain line can (e.g. 'include:geolocation-cn @cn') -- the
+    tag must not become part of the fetched filename."""
+    def fake_fetch(url, timeout=None):
+        assert url == "https://example.invalid/data/geolocation-cn", url
+        return "||tagged.example.com^\n"
+
+    monkeypatch.setattr(category_fetch, "_fetch", fake_fetch)
+
+    result = category_fetch._resolve_includes(
+        "https://example.invalid/data/top", "include:geolocation-cn @cn @ads\n", timeout=5.0
+    )
+
+    assert "tagged.example.com" in result
+
+
+def test_resolve_includes_never_refetches_a_cycle(monkeypatch):
+    """A includes B, B includes A right back -- must terminate, not
+    infinitely recurse or double-fetch."""
+    calls = []
+    files = {
+        "https://example.invalid/data/a": "include:b\n||a.example^\n",
+        "https://example.invalid/data/b": "include:a\n||b.example^\n",
+    }
+
+    def fake_fetch(url, timeout=None):
+        calls.append(url)
+        return files[url]
+
+    monkeypatch.setattr(category_fetch, "_fetch", fake_fetch)
+
+    result = category_fetch._resolve_includes(
+        "https://example.invalid/data/a", files["https://example.invalid/data/a"], timeout=5.0
+    )
+
+    assert calls == ["https://example.invalid/data/b"], "b must be fetched once, a must never be re-fetched"
+    assert "a.example" in result and "b.example" in result
+
+
+def test_resolve_includes_skips_an_unreachable_include_and_keeps_the_rest(monkeypatch):
+    def fake_fetch(url, timeout=None):
+        if "broken" in url:
+            raise category_fetch.CategoryFetchError("simulated failure")
+        return "||still.works.example^\n"
+
+    monkeypatch.setattr(category_fetch, "_fetch", fake_fetch)
+
+    result = category_fetch._resolve_includes(
+        "https://example.invalid/data/top", "include:broken\ninclude:good\n", timeout=5.0
+    )
+
+    assert "still.works.example" in result
+
+
+def test_resolve_includes_stops_at_the_file_cap(monkeypatch):
+    """A pathological/hostile include graph (or a simple off-by-one in a
+    legitimate one) must not fetch forever -- this is an unattended
+    background job fetching admin-supplied URLs with no further checks."""
+    monkeypatch.setattr(category_fetch, "MAX_INCLUDED_FILES", 3)
+    fetch_count = [0]
+
+    def fake_fetch(url, timeout=None):
+        fetch_count[0] += 1
+        n = int(url.rsplit("/", 1)[-1])
+        return f"include:{n + 1}\n"
+
+    monkeypatch.setattr(category_fetch, "_fetch", fake_fetch)
+
+    category_fetch._resolve_includes("https://example.invalid/data/0", "include:1\n", timeout=5.0)
+
+    assert fetch_count[0] <= 3
+
+
+def test_fetch_and_sync_category_resolves_v2fly_style_includes_end_to_end(monkeypatch, conn):
+    """The real gap this closes: a v2fly *category* file (e.g.
+    data/category-games) is entirely include: lines with zero literal
+    domains of its own -- fetching it directly used to silently produce
+    zero domains."""
+    category = _insert_category(conn, "Gaming", "https://example.invalid/data/category-games")
+
+    def fake_open(request, timeout=None):
+        url = request.full_url
+        if url == "https://example.invalid/data/category-games":
+            return FakeResponse(b"include:category-games-!cn\n")
+        if url == "https://example.invalid/data/category-games-!cn":
+            return FakeResponse(b"||steampowered.com^\n||epicgames.com^\n")
+        raise AssertionError(f"unexpected fetch: {url}")
+
+    monkeypatch.setattr(category_fetch._OPENER, "open", fake_open)
+
+    count = category_fetch.fetch_and_sync_category(conn, category)
+
+    assert count == 2
+    patterns = {r["pattern"] for r in conn.execute(
+        "SELECT pattern FROM category_domains WHERE category_id = ?", (category["id"],)
+    )}
+    assert patterns == {r"steampowered\.com", r"epicgames\.com"}
+
+
 def test_sync_all_categories_skips_a_failing_one_and_still_syncs_the_rest(monkeypatch, conn):
     good = _insert_category(conn, "Gambling", "https://example.invalid/gambling.txt")
     _insert_category(conn, "Broken", "https://example.invalid/broken.txt")

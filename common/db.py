@@ -256,6 +256,44 @@ CREATE TABLE IF NOT EXISTS category_overrides (
     UNIQUE(category_id, pattern)
 );
 
+-- The Categories page's "Add category from catalog" search picker
+-- (2026-09-11, project owner's explicit request) -- a searchable menu
+-- of ready-made subscription sources, so an admin doesn't have to go
+-- find a raw blocklist URL themselves for a common case like "Gaming"
+-- or "Social Media". Sourced from
+-- https://github.com/v2fly/domain-list-community's own data/category-*
+-- files (common/category_catalog_sync.py resolves each one's own
+-- include: graph at fetch time -- see that module's docstring). This
+-- table is NOT itself a category -- picking a row here just pre-fills
+-- the ordinary Add-category form's name + subscription_url, same as if
+-- the admin had typed them in by hand; nothing here is ever assigned,
+-- synced as a household category, or referenced by category_domains.
+--   slug: stable key, the v2fly file's own name (minus the "category-"
+--       prefix) -- e.g. "games-!cn". Never shown to the admin.
+--   file_path: the actual v2fly data/ filename to fetch, e.g.
+--       "category-games-!cn" -- category_catalog_sync.py builds the
+--       real subscription_url from this at pick time (not stored here,
+--       so a future change to v2fly's own repo layout only needs
+--       updating in one place).
+--   region: NULL for a global/default-relevant entry, shown in the
+--       picker by default; a region code (e.g. "cn", "ru", "ir") for a
+--       region-specific one (either a same-family alternate, like
+--       Gaming (China) sitting next to the default Games entry, or a
+--       family that ONLY exists in a region-specific form) -- hidden
+--       unless the admin turns on the "show region-specific
+--       categories" Settings toggle. Deliberately not a CHECK-
+--       constrained enum: category_catalog_sync.py's own live refresh
+--       classifies region codes from v2fly's file-naming convention
+--       directly, which may grow a new one over time.
+CREATE TABLE IF NOT EXISTS category_catalog (
+    id           INTEGER PRIMARY KEY,
+    slug         TEXT UNIQUE NOT NULL,
+    display_name TEXT NOT NULL,
+    file_path    TEXT NOT NULL,
+    region       TEXT,
+    updated_at   TEXT NOT NULL
+);
+
 -- Which user/group/device this category is blocked for -- same shape as
 -- user_domains/group_domains/device_domains, opposite meaning (block, not
 -- allow). A category over controller/adguard_sync.py's per-target rule-
@@ -742,6 +780,40 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT OR IGNORE INTO domain_paths (domain_id, pattern) VALUES (?, ?)",
                 (cr_domain["id"], pattern),
+            )
+
+    # 2026-09-11: day-one seed for the Categories page's "Add category
+    # from catalog" picker (category_catalog table, see its own schema
+    # comment above) -- only fires when the table is genuinely empty, so
+    # a fresh install has something to search immediately without
+    # waiting for common/category_catalog_sync.py's own periodic
+    # background refresh to complete first. Never re-seeds over already-
+    # live-refreshed data (an "empty" table only happens once, before
+    # that first successful sync) -- this is a one-time bootstrap, not a
+    # standing source of truth the live sync has to fight.
+    catalog_count = conn.execute("SELECT COUNT(*) AS c FROM category_catalog").fetchone()["c"]
+    if catalog_count == 0:
+        snapshot_path = Path(__file__).resolve().parent / "data" / "v2fly_category_catalog.tsv"
+        try:
+            snapshot_text = snapshot_path.read_text(encoding="utf-8")
+        except OSError:
+            snapshot_text = ""
+        now = now_iso()
+        rows = []
+        for line in snapshot_text.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            slug, display_name, file_path = parts[0], parts[1], parts[2]
+            region = parts[3] if len(parts) > 3 and parts[3] else None
+            rows.append((slug, display_name, file_path, region, now))
+        if rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO category_catalog (slug, display_name, file_path, region, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                rows,
             )
 
 

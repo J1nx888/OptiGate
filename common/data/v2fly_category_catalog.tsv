@@ -1,0 +1,133 @@
+# Bundled fallback snapshot for common/category_catalog_sync.py's "Add
+# category from catalog" picker -- the Categories page's admin-facing
+# search list, sourced from https://github.com/v2fly/domain-list-community
+# (data/category-* files, real list fetched via the GitHub git-trees
+# API 2026-09-11, 116 entries curated: a region split (e.g. games-!cn
+# vs games-cn) keeps the non-region-specific file as the default/global
+# entry and the region-specific one hidden-by-default; a family with
+# only a region-specific file (no global equivalent) is hidden-by-
+# default too, all revealable via the "show region-specific categories"
+# Settings toggle. This file is only the DAY-ONE seed (common/db.py's
+# _migrate() loads it into the category_catalog table only if that
+# table is empty) -- category_catalog_sync.py's own periodic background
+# job re-fetches and replaces the table's live contents automatically
+# after that, same "bundled fallback + live auto-refresh" shape as
+# common/data/oui_prefixes.tsv, just with an actual refresh loop here
+# instead of a one-off manual regeneration.
+# Format: slug<TAB>display_name<TAB>v2fly file path (under data/)<TAB>region code (empty = global/default-shown)
+acg	Anime, Comics & Games	category-acg
+ads	Ads	category-ads
+ads-all	Ads All	category-ads-all	
+ads-ir	Ads (Iran)	category-ads-ir	ir
+ai-!cn	AI Services	category-ai-!cn	
+ai-chat-!cn	AI Chat	category-ai-chat-!cn	
+ai-cn	AI Services (China)	category-ai-cn	cn
+ai-ru	AI Services (Russia)	category-ai-ru	ru
+android-app-download	Android App Downloads	category-android-app-download	
+anticensorship	Anticensorship	category-anticensorship	
+antivirus	Antivirus	category-antivirus	
+automobile-cn	Automobile (China)	category-automobile-cn	cn
+bank-cn	Bank (China)	category-bank-cn	cn
+bank-ir	Bank (Iran)	category-bank-ir	ir
+bank-jp	Bank (Japan)	category-bank-jp	jp
+bank-mm	Bank (Myanmar)	category-bank-mm	mm
+bank-ru	Bank (Russia)	category-bank-ru	ru
+betting-ru	Betting (Russia)	category-betting-ru	ru
+blog-cn	Blog (China)	category-blog-cn	cn
+bourse-ir	Bourse (Iran)	category-bourse-ir	ir
+browser-!cn	Browser	category-browser-!cn	
+cas	Certificate Authorities	category-cas	
+cdn-!cn	CDN Infrastructure	category-cdn-!cn	
+cdn-cn	CDN Infrastructure (China)	category-cdn-cn	cn
+collaborate-cn	Collaborate (China)	category-collaborate-cn	cn
+communication	Communication	category-communication	
+companies	Companies	category-companies	
+consent-management	Consent Management	category-consent-management	
+container	Container	category-container	
+cryptocurrency	Cryptocurrency	category-cryptocurrency	
+ddns	Dynamic DNS	category-ddns	
+dev	Dev	category-dev	
+dev-cn	Dev (China)	category-dev-cn	cn
+documents-cn	Documents (China)	category-documents-cn	cn
+doh	DNS-over-HTTPS	category-doh	
+ecommerce	Ecommerce	category-ecommerce	
+ecommerce-ru	Ecommerce (Russia)	category-ecommerce-ru	ru
+education-cn	Education (China)	category-education-cn	cn
+education-ir	Education (Iran)	category-education-ir	ir
+education-ru	Education (Russia)	category-education-ru	ru
+electronic-cn	Electronic (China)	category-electronic-cn	cn
+emby	Emby	category-emby	
+enhance-gaming	Enhance Gaming	category-enhance-gaming	
+enterprise-query-platform-cn	Enterprise Query Platform (China)	category-enterprise-query-platform-cn	cn
+entertainment	Entertainment	category-entertainment	
+entertainment-cn	Entertainment (China)	category-entertainment-cn	cn
+entertainment-ru	Entertainment (Russia)	category-entertainment-ru	ru
+finance	Finance	category-finance	
+food-cn	Food (China)	category-food-cn	cn
+forums	Forums	category-forums	
+forums-ir	Forums (Iran)	category-forums-ir	ir
+forums-ru	Forums (Russia)	category-forums-ru	ru
+game-accelerator-cn	Game Accelerator (China)	category-game-accelerator-cn	cn
+game-platforms-download	Game Platform Downloads	category-game-platforms-download	
+games-!cn	Games	category-games-!cn	
+games-cn	Games (China)	category-games-cn	cn
+gov-ir	Gov (Iran)	category-gov-ir	ir
+gov-ru	Gov (Russia)	category-gov-ru	ru
+hospital-cn	Hospital (China)	category-hospital-cn	cn
+httpdns-cn	Httpdns (China)	category-httpdns-cn	cn
+insurance-ir	Insurance (Iran)	category-insurance-ir	ir
+ip-geo-detect	IP Geolocation Detection	category-ip-geo-detect	
+ipfs	IPFS	category-ipfs	
+ir	Ir	category-ir	ir
+logistics-cn	Logistics (China)	category-logistics-cn	cn
+media	Media	category-media	
+media-cn	Media (China)	category-media-cn	cn
+media-ir	Media (Iran)	category-media-ir	ir
+media-ru	Media (Russia)	category-media-ru	ru
+media-ru-blocked	Media Ru Blocked	category-media-ru-blocked	ru
+medicine-ru	Medicine (Russia)	category-medicine-ru	ru
+mobile-repair	Mobile Repair	category-mobile-repair	
+mooc-cn	Mooc (China)	category-mooc-cn	cn
+netdisk-!cn	Netdisk	category-netdisk-!cn	
+netdisk-cn	Netdisk (China)	category-netdisk-cn	cn
+network-security-cn	Network Security (China)	category-network-security-cn	cn
+news-ir	News (Iran)	category-news-ir	ir
+novel	Novel	category-novel	
+ntp	NTP Time Servers	category-ntp	
+ntp-cn	NTP Time Servers (China)	category-ntp-cn	cn
+ntp-jp	NTP Time Servers (Japan)	category-ntp-jp	jp
+number-verification-cn	Number Verification (China)	category-number-verification-cn	cn
+olympiad-in-informatics	Olympiad in Informatics	category-olympiad-in-informatics	
+orgs	Orgs	category-orgs	
+outsource-cn	Outsource (China)	category-outsource-cn	cn
+password-management	Password Management	category-password-management	
+payment-ir	Payment (Iran)	category-payment-ir	ir
+porn	Porn	category-porn	
+proxy-tunnels	Proxy Tunnels	category-proxy-tunnels	
+pt	Private Trackers	category-pt	
+public-tracker	Public Tracker	category-public-tracker	
+remote-control	Remote Control	category-remote-control	
+retail-ru	Retail (Russia)	category-retail-ru	ru
+ru	Ru	category-ru	ru
+scholar-!cn	Scholar	category-scholar-!cn	
+scholar-cn	Scholar (China)	category-scholar-cn	cn
+scholar-hk	Scholar (Hong Kong)	category-scholar-hk	hk
+scholar-ir	Scholar (Iran)	category-scholar-ir	ir
+scholar-uk	Scholar (UK)	category-scholar-uk	uk
+securities-cn	Securities (China)	category-securities-cn	cn
+shopping-ir	Shopping (Iran)	category-shopping-ir	ir
+social-media-!cn	Social Media	category-social-media-!cn	
+social-media-cn	Social Media (China)	category-social-media-cn	cn
+social-media-ir	Social Media (Iran)	category-social-media-ir	ir
+speedtest	Speedtest	category-speedtest	
+stun	STUN/NAT Traversal	category-stun	
+tech-ir	Tech (Iran)	category-tech-ir	ir
+tech-media	Tech Media	category-tech-media	
+tech-media-ru	Tech Media (Russia)	category-tech-media-ru	ru
+travel-ir	Travel (Iran)	category-travel-ir	ir
+travel-ru	Travel (Russia)	category-travel-ru	ru
+urlshortner	URL Shorteners	category-urlshortner	
+voip	VoIP	category-voip	
+vpnservices	VPN Services	category-vpnservices	
+web-archive	Web Archive	category-web-archive	
+wiki-cn	Wiki (China)	category-wiki-cn	cn
