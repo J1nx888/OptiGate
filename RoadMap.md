@@ -8126,6 +8126,20 @@ provisioned device):**
 "Show / Path" column now shows the **show name** next to the series id
 on blocked/approved rows (`6349e23`) -- owner request from this window.
 
+**Also shipped 2026-09-11: Report page showed raw UTC instead of the
+household's configured timezone (`501f9b5`).** Owner bug, found while
+reviewing tonight's test rows -- Settings has `household_time_zone` =
+`US/Eastern`, but the Report page's "Time" column and the Pending
+approval requests card rendered the stored UTC timestamp verbatim, and
+the daily activity chart bucketed by UTC calendar day. New
+`_household_tz()` / `_make_ts_localizer()` convert every displayed
+timestamp to wall time in the configured zone (falls back to UTC for an
+unset/bad value); the column headers now name the zone
+(`Time (EDT)` / `Requested (EST)`, DST-aware); the chart re-buckets in
+Python by local day so it agrees with the table. Verified live on
+prod: the header reads `Time (EDT)` and tonight's Black Clover block
+(stored `00:42:48Z`) now shows `2026-09-10 20:42:48`. 3 tests.
+
 ### Live interception test 2026-09-10 -- findings
 
 Bark Home taken off the network ~15:45; full `interception` stack brought
