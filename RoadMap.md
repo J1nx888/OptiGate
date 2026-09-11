@@ -8096,15 +8096,14 @@ provisioned device):**
   devices are `is_authenticated = 0`, so the moment interception came up
   they became PREAUTH -> `unauthenticated_v4` -> captive-portal-only ->
   **lost general internet**. The household was only ever run DNS-tier,
-  where that flag is irrelevant. A real Option A rollout needs EITHER a
-  scoped-interception mechanism (a controller `--only-mac` flag threading
-  an allowlist into `desired_state.db_backed_desired_state()` +
-  `policy_state.compute_desired_policy()` -- ~40 lines, non-destructive,
-  reusable for testing any device) OR bulk-authenticating the household
-  first (portal logins / an admin "mark authenticated" bulk action).
-  **Next step for Crunchyroll = build `--only-mac`**, then a scoped
-  window can test/roll out one device at a time without touching the
-  other 43.
+  where that flag is irrelevant. A real Option A rollout needs the
+  household **pre-authenticated first** -- every device that should keep
+  working walked through a captive-portal login, or an admin
+  "mark authenticated" bulk action (doesn't exist yet -- likely the
+  cleaner path for a one-time migration). Until then a full-profile
+  window strands every un-authenticated device. (A per-device
+  scoped-interception knob was considered and rejected 2026-09-11 --
+  owner's call; pre-authentication is the direction.)
 - **Finding #10** -- a manual "Shift mode now" override does not suppress
   a `lockout_all` Bedtime schedule; had to remove Matthew from Bedtime
   to test.
@@ -8174,10 +8173,12 @@ redesign in a dedicated session, not a live quick-patch**.
      now a **UX + defence-in-depth polish**, tracked as finding #7's
      sibling. Plan in `ANALYSIS.md`.
 
-   **Remaining before a real rollout:** the device-scoping problem (see
-   the 2026-09-11 section) -- build the controller `--only-mac` flag so
-   one device can be intercepted without gating the other 43. Then a
-   scoped window enrols devices one at a time.
+   **Remaining before a real rollout:** the household-provisioning
+   problem (see the 2026-09-11 section) -- every device that should keep
+   working has to be `is_authenticated = 1` before the full profile
+   comes up, or it gets stranded on the captive portal. Needs a
+   pre-authentication pass (portal logins, or a new admin
+   "mark authenticated" bulk action).
 
    *(Historical detail from the 2026-09-10 trace kept below for context.)*
    - **(a) The bump fails on the device.** After a browser restart,
