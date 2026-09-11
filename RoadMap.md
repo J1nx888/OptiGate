@@ -9370,56 +9370,73 @@ isolated harness proves the mechanism, not the specific box/network).
 The uncaught-exception-in-periodic-task-error-handler gap noted above
 is also still open.
 
-## Bug found live, not fixed: deleting a device drops it out of ARP-spoofing scope entirely (2026-09-11)
+## Fixed: deleting a device used to drop it out of ARP-spoofing scope entirely (2026-09-11)
 
 Found while re-testing after the `--full-duplex` fix above. Deleting a
 device row (dashboard "Jonathan S25", `192.168.1.57`,
-`e6:fb:4e:5b:ef:a5`) does not fall it back to `unauthenticated_v4`
+`e6:fb:4e:5b:ef:a5`) did not fall it back to `unauthenticated_v4`
 (captive-portal-only, the safe default for an unknown device) -- it
-removes the device from ARP-spoofing scope **entirely**. Confirmed live:
+removed the device from ARP-spoofing scope **entirely**. Confirmed live:
 zero ARP traffic to/from that IP/MAC at all post-deletion (no spoofed
-replies in either direction), meaning its ARP cache resolves the real
-gateway normally and it talks directly to the internet with zero
-interception, zero filtering, zero enforcement -- while the device is
+replies in either direction), meaning its ARP cache resolved the real
+gateway normally and it talked directly to the internet with zero
+interception, zero filtering, zero enforcement -- while the device was
 still physically present on the network. The underlying
-`device_bindings` row is left behind as an orphan (`device_id` nulled,
-not deleted or reclassified) rather than triggering any fallback
-classification.
+`device_bindings` row was left behind as an orphan (`device_id` nulled
+via `ON DELETE SET NULL`, not deleted or reclassified) rather than
+triggering any fallback classification.
 
-Net effect: deleting a device functions as an unconditional bypass, not
-a safe default. Not fixed live -- needs a proper decision on intended
-behavior (should a deleted-but-still-present device default to
-unauthenticated, get quarantined, or something else) before
-implementing, per this project's standing practice for real defects
-found via hands-on testing.
+Net effect: deleting a device functioned as an unconditional bypass,
+not a safe default.
 
-## Feature gap, not built yet: bump-only domains have no fallback block for non-bump devices (2026-09-11)
+**Fixed same night, once actually investigated**: both
+`controller/desired_state.py`'s ARP-spoofing target query and
+`controller/policy_state.py`'s four-way classification query used a
+plain INNER JOIN from `devices` to `device_bindings`, which is exactly
+why an orphaned binding (no `devices` row) vanished from both instead
+of defaulting anywhere. Both rewritten as a LEFT JOIN *from*
+`device_bindings`, so an orphaned binding's fully-NULL `devices.*`
+columns flow into `classify_device()`/`bump_eligible()` (which already
+treat every one of `ignored`/`quarantined_at`/`is_authenticated`/
+`bypass_login`/`bump_enabled` as falsy by default) and land exactly on
+PREAUTH/unauthenticated with no bump eligibility -- no special-casing
+needed beyond the JOIN direction itself. `desired_state.py`'s own
+per-device dedup also had to move from keying on `device_id` (would
+collide every orphaned binding on the same NULL) to `mac_address`.
+10 new regression tests across both modules' test files, all passing
+alongside the full existing suite. Not yet redeployed to production as
+of this entry -- next interception window will exercise it for real.
 
-Surfaced live while re-testing after the `--full-duplex` fix: `.102`
-(not bump-enabled) had full, unrestricted access to crunchyroll.com.
-Root cause of THAT specific instance was a stray, unassigned
-"Entertainment" v2fly category left over from testing the category-catalog
-feature earlier the same day (`is_global=0`, no user/device/group
-assignment -- enforces nothing for anyone; left alone per owner's
-request, to be configured properly later) -- not itself a bug.
+## Corrected: bump-only domains DO already have a fallback block for non-bump devices (2026-09-11)
 
-But it surfaced a real, standing design gap the owner explicitly called
-out: **any domain configured for bump-tier filtering (e.g. Crunchyroll's
-per-series whitelist, `proxy/authz_helper.py`'s `_decide_crunchyroll()`)
-currently has no corresponding block for devices that are NOT
-bump-enabled.** Bump-based filtering only works by decrypting HTTPS via
-Squid, which non-bump devices never touch at all -- so today, a bump
-domain is enforced ONLY on the specific devices an admin flips
-`bump_enabled` on, and is otherwise fully reachable, unrestricted, from
-every other device on the network. This is a real bypass: a
-household member can trivially defeat any bump-based restriction just
-by using a different, non-bump device to reach the same site.
+**Originally logged as a missing feature; that was wrong, corrected the
+same night.** Surfaced live while re-testing after the `--full-duplex`
+fix: `.102` (not bump-enabled) had full, unrestricted access to
+crunchyroll.com, which briefly looked like a standing design gap ("bump
+domains have no fallback block for non-bump devices").
 
-**Not built tonight** -- needs proper design (likely: every domain
-governed by a bump-scoped rule also needs an automatic, paired DNS-tier
-hard-deny applied to every device that is NOT bump-enabled for that
-domain, kept in sync as bump-enabled status changes per device) before
-implementing, per this project's standing practice.
+Investigated properly rather than taken at face value: this project
+already has exactly this mechanism, built 2026-08-31 --
+`controller/adguard_sync.py`'s `build_rules()` generates one AdGuard
+hard-deny rule per `mode='bump'` domain, `$client=`-scoped to every
+device that isn't currently `bump_eligible()`. Confirmed live:
+crunchyroll.com's `domains` row is correctly configured (`mode='bump'`,
+`is_global=1`), and AdGuard's actual live custom rules (queried
+directly via `/control/filtering/status`) contained exactly the
+expected rule, explicitly listing `192.168.1.102` among the denied
+client IPs, `dnsrewrite`-ing it to the box's own IP. Port 443 has
+nothing listening on the box, so a device hitting that rewritten
+address over HTTPS gets a hard connection failure, not content --
+confirmed functionally effective, not just present as an inert rule.
+
+**Real explanation for the original observation**: this was almost
+certainly a timing/staleness artifact of tonight's live debugging, not
+a design gap -- `.102`'s test window very plausibly landed either
+during the AdGuard-1MiB-truncation-bug period (which broke
+`adguard_sync` entirely until `f80169d`) or in the brief gap right
+after a controller restart before its first fresh sync cycle
+completed. Nothing here needed building; the originally-spawned
+tracked task for this was withdrawn as misdiagnosed.
 
 ### Session close-out (2026-09-11): post-fix performance, still open
 
@@ -9469,3 +9486,58 @@ the profile comes up. The device-deletion bug and the bump-domain
 fallback-block gap above are both logged with tracked follow-up tasks;
 this performance item is not yet tracked as a separate task and should
 be before the next supervised window.
+
+## Follow-up session, same night: three of the four logged items closed out
+
+Worked through the open items in requested order (device-deletion bug,
+bump-domain gap, error-handler gap, then the deferred performance
+issue):
+
+1. **Device-deletion ARP-spoofing-scope bug -- fixed.** See this
+   file's own updated dated entry above ("Fixed: deleting a device
+   used to drop it out of ARP-spoofing scope entirely").
+2. **Bump-domain fallback-block "gap" -- corrected, not a gap at all.**
+   See this file's own updated dated entry above ("Corrected: bump-only
+   domains DO already have a fallback block for non-bump devices").
+   The originally-spawned tracked task for this was withdrawn as
+   misdiagnosed once `controller/adguard_sync.py`'s existing
+   `build_rules()` was actually read instead of assumed missing.
+3. **Uncaught-exception-in-periodic-task-error-handler gap -- fixed,
+   at three layers.** This was the deeper mechanism behind the same
+   night's `--full-duplex`-adjacent controller freeze (the AdGuard
+   1MiB-truncation bug was the *trigger*; this was the *reason a
+   trigger could kill the whole loop*):
+   - `controller/periodic.py`'s `PeriodicTask._tick()` used to call
+     `on_error`/`on_success` unguarded -- if either itself raised
+     (both real callers write to the shared SQLite DB, which can hit
+     `database is locked`), the exception escaped uncaught and killed
+     the task's entire background thread. Now routed through a new
+     `_safe_report()` helper that catches and logs instead.
+   - `controller/main.py`'s `run_cycle()` has its own except blocks
+     that call `health.report_repair_only()`/`report_fail_open()`
+     *from inside* an except block already handling some other
+     failure -- if that write ALSO hit lock contention, the second
+     exception had nowhere to go, escaping past the try/except that
+     was already mid-handler. This is very likely the more direct
+     explanation for the specific freeze observed earlier the same
+     night (one "reconcile cycle failed" warning logged, then total
+     silence). Fixed at the source instead of patching each call
+     site: `controller/health.py`'s three `report_*()` functions now
+     route their writes through a new `_safe_write()` helper that
+     catches and logs rather than propagates -- a failed health-status
+     write is strictly less severe than whatever it was reporting, or
+     than killing the loop that would've retried next cycle anyway.
+   - `common/system_events.py`'s `on_error`/`on_success` (the actual
+     call site that failed live earlier the same night) hardened the
+     same way, for defense in depth on top of the `periodic.py` fix at
+     the calling boundary.
+   - 8 new regression tests across `test_controller_periodic.py`,
+     `test_controller_health.py`, and `test_system_events.py`, all
+     passing alongside the full existing suite.
+4. **Sustained-upload performance issue -- still open**, tracked as
+   `task_47cd9cf6`, deliberately left for last per the owner's own
+   requested order; not touched this session.
+
+Not yet committed/deployed as of writing this entry -- local changes
+only, pending the same commit -> push -> production-pull -> supervised
+retest sequence every other fix this session went through.
