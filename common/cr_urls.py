@@ -16,6 +16,7 @@ class RequestKind(Enum):
     SERIES_PAGE = "series_page"
     WATCH_PAGE = "watch_page"
     PLAYBACK = "playback"
+    UP_NEXT = "up_next"
     CMS_OBJECTS = "cms_objects"
     BLOCKED_SHAPE = "blocked_shape"
     OTHER = "other"
@@ -54,10 +55,26 @@ CMS_OBJECTS_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Added 2026-09-10 (RoadMap.md finding #1d, docs/design/crunchyroll-trace-
+# 2026-09-10/ANALYSIS.md item 1): the "continue watching" / "next episode"
+# feed for a series page. The series id is already in the URL path (no
+# resolver round-trip needed, same direct matching.user_has_show() check
+# SERIES_PAGE gets below) -- confirmed live by probe 2026-09-10. Before
+# this classifier existed, a request here fell through to OTHER and was
+# blanket-allowed by the (now removed, see defaults/seed_defaults.py)
+# `^/content/v[0-9]+/` domain_paths rule -- i.e. genuinely unfiltered
+# regardless of show ownership. This closes that gap.
+UP_NEXT_URL_RE = re.compile(
+    r"^https://www\.crunchyroll\.com/content/v\d+/discover/up_next/"
+    r"([A-Za-z0-9]+)(?:\?[^#]*)?(?:#.*)?$",
+    re.IGNORECASE,
+)
+
 GUARDED_MARKERS = (
     "/watch/",
     "/playback/",
     "/cms/objects/",
+    "/discover/up_next/",
 )
 
 
@@ -83,6 +100,10 @@ def classify(url: str) -> ClassifiedRequest:
     match = PLAYBACK_URL_RE.fullmatch(url)
     if match:
         return ClassifiedRequest(RequestKind.PLAYBACK, (match.group(1).upper(),))
+
+    match = UP_NEXT_URL_RE.fullmatch(url)
+    if match:
+        return ClassifiedRequest(RequestKind.UP_NEXT, (match.group(1).upper(),))
 
     match = CMS_OBJECTS_URL_RE.fullmatch(url)
     if match:

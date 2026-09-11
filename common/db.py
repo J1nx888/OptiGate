@@ -693,6 +693,41 @@ def _migrate(conn: sqlite3.Connection) -> None:
             """
         )
 
+    # 2026-09-10 (RoadMap.md finding #1d): defaults/seed_defaults.py's
+    # CRUNCHYROLL_PATHS dropped its two blanket domain_paths rules
+    # (`^/playback/v[0-9]+/`, `^/content/v[0-9]+/`) -- see that list's own
+    # long comment for the full writeup: they'd turned into a live
+    # security gap, blanket-allowing any request under either prefix that
+    # common/cr_urls.py's classifier didn't specifically recognize,
+    # regardless of show ownership. But seed_defaults.seed()'s own
+    # INSERT OR IGNORE is additive-only (deliberately never touches a row
+    # an earlier run already inserted, see that module's docstring) and
+    # isn't even run automatically at startup (it's a standalone script,
+    # run by hand) -- so an existing database, prod's included, keeps
+    # both dangerous rows forever unless something removes them. This
+    # does that here, in the one place that DOES run automatically on
+    # every startup: deletes ONLY those two exact literal patterns (never
+    # a fuzzy/prefix match, so a genuinely different admin-added rule
+    # that happens to share a substring is untouched) off the Crunchyroll
+    # domain specifically, then seeds the two narrower replacements via
+    # the same INSERT OR IGNORE idiom. Idempotent -- safe on every
+    # startup, on any existing database, in any order relative to the
+    # other checks in this function.
+    cr_domain = conn.execute("SELECT id FROM domains WHERE pattern = 'crunchyroll\\.com'").fetchone()
+    if cr_domain:
+        conn.execute(
+            "DELETE FROM domain_paths WHERE domain_id = ? AND pattern IN (?, ?)",
+            (cr_domain["id"], r"^/playback/v[0-9]+/", r"^/content/v[0-9]+/"),
+        )
+        for pattern in (
+            r"^/content/v[0-9]+/discover/(?!up_next/)",
+            r"^/content/v[0-9]+/[^/]+/watchlist",
+        ):
+            conn.execute(
+                "INSERT OR IGNORE INTO domain_paths (domain_id, pattern) VALUES (?, ?)",
+                (cr_domain["id"], pattern),
+            )
+
 
 # ==========================================================
 # SETTINGS

@@ -56,6 +56,29 @@ TRUSTED_DOMAINS = [
 # Crunchyroll's own paths -- defense-in-depth for request shapes the
 # classifier doesn't specifically recognize. Carried over from v1's
 # allowed_paths.txt.
+#
+# **2026-09-10 (RoadMap.md finding #1d, docs/design/crunchyroll-trace-
+# 2026-09-10/ANALYSIS.md item 4): the two blanket rules this list used to
+# carry -- `^/playback/v[0-9]+/` and `^/content/v[0-9]+/` -- were removed.**
+# Both predated common/cr_urls.py's PLAYBACK/UP_NEXT classifiers and had
+# turned into a live security gap: any request under either prefix that
+# the classifier didn't specifically recognize fell through to
+# proxy/authz_helper.py's OTHER-kind fallback, which consults exactly this
+# list -- so an unrecognized (or, before UP_NEXT existed, simply
+# unclassified) request under `/content/v.../` was blanket-ALLOWED
+# regardless of show ownership, not denied. `/playback/v.../` is fully
+# covered by PLAYBACK_URL_RE (the hard gate -- no manifest, no video,
+# without passing user_has_show()); `/content/v.../` needs the narrower
+# replacements below instead of one blanket allow, so a *future*
+# unrecognized shape under either prefix now fails CLOSED (denied,
+# `path_not_allowed`) instead of open. Confirmed safe to broaden the
+# `discover/` replacement below despite `/content/v.../discover/up_next/`
+# living under the same prefix: UP_NEXT_URL_RE intercepts and fully gates
+# that shape in common/cr_urls.py's classify() before path rules are ever
+# consulted, and `/discover/up_next/` is also in cr_urls.GUARDED_MARKERS
+# so even an unrecognized variant of it fails closed rather than falling
+# through to this list at all -- the negative lookahead below is a third,
+# belt-and-suspenders layer on top of those two.
 CRUNCHYROLL_PATHS = [
     r"^/$", r"^/\?",
     r"^/login", r"^/auth", r"^/api",
@@ -66,11 +89,16 @@ CRUNCHYROLL_PATHS = [
     r"^/discover",
     r"^/config-delta/",
     r"^/subs/v[0-9]+/",
-    r"^/playback/v[0-9]+/",
     r"^/callback",
     r"^/accounts/v[0-9]+/",
     r"^/f/v[0-9]+/",
-    r"^/content/v[0-9]+/",
+    # Id-free content API: catalogue browse, watch history, and the
+    # personalized/home feed rows all live under this prefix -- but NOT
+    # up_next (excluded by name; see the long comment above for why this
+    # is safe even though up_next also starts with `discover/`).
+    r"^/content/v[0-9]+/discover/(?!up_next/)",
+    # accountUuid/watchlist -- carries no series/episode id to check.
+    r"^/content/v[0-9]+/[^/]+/watchlist",
     r"^/i18n/", r"^/skip-events/",
     r"^/content/v[0-9]+/.*playheads",
     r"^/v1/track", r"^/v1/p$",

@@ -14,6 +14,7 @@ import auth
 import authz_helper
 import db
 import identity
+import matching
 import series_resolve
 import sni_helper
 import squid_helper
@@ -480,6 +481,45 @@ def test_authz_crunchyroll_series_page_requires_approval(conn):
     assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", path) is True
 
 
+def test_authz_crunchyroll_up_next_requires_approval(conn):
+    """RoadMap.md finding #1d: the "continue watching" feed carries the
+    series id directly in the path, same direct check as SERIES_PAGE --
+    no series_resolve call needed. Before this classifier existed, this
+    exact path fell through to OTHER and was blanket-allowed by the (now
+    removed) `^/content/v[0-9]+/` domain_paths rule regardless of show
+    ownership -- this is the regression test for that gap."""
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    path = "/content/v2/discover/up_next/GYE5K0XVR"
+    assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", path) is False
+    row = conn.execute("SELECT * FROM access_log ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["reason"] == "show_not_approved"
+
+    conn.execute(
+        "INSERT INTO user_shows (user_id, series_id, series_name) VALUES (?, 'GYE5K0XVR', 'Ace Attorney')",
+        (user["id"],),
+    )
+    conn.commit()
+    assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", path) is True
+
+
+def test_authz_crunchyroll_up_next_malformed_shape_fails_closed(conn):
+    """The '/discover/up_next/' guarded marker is present but no id
+    follows -- must be BLOCKED_SHAPE, not fall through to OTHER (and from
+    there to the domain's own broader /content/v.../discover/ path rule,
+    which deliberately excludes up_next but shouldn't need to matter here
+    at all -- this shape should never reach path matching in the first
+    place)."""
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    path = "/content/v2/discover/up_next/"
+    assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", path) is False
+    row = conn.execute("SELECT * FROM access_log ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["reason"] == "blocked_shape"
+
+
 def test_authz_crunchyroll_watch_page_resolves_series_and_checks_approval(conn, monkeypatch):
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
@@ -543,6 +583,57 @@ def test_authz_crunchyroll_other_shape_with_no_path_rules_denies_beyond_root(con
     _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
     assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/") is True
     assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/some-other-page") is False
+
+
+def test_authz_crunchyroll_content_v2_no_longer_blanket_allowed(conn):
+    """RoadMap.md finding #1d: `^/content/v[0-9]+/` used to be a seeded
+    blanket domain_paths rule -- ANY unrecognized request under that
+    prefix was allowed regardless of show ownership. It's gone now
+    (defaults/seed_defaults.py's CRUNCHYROLL_PATHS); the narrower
+    discover/watchlist replacements below should allow the genuinely
+    id-free endpoints while an arbitrary unrecognized /content/v.../
+    shape still denies."""
+    user = _add_user(conn, "kid1", "pw")
+    _bind_ip_to_user(conn, user["id"], "192.168.1.5")
+    domain = _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    for pattern in (
+        r"^/content/v[0-9]+/discover/(?!up_next/)",
+        r"^/content/v[0-9]+/[^/]+/watchlist",
+    ):
+        conn.execute("INSERT INTO domain_paths (domain_id, pattern) VALUES (?, ?)", (domain["id"], pattern))
+    conn.commit()
+
+    # Id-free endpoints under the narrower replacements: allowed.
+    assert authz_helper.decide(conn, "192.168.1.5", "www.crunchyroll.com:443", "/content/v2/discover/browse") is True
+    assert authz_helper.decide(
+        conn, "192.168.1.5", "www.crunchyroll.com:443", "/content/v2/some-account-uuid/watchlist"
+    ) is True
+    # A hypothetical future /content/v.../ shape that isn't one of the
+    # narrow replacements -- outside both "discover/" and ".../watchlist"
+    # -- and isn't recognized by cr_urls.classify() either now denies
+    # instead of the old blanket-allow.
+    assert authz_helper.decide(
+        conn, "192.168.1.5", "www.crunchyroll.com:443", "/content/v2/some-unrecognized-endpoint"
+    ) is False
+
+
+def test_authz_crunchyroll_discover_path_rule_negative_lookahead_excludes_up_next(conn):
+    """The narrow `^/content/v[0-9]+/discover/(?!up_next/)` replacement
+    rule's own negative lookahead never actually matters in practice --
+    cr_urls.classify() always intercepts and gates a real up_next URL as
+    its own RequestKind before path rules are ever consulted (see
+    test_authz_crunchyroll_up_next_requires_approval) -- but this
+    confirms the lookahead itself holds, directly against
+    matching.path_allowed(), as a belt-and-suspenders check independent
+    of the classifier."""
+    domain = _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
+    conn.execute(
+        "INSERT INTO domain_paths (domain_id, pattern) VALUES (?, ?)",
+        (domain["id"], r"^/content/v[0-9]+/discover/(?!up_next/)"),
+    )
+    conn.commit()
+    assert matching.path_allowed(conn, domain["id"], "/content/v2/discover/browse") is True
+    assert matching.path_allowed(conn, domain["id"], "/content/v2/discover/up_next/GYE5K0XVR") is False
 
 
 # ============================================================

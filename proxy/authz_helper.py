@@ -272,7 +272,11 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain, client_ip:
         )
         return False
 
-    if request.kind is cr_urls.RequestKind.SERIES_PAGE:
+    if request.kind in (cr_urls.RequestKind.SERIES_PAGE, cr_urls.RequestKind.UP_NEXT):
+        # UP_NEXT (added 2026-09-10, RoadMap.md finding #1d) carries a
+        # series id directly in the URL, same as SERIES_PAGE -- no
+        # series_resolve round-trip needed, just the same direct
+        # user_has_show() check.
         allowed = True
         for series_id in request.ids:
             show_ok = matching.user_has_show(conn, user["id"], series_id)
