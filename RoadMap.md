@@ -9700,3 +9700,57 @@ risk on a cycle where a real change DOES land. Not yet deployed/live-
 tested against production as of this entry -- needs the owner's
 explicit go-ahead to bring interception up again first, per the
 standing instruction above.
+
+## Item 3 revisited: sustained-upload failure -- a real, evidenced candidate fix found, not yet validated
+
+Non-disruptive investigation on the box itself (no interception needed,
+zero household impact) surfaced concrete, quantifiable evidence of a
+real bottleneck, rather than more guessing:
+
+- `ethtool -S enp1s0` shows `rx_missed: 833` -- a genuine, nonzero
+  hardware-level packet-drop counter. This NIC really has been
+  dropping received packets.
+- `ethtool -g enp1s0` shows RX/TX ring buffers already at the
+  hardware's own maximum (256/256 -- an inherent limitation of this
+  budget Realtek RTL8168h/8111h chip, not something raisable further).
+- `/proc/interrupts` shows this NIC has exactly ONE interrupt line
+  (single-queue hardware, no RSS possible), and every single one of
+  its 1.2M+ interrupts so far had landed on ONE CPU core (CPU1) --
+  zero on the other three, on this 4-core box.
+- `/proc/net/softnet_stat` corroborates independently: CPU1 alone
+  shows measurable drops at the backlog/softirq processing stage (the
+  layer AFTER the NIC ring buffer), while the three otherwise-idle
+  cores show zero. Two separate, independent counters both pointing at
+  the same single overloaded core.
+- `rps_cpus` for the NIC's one RX queue was `0` -- Linux's software
+  Receive Packet Steering (RPS), which can distribute packet
+  *processing* across multiple cores even for genuinely single-queue
+  hardware where RSS itself isn't possible, was never enabled at all.
+
+This is a plausible, well-evidenced explanation for the specific
+"sustained, high-volume, one-directional traffic fails; light browsing
+doesn't" symptom: full-duplex relay means this box now does
+genuine kernel IP forwarding for every device's traffic in both
+directions, and a sustained upload test is exactly the kind of
+sustained high-packet-rate load that would first expose a single-core
+interrupt/softirq bottleneck.
+
+**Applied as a live, runtime-only test** (same caution as the earlier
+GRO/GSO/TSO experiment -- not yet proven, not yet made persistent):
+`echo f > /sys/class/net/enp1s0/queues/rx-0/rps_cpus`, spreading RX
+packet processing across all 4 cores instead of just CPU1. Does not
+touch any forwarding/policy logic, purely a CPU-scheduling hint --
+inherently low-risk. Not yet deployed for the night (matching the
+AdGuard fix's fate above) -- needs the owner's go-ahead to bring
+interception up for a real speedtest-upload retest before this is
+considered proven, or made persistent (a systemd unit/udev rule, since
+`/sys` writes don't survive a reboot).
+
+**Still open regardless of outcome**: if RPS resolves it, this project
+gains a real, documented, low-risk host-tuning step worth making
+permanent and writing into deployment docs; if it doesn't fully
+resolve it, the `rx_missed`/ring-buffer-at-hardware-max evidence still
+points toward this box's NIC being a genuine, physical throughput
+ceiling for full-duplex relay of an entire household's traffic on a
+single consumer-grade interface -- a harder problem than a sysctl can
+solve, worth knowing either way.
