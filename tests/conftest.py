@@ -48,23 +48,32 @@ import pytest  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def block_network(monkeypatch):
-    """No test in this suite may make a real network call. The only network
-    entry point anywhere in this codebase is cr_api._OPENER.open (everything
-    else goes through the shared SQLite file) -- patch that directly rather
-    than the stdlib `socket` module: replacing socket.socket globally breaks
-    `ssl.py`'s `class SSLSocket(socket):` the moment anything imports ssl for
-    the first time, which raises a confusing TypeError instead of a clean
-    failure. Anything exercising cr_api must monkeypatch this (or
-    cr_api.SeriesResolver._get_json / cr_api.series_title) explicitly."""
+    """No test in this suite may make a real network call. The network entry
+    points in this codebase are cr_api._OPENER.open and
+    category_fetch._OPENER.open (each module builds its own urllib opener;
+    everything else goes through the shared SQLite file) -- patch those
+    directly rather than the stdlib `socket` module: replacing socket.socket
+    globally breaks `ssl.py`'s `class SSLSocket(socket):` the moment anything
+    imports ssl for the first time, which raises a confusing TypeError
+    instead of a clean failure. category_catalog_sync has no opener of its
+    own; it reuses category_fetch._fetch() for its HTTP calls, so patching
+    category_fetch._OPENER.open covers it too. Anything exercising cr_api
+    must monkeypatch this (or cr_api.SeriesResolver._get_json /
+    cr_api.series_title) explicitly; anything exercising category_fetch or
+    category_catalog_sync must monkeypatch category_fetch._OPENER.open (or
+    category_fetch._fetch) explicitly."""
     import cr_api
+    import category_fetch
 
     def _blocked(*args, **kwargs):
         raise RuntimeError(
             "Network access attempted during a Tier-1 test. Mock the call "
-            "instead (see cr_api._OPENER.open / SeriesResolver._get_json)."
+            "instead (see cr_api._OPENER.open / SeriesResolver._get_json, or "
+            "category_fetch._OPENER.open / category_fetch._fetch)."
         )
 
     monkeypatch.setattr(cr_api._OPENER, "open", _blocked)
+    monkeypatch.setattr(category_fetch._OPENER, "open", _blocked)
 
 
 @pytest.fixture
