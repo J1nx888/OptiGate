@@ -68,6 +68,76 @@ def test_resolve_device_ignores_an_inactive_binding(conn):
 
 
 # ============================================================
+# resolve_device: self-healing an orphaned binding (real gap found
+# live 2026-09-11, see this function's own dated docstring)
+# ============================================================
+
+def test_resolve_device_self_heals_an_orphaned_binding(conn):
+    """Deleting a device leaves its device_bindings row orphaned
+    (device_id NULL, ON DELETE SET NULL) rather than deleted. Before
+    this fix, resolve_device() returned None for it forever -- exactly
+    the "we couldn't identify this device on the network yet" dead end
+    hit live on production: retrying never helped, since nothing ever
+    created the missing devices row. It must now auto-create a fresh
+    PREAUTH row and resolve successfully."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    old_device_id = conn.execute(
+        "SELECT device_id FROM device_bindings WHERE ipv4_address = ?", (IP_1,)
+    ).fetchone()["device_id"]
+    conn.execute("DELETE FROM devices WHERE id = ?", (old_device_id,))
+    conn.commit()
+    assert conn.execute(
+        "SELECT device_id FROM device_bindings WHERE ipv4_address = ?", (IP_1,)
+    ).fetchone()["device_id"] is None
+
+    device = resolve_device(conn, IP_1)
+
+    assert device is not None
+    assert device["mac_address"] == MAC_A
+    # Not asserting device["id"] != old_device_id: SQLite reuses a
+    # rowid after deleting the only row in an otherwise-empty table, so
+    # a genuinely-fresh INSERT can legitimately land on the same
+    # numeric id. What actually matters -- a real, fresh row with
+    # correct defaults, not the stale deleted one somehow resurrected
+    # -- is covered by the assertions below and by the "only heals
+    # once" test's own row-count check.
+    assert device["is_authenticated"] == 0, "the same PREAUTH default a genuinely-new MAC gets"
+    assert device["ignored"] == 0
+    assert device["user_id"] is None
+    assert device["group_id"] is None
+
+
+def test_resolve_device_only_self_heals_once(conn):
+    """The second call must hit the fast INNER JOIN path directly, not
+    create a second devices row for the same MAC -- the binding gets
+    repointed at the newly-created device the first time."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    old_device_id = conn.execute(
+        "SELECT device_id FROM device_bindings WHERE ipv4_address = ?", (IP_1,)
+    ).fetchone()["device_id"]
+    conn.execute("DELETE FROM devices WHERE id = ?", (old_device_id,))
+    conn.commit()
+
+    first = resolve_device(conn, IP_1)
+    second = resolve_device(conn, IP_1)
+
+    assert first["id"] == second["id"]
+    count = conn.execute("SELECT COUNT(*) AS c FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()["c"]
+    assert count == 1, "expected exactly one devices row for this MAC after self-healing"
+    rebound = conn.execute(
+        "SELECT device_id FROM device_bindings WHERE ipv4_address = ?", (IP_1,)
+    ).fetchone()["device_id"]
+    assert rebound == first["id"], "the binding should now point directly at the healed device"
+
+
+def test_resolve_device_still_returns_none_for_a_genuinely_unknown_ip(conn):
+    """No binding at all for this IP (not even an orphaned one) -- must
+    not accidentally create a devices row for it."""
+    assert resolve_device(conn, "192.168.1.250") is None
+    assert conn.execute("SELECT COUNT(*) AS c FROM devices").fetchone()["c"] == 0
+
+
+# ============================================================
 # resolve_user_for_device
 # ============================================================
 

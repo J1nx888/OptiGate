@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import sqlite3
 
+import db
+import identity
+
 
 def resolve_user_for_device(conn: sqlite3.Connection, device: sqlite3.Row | None) -> sqlite3.Row | None:
     """The `users` row for `device`'s own user_id, or None if the device
@@ -74,12 +77,43 @@ def resolve_device(conn: sqlite3.Connection, client_ip: str) -> sqlite3.Row | No
     dashboard/captive_portal_server.py (Phase 4 milestone 3) needs the
     device_id itself to actually grant access (flipping
     is_authenticated), not just whichever user, if any, already owns
-    it. A device with device_id NULL never matches here at all (the
-    JOIN requires a real devices row) -- see common/identity.py's
-    record_binding docstring for why that should be rare going forward
-    (Phase 4 milestone 1 auto-creates one for a genuinely new MAC).
+    it.
+
+    **Real gap found live 2026-09-11, closed the same day**: a binding
+    with `device_id` NULL used to never match here at all -- the
+    original comment on this docstring called that "rare going
+    forward," reasoning that Phase 4's auto-create-on-first-sight
+    (`identity.record_binding()`) meant a MAC would basically never
+    reach this function without a real `devices` row. That reasoning
+    missed deletion: deleting a device leaves its `device_bindings` row
+    orphaned (`device_id` NULL via `ON DELETE SET NULL`, not deleted --
+    see db.py's own schema comment), and once
+    `controller/policy_state.py`'s matching fix correctly started
+    routing that orphaned binding's still-active device into
+    `unauthenticated_v4` (PREAUTH, same as any unknown device) instead
+    of silently escaping interception, its traffic started reaching
+    `dashboard/captive_portal_server.py` for the first time ever --
+    where this function returning None hard-failed every login AND
+    every admin action ("we couldn't identify this device on the
+    network yet") with literally no path to recover, since nothing
+    would ever create the missing row no matter how many times someone
+    retried.
+
+    Now self-healing: an orphaned-but-currently-active binding for
+    `client_ip` gets a fresh PREAUTH `devices` row via
+    `identity.create_pending_device()` -- the exact same defaults a
+    genuinely-new MAC gets -- and every `device_bindings` row for that
+    MAC (not just this one IP) is repointed at it, so this only ever
+    happens once per deleted device, not on every single request.
+    Deliberately calls `create_pending_device()` directly rather than
+    going through `record_binding()`'s own `_mac_has_any_prior_binding()`
+    gate: that gate exists specifically to block *passive* background
+    binding refreshes from reviving a deleted device, which does not
+    describe this call site -- reaching here means a real HTTP request
+    (a login attempt, an admin action, an intercepted connection) is
+    actively in flight for this exact device right now.
     """
-    return conn.execute(
+    row = conn.execute(
         """
         SELECT d.* FROM device_bindings b
         JOIN devices d ON d.id = b.device_id
@@ -88,3 +122,21 @@ def resolve_device(conn: sqlite3.Connection, client_ip: str) -> sqlite3.Row | No
         """,
         (client_ip,),
     ).fetchone()
+    if row is not None:
+        return row
+
+    orphaned = conn.execute(
+        "SELECT mac_address FROM device_bindings WHERE ipv4_address = ? AND active = 1 AND device_id IS NULL "
+        "ORDER BY last_seen_at DESC LIMIT 1",
+        (client_ip,),
+    ).fetchone()
+    if orphaned is None:
+        return None
+
+    device_id = identity.create_pending_device(conn, orphaned["mac_address"], db.now_iso())
+    conn.execute(
+        "UPDATE device_bindings SET device_id = ? WHERE mac_address = ? AND device_id IS NULL",
+        (device_id, orphaned["mac_address"]),
+    )
+    conn.commit()
+    return conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()

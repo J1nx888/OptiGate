@@ -199,7 +199,7 @@ def _record_binding_locked(
         # devices row, and why an already-known-but-unassociated MAC
         # (any prior binding at all, even inactive) deliberately does
         # NOT hit this path.
-        device_id = _create_pending_device(conn, mac_address, seen_at)
+        device_id = create_pending_device(conn, mac_address, seen_at)
         auto_created = True
 
     conn.execute(
@@ -272,11 +272,34 @@ def _mac_has_any_prior_binding(conn: sqlite3.Connection, mac_address: str) -> bo
     )
 
 
-def _create_pending_device(conn: sqlite3.Connection, mac_address: str, seen_at: str) -> int:
-    """Auto-creates a brand-new, unassociated `devices` row for a MAC
-    genuinely never seen before -- see record_binding()'s own docstring
-    for the full reasoning. `is_authenticated = 0` deliberately
-    overrides the `devices` table's own schema default of `1`.
+def create_pending_device(conn: sqlite3.Connection, mac_address: str, seen_at: str) -> int:
+    """Auto-creates a brand-new, unassociated `devices` row (PREAUTH:
+    `is_authenticated = 0`, deliberately overriding the `devices`
+    table's own schema default of `1`) for a MAC.
+
+    Public (not `_`-prefixed) since 2026-09-11: this used to be a
+    private helper called only from record_binding() above, for a MAC
+    genuinely never seen before (gated by `_mac_has_any_prior_binding()`
+    -- see record_binding()'s own docstring for that "no retroactive
+    backfill" reasoning, which does NOT apply to this function's SECOND
+    caller). `common/device_identity.py`'s `resolve_device()` now also
+    calls this directly, deliberately bypassing that gate, for a real
+    gap found live the same day: deleting a device leaves its
+    `device_bindings` row orphaned (`device_id` NULL via `ON DELETE SET
+    NULL`) rather than deleted, and once `controller/policy_state.py`'s
+    matching fix correctly started routing that orphaned binding's
+    still-active device to the captive portal (PREAUTH, same as any
+    unknown device), the portal's own admin-action AND kid-login
+    handlers hit a second, previously-unreachable gap: `resolve_device()`
+    still required a real `devices` row and returned None, hard-failing
+    "we couldn't identify this device" with no path to ever recover --
+    retrying didn't help, since nothing ever created the missing row.
+    Skipping the "no retroactive backfill" gate here is deliberate: a
+    person is ACTIVELY, explicitly interacting with this exact device
+    on the captive portal right now (signing in, or an admin taking a
+    bypass/ignore/assign action) -- categorically different from
+    record_binding()'s own passive, no-human-involved background
+    binding refresh, which is what that gate exists to guard against.
     """
     cur = conn.execute(
         "INSERT INTO devices (mac_address, is_authenticated, ignored, created_at) "

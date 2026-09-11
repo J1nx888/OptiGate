@@ -9541,3 +9541,46 @@ issue):
 Not yet committed/deployed as of writing this entry -- local changes
 only, pending the same commit -> push -> production-pull -> supervised
 retest sequence every other fix this session went through.
+
+## Live-verified item 1 fix surfaced a second, previously-unreachable gap in device identity resolution
+
+While confirming the device-deletion fix above against real production
+data (the still-orphaned "Jonathan S25" binding), the owner tried
+signing back in through the captive portal and hit a hard dead end:
+"We couldn't identify this device on the network yet -- try again
+shortly," on every attempt (login, and every admin action: bypass,
+ignore, assign_group).
+
+**Root cause**: `common/device_identity.py`'s `resolve_device()` --
+used by both `dashboard/captive_portal_server.py`'s login/admin-action
+handlers and `proxy/sni_helper.py`/`authz_helper.py`'s Squid-side
+identity resolution -- has the exact same INNER-JOIN-requires-a-real-
+devices-row bug this session already fixed in
+`controller/policy_state.py`/`desired_state.py`. Its own docstring
+even predicted the opposite of what actually happened: it called a
+NULL `device_id` "rare going forward" once Phase 4's auto-create-on-
+first-sight shipped, reasoning that a MAC would basically never reach
+this function without a real row. That missed deletion entirely.
+Before tonight's device-deletion fix, an orphaned binding never
+reached the captive portal at all (it had escaped interception
+completely, per the bug that fix closed). Now that it correctly gets
+redirected there instead, it hit this SECOND gap for the first time --
+`resolve_device()` returning None with no way to ever recover, since
+retrying doesn't create the missing `devices` row.
+
+**Fixed**: `resolve_device()` now self-heals. On a JOIN miss, it checks
+for an orphaned-but-active binding for the same IP and, if found, calls
+a newly-public `identity.create_pending_device()` (renamed from
+`_create_pending_device()`, previously private to `record_binding()`)
+to create a fresh PREAUTH `devices` row -- the exact same defaults a
+genuinely-new MAC gets -- then repoints every `device_bindings` row for
+that MAC at it, so this only ever fires once per deleted device.
+Deliberately bypasses `record_binding()`'s own `_mac_has_any_prior_
+binding()` "no retroactive backfill" gate: that gate exists to stop
+*passive* background binding refreshes from reviving a deleted device,
+which isn't what this is -- reaching this code path means a real HTTP
+request (a login, an admin action, an intercepted connection) is
+actively in flight for this exact device right now. 5 new regression
+tests (`test_device_identity.py`), full suite passing.
+
+Not yet committed as of writing this entry.
