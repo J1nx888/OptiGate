@@ -9754,3 +9754,41 @@ points toward this box's NIC being a genuine, physical throughput
 ceiling for full-duplex relay of an entire household's traffic on a
 single consumer-grade interface -- a harder problem than a sysctl can
 solve, worth knowing either way.
+
+## Design question flagged for later: schedule-gated categories are wide open outside their scheduled window, by design
+
+Owner asked directly: "what happens to a device that doesn't have an
+active schedule -- is anything blocked besides the global items?"
+Traced precisely rather than assumed, using Emily's real `.102`
+config: `controller/adguard_sync.py`'s `build_category_deny_rules()`
+checks `matching.category_applies_to_device()` (`is_global`, or a
+direct user/group/device assignment) FIRST, and only falls through to
+"is there a currently-active schedule referencing this category" when
+that's `False`. So a category that's `is_global` or directly assigned
+is enforced 24/7 no matter what; a category that exists ONLY in
+`schedule_categories` (referenced by a schedule, never made global or
+directly assigned) is completely unrestricted outside that schedule's
+own window -- not throttled, not defaulted-closed, just open.
+
+Confirmed live against Emily's actual configuration: she has nothing
+directly assigned to her (no `category_users`/`user_domains` rows at
+all). Right now, with no schedule of hers active, she's restricted to
+exactly the household's global categories (Adult, Gambling, Drugs,
+Fraud & Scams, Manga, Social Media) and global bump-domain hard-denies
+(crunchyroll.com, webtoons.com) -- every category that's ONLY
+referenced by her "Free Time (Weekday)"/"Free Time (Sat)"/"School"
+schedules (Facebook, TikTok, Twitter/X, WhatsApp, AI, Reddit, YouTube,
+AI Services, Anime/Comics & Games, Games, Entertainment) is completely
+open right now, by design, not a bug.
+
+**Flagged for later, not a confirmed defect**: worth the owner
+revisiting whether this is the intended posture -- e.g., should a
+schedule-referenced category have some DEFAULT/baseline restriction
+outside its own window (a "closed unless a schedule opens it" model)
+rather than "open unless a schedule closes it"? Or is the current
+"schedules are pure time-boxed windows, nothing more" behavior exactly
+right, and the fix is just making sure schedules cover the household's
+actual full day (e.g. if "School"/"Free Time" schedules don't
+contiguously cover all waking hours, there could be an unintended gap
+between them where restricted categories are briefly wide open)? No
+code change proposed -- this needs a product decision first.
