@@ -3,6 +3,7 @@ package dbsource
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -78,8 +79,64 @@ func TestReadDesiredPolicy_PopulatesBumpField(t *testing.T) {
 	}
 }
 
-func TestReadDesiredPolicy_NoRowReturnsZeroValue(t *testing.T) {
+// Regression test for a real gap found by code review 2026-09-11, fixed
+// 2026-09-12 per the project owner's explicit decision: this used to
+// return (DesiredPolicy{}, nil) for a missing row -- indistinguishable
+// from a REAL, controller-computed policy where every list is
+// legitimately empty (e.g. every device was deleted). Collapsing the
+// two meant reconcileOnce would diff "nothing computed yet" against
+// whatever the kernel currently enforces and wipe every nftables set,
+// with no error anywhere, the moment this row went missing while real
+// devices were still enforced. Must now return the distinguishable
+// ErrNoDesiredPolicy instead.
+func TestReadDesiredPolicy_NoRowReturnsErrNoDesiredPolicy(t *testing.T) {
 	path := setupDB(t, "")
+
+	_, err := ReadDesiredPolicy(path)
+	if !errors.Is(err, ErrNoDesiredPolicy) {
+		t.Fatalf("ReadDesiredPolicy err = %v, want ErrNoDesiredPolicy", err)
+	}
+}
+
+// Sibling case: a row DOES exist (e.g. a pre-Milestone-6/7 database
+// whose ALTER TABLE just added this column, or a future schema
+// migration doing the same) but desired_policy_json is NULL rather
+// than the row being entirely absent -- a different code path
+// (sql.NullString.Valid, not sql.ErrNoRows) that must return the same
+// ErrNoDesiredPolicy, not silently collapse into an empty policy.
+func TestReadDesiredPolicy_NullColumnReturnsErrNoDesiredPolicy(t *testing.T) {
+	path := setupDB(t, "")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(
+		"INSERT INTO interception_runtime (singleton_id, desired_policy_json) VALUES (1, NULL)",
+	); err != nil {
+		t.Fatalf("seed NULL row: %v", err)
+	}
+
+	_, err = ReadDesiredPolicy(path)
+	if !errors.Is(err, ErrNoDesiredPolicy) {
+		t.Fatalf("ReadDesiredPolicy err = %v, want ErrNoDesiredPolicy", err)
+	}
+}
+
+// The other side of the same distinction: a REAL, controller-computed
+// policy where every list is legitimately empty (e.g. every device was
+// deleted) must NOT be confused with ErrNoDesiredPolicy -- it's a valid
+// desired state and should be returned normally, letting reconcileOnce
+// apply it (which could legitimately mean clearing every nftables set,
+// exactly as the admin intended).
+func TestReadDesiredPolicy_RealEmptyPolicyIsNotAnError(t *testing.T) {
+	path := setupDB(t, `{
+		"authenticated": [],
+		"unauthenticated": [],
+		"bypass": [],
+		"quarantine": [],
+		"bump": []
+	}`)
 
 	got, err := ReadDesiredPolicy(path)
 	if err != nil {

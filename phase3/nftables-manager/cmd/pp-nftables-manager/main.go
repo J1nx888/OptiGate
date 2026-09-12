@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -115,6 +116,23 @@ func main() {
 			return
 		case <-ticker.C:
 			if err := reconcileOnce(ctx, mgr, *dbPath); err != nil {
+				// Fixed 2026-09-12, per the project owner's explicit
+				// decision (see RoadMap.md): dbsource.ErrNoDesiredPolicy
+				// means the controller hasn't computed a policy yet (or
+				// the row/column has gone missing) -- NOT the same as a
+				// real, controller-computed empty policy. Reported as
+				// healthy ("running"), not fail_open: this process itself
+				// isn't broken, it's correctly holding whatever the
+				// kernel already has rather than wiping every set based
+				// on data that was never actually there.
+				if errors.Is(err, dbsource.ErrNoDesiredPolicy) {
+					log.Print("no desired policy yet from the DB (interception_runtime row/column missing) -- " +
+						"holding current kernel state, applying nothing this cycle")
+					if werr := dbsource.WriteHealth(*dbPath, "running", nil); werr != nil {
+						log.Printf("failed to write healthy status: %v", werr)
+					}
+					continue
+				}
 				log.Printf("reconcile cycle failed (will retry next cycle against fresh actual state): %v", err)
 				if werr := dbsource.WriteHealth(*dbPath, "fail_open", err); werr != nil {
 					log.Printf("also failed to write fail_open health: %v", werr)

@@ -17,13 +17,34 @@ package dbsource
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"net"
 	"time"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/J1nx888/parental_proxy/phase3/nftables-manager/internal/policy"
 )
+
+// ErrNoDesiredPolicy is returned by ReadDesiredPolicy when
+// interception_runtime's singleton row doesn't exist yet, or its
+// desired_policy_json column is NULL -- deliberately distinguished
+// from a REAL, controller-computed policy that happens to have every
+// list empty (e.g. every device was deleted, a legitimate desired
+// state). Collapsing the two used to mean this process would treat a
+// missing row/column exactly like "the policy is: nobody is
+// authenticated, bypassed, or quarantined," diff that against whatever
+// the kernel currently enforces, and wipe every nftables set -- with no
+// error anywhere -- the moment this row/column went missing while real
+// devices were still enforced (e.g. a mishandled DB restore/reset).
+// Real gap found by code review 2026-09-11, fixed 2026-09-12 per the
+// project owner's explicit decision: callers (reconcileOnce in
+// cmd/pp-nftables-manager/main.go) must treat this error specially --
+// hold current kernel state and retry next cycle, rather than applying
+// an empty diff.
+var ErrNoDesiredPolicy = errors.New("no desired policy computed yet (interception_runtime row or desired_policy_json column is missing)")
 
 type desiredPolicyWire struct {
 	Authenticated   []string `json:"authenticated"`
@@ -46,10 +67,9 @@ type desiredPolicyWire struct {
 
 // ReadDesiredPolicy opens dbPath read-only and reads the current
 // desired_policy_json column from interception_runtime's singleton
-// row. Returns a zero-value (all-empty) DesiredPolicy, not an error,
-// if the row or column doesn't exist/isn't set yet -- that's the
-// legitimate "nothing computed yet" state, not a fault worth failing a
-// reconcile cycle over.
+// row. Returns ErrNoDesiredPolicy (see its own doc comment) if the row
+// or column doesn't exist/isn't set yet -- callers must NOT treat that
+// the same as a real, controller-computed empty policy.
 func ReadDesiredPolicy(dbPath string) (policy.DesiredPolicy, error) {
 	// _busy_timeout=5000 matches common/db.py's own PRAGMA busy_timeout=5000
 	// on the Python side (confirmed live 2026-09-08: this driver
@@ -74,13 +94,13 @@ func ReadDesiredPolicy(dbPath string) (policy.DesiredPolicy, error) {
 		"SELECT desired_policy_json FROM interception_runtime WHERE singleton_id = 1",
 	).Scan(&raw)
 	if err == sql.ErrNoRows {
-		return policy.DesiredPolicy{}, nil
+		return policy.DesiredPolicy{}, ErrNoDesiredPolicy
 	}
 	if err != nil {
 		return policy.DesiredPolicy{}, fmt.Errorf("query interception_runtime: %w", err)
 	}
 	if !raw.Valid {
-		return policy.DesiredPolicy{}, nil
+		return policy.DesiredPolicy{}, ErrNoDesiredPolicy
 	}
 
 	var wire desiredPolicyWire
@@ -89,12 +109,34 @@ func ReadDesiredPolicy(dbPath string) (policy.DesiredPolicy, error) {
 	}
 
 	return policy.DesiredPolicy{
-		Authenticated:   wire.Authenticated,
-		Unauthenticated: wire.Unauthenticated,
-		Bypass:          wire.Bypass,
-		Quarantine:      wire.Quarantine,
-		Bump:            wire.Bump,
+		Authenticated:   validIPv4s("authenticated", wire.Authenticated),
+		Unauthenticated: validIPv4s("unauthenticated", wire.Unauthenticated),
+		Bypass:          validIPv4s("bypass", wire.Bypass),
+		Quarantine:      validIPv4s("quarantine", wire.Quarantine),
+		Bump:            validIPv4s("bump", wire.Bump),
 	}, nil
+}
+
+// validIPv4s drops any entry that isn't a well-formed IPv4 address,
+// logging each one dropped. Fixed 2026-09-11, found by code review:
+// unlike arp-worker's own HandleReplaceTargets (which parses and drops
+// unparseable IPs as explicit per-target failures), this previously
+// passed whatever strings controller/policy_state.py wrote straight
+// through to policy.Reconcile and into ApplyDiffs's single atomic
+// knftables transaction -- one malformed entry (a Python-side bug,
+// encoding issue, or a future non-IPv4 device record) would fail that
+// whole transaction, blocking every OTHER legitimate change computed
+// that cycle, not just the bad one.
+func validIPv4s(setName string, ips []string) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if net.ParseIP(ip).To4() == nil {
+			log.Printf("dropping malformed IPv4 entry %q from desired %s set", ip, setName)
+			continue
+		}
+		out = append(out, ip)
+	}
+	return out
 }
 
 // WriteHealth updates nftables-manager's own health columns
