@@ -2,11 +2,21 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// gatewayResolveTimeout bounds how long ResolveGateway waits for a real
+// ARP reply before giving up -- see that method's own comment for why
+// this can't just block forever on the IPC dispatch path. 2s matches
+// DefaultConfig's own poisoning-tick Interval: a generous ARP
+// round-trip budget on a LAN, while still failing a stuck resolve fast
+// enough that one unresponsive gateway doesn't wedge every subsequent
+// replace_targets call.
+const gatewayResolveTimeout = 2 * time.Second
 
 // Worker runs the poisoning/restoration loop for one interface. It
 // holds no controller-facing state at all (that's internal/ipc's job,
@@ -227,4 +237,41 @@ func (w *Worker) SentCounters() map[string]uint64 {
 		return true
 	})
 	return out
+}
+
+// ResolveGateway live-verifies gatewayIP's real hardware address via a
+// genuine ARP exchange, bounded by gatewayResolveTimeout -- see the
+// package-level ResolveGateway in safety.go for why this must never be
+// satisfied from a cache. Exposed as a Worker method (rather than
+// requiring callers to reach into Worker's private sender field) so
+// cmd/pp-arp-worker/main.go's controllerHandler can re-verify the
+// wire-supplied gateway MAC on every replace_targets call (added
+// 2026-09-12: safety.go's own ResolveGateway had never actually been
+// wired up to anything, found by code review the previous night).
+//
+// On timeout, the underlying ARPSender.Resolve() call is abandoned, not
+// cancelled -- github.com/mdlayher/arp's Client.Resolve has no
+// context/deadline parameter to cancel it early, so the goroutine below
+// keeps running until that call itself eventually returns (or the
+// process exits). This trades a small, bounded per-timeout goroutine
+// leak for never hanging the IPC dispatch path indefinitely on an
+// unresponsive gateway -- acceptable since a gateway that never answers
+// ARP at all is itself a rare, abnormal condition, not something
+// replace_targets calls will hit repeatedly in steady-state operation.
+func (w *Worker) ResolveGateway(gatewayIP net.IP) (net.HardwareAddr, error) {
+	type result struct {
+		mac net.HardwareAddr
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		mac, err := ResolveGateway(w.sender, gatewayIP)
+		ch <- result{mac, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.mac, r.err
+	case <-time.After(gatewayResolveTimeout):
+		return nil, fmt.Errorf("resolving gateway %s timed out after %s", gatewayIP, gatewayResolveTimeout)
+	}
 }

@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -139,7 +140,54 @@ type controllerHandler struct {
 }
 
 func (h *controllerHandler) HandleReplaceTargets(m ipc.ReplaceTargets) []any {
-	gw := worker.Target{IP: net.ParseIP(m.Gateway.IP), MAC: parseMACOrNil(m.Gateway.MAC)}
+	gwIP := net.ParseIP(m.Gateway.IP)
+	gwMAC := parseMACOrNil(m.Gateway.MAC)
+	if gwIP == nil || gwMAC == nil {
+		// Fixed 2026-09-11, found by code review: a missing/malformed
+		// gateway field used to flow straight into worker.ValidateTargets
+		// as a nil net.IP -- net.IP.Equal against nil always returns
+		// false, so every t.IP.Equal(gateway.IP) check silently returns
+		// false too, defeating the is_gateway safety check for every
+		// candidate in this generation instead of failing the request.
+		// Fail closed instead, matching this project's own convention
+		// (AGENTS.md "Everything is fail-closed by convention"): apply
+		// nothing and report every candidate as a resolution failure, so
+		// the controller can see this generation was rejected outright
+		// rather than silently accepted with its safety check disabled.
+		log.Printf("rejecting replace_targets generation %d: malformed or missing gateway (ip=%q mac=%q)",
+			m.Generation, m.Gateway.IP, m.Gateway.MAC)
+		return rejectGeneration(m)
+	}
+
+	// Fixed 2026-09-12, found by code review the previous night:
+	// safety.go's own ResolveGateway (a genuine ARP exchange, never
+	// satisfied from the OS neighbor cache) was never actually called
+	// anywhere -- this worker trusted the wire-supplied gateway MAC
+	// outright. Re-verified once per generation (not just at startup, so
+	// a cache/config gone bad mid-run is still caught; not on an
+	// independent timer, to avoid a second background goroutine for a
+	// check that's naturally paced by how often targets actually
+	// change), matching this project's own stated threat model: an
+	// independently-confirmed live rogue ARP-spoofer already runs on the
+	// production LAN, so a wrong gateway MAC reaching this worker (a
+	// controller-side bug, or that same rogue spoofer having poisoned
+	// whatever fed the controller) must not be blindly trusted here too.
+	// A resolve failure/timeout and a confirmed mismatch are both
+	// treated as fail-closed -- reject the whole generation rather than
+	// poison anything based on a gateway this worker couldn't verify.
+	resolvedMAC, err := h.worker.ResolveGateway(gwIP)
+	if err != nil {
+		log.Printf("rejecting replace_targets generation %d: could not live-verify gateway %s: %v",
+			m.Generation, gwIP, err)
+		return rejectGeneration(m)
+	}
+	if !bytes.Equal(resolvedMAC, gwMAC) {
+		log.Printf("rejecting replace_targets generation %d: gateway %s resolved to %s over a real ARP exchange, "+
+			"but the controller sent %s -- refusing to trust a mismatched gateway",
+			m.Generation, gwIP, resolvedMAC, gwMAC)
+		return rejectGeneration(m)
+	}
+	gw := worker.Target{IP: gwIP, MAC: gwMAC}
 
 	var targets []worker.Target
 	var failures []string
@@ -185,6 +233,23 @@ func (h *controllerHandler) HandleReplaceTargets(m ipc.ReplaceTargets) []any {
 	return []any{ipc.GenerationApplied{
 		V: ipc.ProtocolVersion, Op: "generation_applied",
 		Generation: m.Generation, TargetCount: len(targets), ResolutionFailures: failures,
+	}}
+}
+
+// rejectGeneration fails the whole generation closed: applies nothing,
+// reporting every candidate target as a resolution failure. Shared by
+// HandleReplaceTargets' two "the gateway itself can't be trusted" exits
+// (malformed wire field; live ARP resolve failed or mismatched) -- see
+// each call site's own comment for the specific reason, logged there
+// before calling this.
+func rejectGeneration(m ipc.ReplaceTargets) []any {
+	failures := make([]string, 0, len(m.Targets))
+	for _, t := range m.Targets {
+		failures = append(failures, t.IP)
+	}
+	return []any{ipc.GenerationApplied{
+		V: ipc.ProtocolVersion, Op: "generation_applied",
+		Generation: m.Generation, TargetCount: 0, ResolutionFailures: failures,
 	}}
 }
 
