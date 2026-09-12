@@ -2424,7 +2424,65 @@ def test_health_page_nic_card_shows_rps_not_enabled_with_explanation(client, mon
     assert b"RPS not enabled" in resp.data
     assert b"funnels every packet" in resp.data
     assert b"833" in resp.data and b"30" in resp.data
-    assert b"worth a closer look" in resp.data
+    assert b"No baseline set yet" in resp.data
+    assert b"Reset counters" in resp.data
+
+
+def test_health_page_nic_card_shows_since_baseline_deltas_after_a_reset(client, db_conn, monkeypatch):
+    import dashboard
+    import db
+    monkeypatch.setattr(
+        dashboard.nic_health, "nic_load_status",
+        lambda: {
+            "available": True, "interface": "enp1s0", "rps_enabled": False,
+            "rx_missed_errors": 900, "rx_dropped": 40,
+        },
+    )
+    db.set_setting(
+        db_conn, "nic_health_baseline",
+        json.dumps({"interface": "enp1s0", "rx_missed_errors": 833, "rx_dropped": 30, "set_at": "2026-09-12T18:00:00Z"}),
+    )
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"Since counters were last reset" in resp.data
+    assert b"2026-09-12T18:00:00Z" in resp.data
+    assert b"67" in resp.data  # 900 - 833
+    assert b"10" in resp.data  # 40 - 30
+    assert b"Worth a closer look" in resp.data
+
+
+def test_reset_nic_counters_requires_admin_auth(client):
+    resp = client.post("/health/reset-nic-counters")
+    assert resp.status_code == 401
+
+
+def test_reset_nic_counters_stores_a_baseline_and_redirects_to_health(client, db_conn, monkeypatch):
+    import dashboard
+    import db
+    monkeypatch.setattr(
+        dashboard.nic_health, "nic_load_status",
+        lambda: {
+            "available": True, "interface": "enp1s0", "rps_enabled": True,
+            "rx_missed_errors": 833, "rx_dropped": 30,
+        },
+    )
+    resp = client.post("/health/reset-nic-counters", headers=_auth_header())
+    assert resp.status_code == 302
+    assert "/health" in resp.headers["Location"]
+
+    stored = json.loads(db.get_setting(db_conn, "nic_health_baseline"))
+    assert stored["interface"] == "enp1s0"
+    assert stored["rx_missed_errors"] == 833
+    assert stored["rx_dropped"] == 30
+    assert stored["set_at"]
+
+
+def test_reset_nic_counters_refuses_when_no_nic_is_available(client, monkeypatch):
+    import dashboard
+    monkeypatch.setattr(dashboard.nic_health, "nic_load_status", lambda: {"available": False, "interface": None})
+    resp = client.post("/health/reset-nic-counters", headers=_auth_header(), follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"no NIC currently detected" in resp.data
 
 
 def test_health_page_shows_running_mode_and_generation(client, db_conn):

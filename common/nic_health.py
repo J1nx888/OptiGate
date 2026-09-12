@@ -140,3 +140,52 @@ def nic_load_status(iface: str | None = None) -> dict:
         "rx_missed_errors": counters["rx_missed_errors"],
         "rx_dropped": counters["rx_dropped"],
     }
+
+
+def with_baseline(status: dict, baseline: dict | None) -> dict:
+    """Augments a `nic_load_status()` result with "since counters were
+    last reset" deltas, added 2026-09-12: `rx_missed_errors`/`rx_dropped`
+    are real kernel counters, tied to the NIC driver itself -- they only
+    ever reset on an interface down/up cycle or a reboot, never on their
+    own and never just because this dashboard restarted. That makes the
+    raw lifetime totals nearly useless for "did today's test actually
+    cause drops" -- a box that's been up for months could show hundreds
+    of missed packets from long before anyone started troubleshooting
+    anything. Actually resetting the real counter needs bouncing the
+    NIC, which would cut this box's own network connectivity (and thus
+    every device behind it) for however long that takes -- not something
+    a dashboard button should ever do. This gives the admin the same
+    practical result without that risk: a software-side baseline
+    (dashboard.py stores one, keyed by interface, in the `settings`
+    table) that this function subtracts from the current live reading.
+
+    `status` is a `nic_load_status()` result; `baseline` is `None` (never
+    set) or `{"interface", "rx_missed_errors", "rx_dropped", "set_at"}`
+    from whenever the admin last clicked "Reset counters". Returns a new
+    dict (never mutates `status`) with `baseline_set_at` (`None` if no
+    usable baseline applies) and, only when a baseline does apply,
+    `rx_missed_errors_since_baseline`/`rx_dropped_since_baseline` plus
+    `interface_changed_since_baseline` (the baseline was taken against a
+    different interface than the one currently detected -- e.g. a NIC
+    swap -- so the comparison is meaningless and is dropped) and
+    `counters_reset_since_baseline` (the live value is now LOWER than
+    the stored baseline -- the interface itself was reset since, e.g. a
+    reboot or `ip link set down/up`, and genuinely restarted counting
+    from 0; clamped to 0 rather than shown as a nonsensical negative
+    number)."""
+    result = dict(status)
+    if not status.get("available") or not baseline:
+        result["baseline_set_at"] = None
+        return result
+    if baseline.get("interface") != status.get("interface"):
+        result["baseline_set_at"] = None
+        result["interface_changed_since_baseline"] = True
+        return result
+    result["baseline_set_at"] = baseline.get("set_at")
+    result["interface_changed_since_baseline"] = False
+    missed_delta = status["rx_missed_errors"] - baseline.get("rx_missed_errors", 0)
+    dropped_delta = status["rx_dropped"] - baseline.get("rx_dropped", 0)
+    result["counters_reset_since_baseline"] = missed_delta < 0 or dropped_delta < 0
+    result["rx_missed_errors_since_baseline"] = max(0, missed_delta)
+    result["rx_dropped_since_baseline"] = max(0, dropped_delta)
+    return result

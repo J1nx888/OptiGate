@@ -109,6 +109,55 @@ def test_nic_load_status_full_shape_when_everything_is_present(tmp_path, monkeyp
     }
 
 
+def test_with_baseline_none_leaves_status_untouched_but_flagged(tmp_path):
+    status = {"available": True, "interface": "enp1s0", "rx_missed_errors": 5, "rx_dropped": 1}
+    result = nic_health.with_baseline(status, None)
+    assert result["baseline_set_at"] is None
+    assert result["interface"] == "enp1s0"
+    assert result["rx_missed_errors"] == 5
+    assert "rx_missed_errors_since_baseline" not in result
+
+
+def test_with_baseline_unavailable_status_short_circuits(tmp_path):
+    status = {"available": False, "interface": None}
+    baseline = {"interface": None, "rx_missed_errors": 0, "rx_dropped": 0, "set_at": "2026-09-12T00:00:00Z"}
+    result = nic_health.with_baseline(status, baseline)
+    assert result["baseline_set_at"] is None
+
+
+def test_with_baseline_computes_the_delta_for_a_matching_interface():
+    status = {"available": True, "interface": "enp1s0", "rx_missed_errors": 900, "rx_dropped": 40}
+    baseline = {"interface": "enp1s0", "rx_missed_errors": 833, "rx_dropped": 30, "set_at": "2026-09-12T18:00:00Z"}
+    result = nic_health.with_baseline(status, baseline)
+    assert result["baseline_set_at"] == "2026-09-12T18:00:00Z"
+    assert result["rx_missed_errors_since_baseline"] == 67
+    assert result["rx_dropped_since_baseline"] == 10
+    assert result["counters_reset_since_baseline"] is False
+    assert result["interface_changed_since_baseline"] is False
+
+
+def test_with_baseline_flags_a_different_interface_instead_of_computing_a_meaningless_delta():
+    status = {"available": True, "interface": "enp2s0", "rx_missed_errors": 5, "rx_dropped": 1}
+    baseline = {"interface": "enp1s0", "rx_missed_errors": 833, "rx_dropped": 30, "set_at": "2026-09-12T18:00:00Z"}
+    result = nic_health.with_baseline(status, baseline)
+    assert result["baseline_set_at"] is None
+    assert result["interface_changed_since_baseline"] is True
+    assert "rx_missed_errors_since_baseline" not in result
+
+
+def test_with_baseline_clamps_a_negative_delta_and_flags_a_real_counter_reset():
+    """The interface itself got reset since the baseline was taken (a
+    reboot, an interface bounce) -- the live counter is genuinely lower
+    than the stored baseline now. Must clamp to 0, not show a negative
+    "since" count, and flag it so the admin knows to re-baseline."""
+    status = {"available": True, "interface": "enp1s0", "rx_missed_errors": 2, "rx_dropped": 0}
+    baseline = {"interface": "enp1s0", "rx_missed_errors": 833, "rx_dropped": 30, "set_at": "2026-09-12T18:00:00Z"}
+    result = nic_health.with_baseline(status, baseline)
+    assert result["counters_reset_since_baseline"] is True
+    assert result["rx_missed_errors_since_baseline"] == 0
+    assert result["rx_dropped_since_baseline"] == 0
+
+
 def test_nic_load_status_defaults_counters_to_zero_when_statistics_dir_is_missing(tmp_path, monkeypatch):
     """rps_enabled() only needs queues/, so a queues-only fake tree (no
     statistics/ dir) must still report available=True with zeroed

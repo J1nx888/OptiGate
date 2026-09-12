@@ -7484,9 +7484,26 @@ HEALTH_BODY = """
 <p class="hint">A single-queue NIC funnels every packet's processing through whichever one CPU core its hardware interrupt lands on -- under sustained, high-volume traffic (a large upload, full-duplex relay of a whole household's traffic) that one core can bottleneck even while the others sit idle. Receive Packet Steering (RPS) spreads that processing across every core in software. This matters even before the interception layer above is ever turned on, since it's what does that full-duplex relay work. See RoadMap.md's "Item 3 revisited" entry for how a real production box hit exactly this; <code>nic-tuning/optigate-nic-tuning.sh</code> plus its systemd unit turn this on automatically at every boot, installed by <code>setup.sh</code> (or manually if this deployment predates that).</p>
 {% endif %}
 <p class="hint">
-  Hardware-level packet loss on this interface, lifetime (since the driver/interface last reset, not since this dashboard started): <strong>{{ nic_status.rx_missed_errors }}</strong> missed, <strong>{{ nic_status.rx_dropped }}</strong> dropped.
-  {% if nic_status.rx_missed_errors > 0 or nic_status.rx_dropped > 0 %}A nonzero count means this NIC really has dropped packets at some point -- worth a closer look if it keeps climbing under normal use.{% endif %}
+  Hardware-level packet loss on this interface, lifetime (since the driver/interface last reset -- a reboot or an interface bounce, not since this dashboard started): <strong>{{ nic_status.rx_missed_errors }}</strong> missed, <strong>{{ nic_status.rx_dropped }}</strong> dropped.
 </p>
+{% if nic_status.baseline_set_at %}
+<p>
+  Since counters were last reset ({{ nic_status.baseline_set_at }}):
+  <strong>{{ nic_status.rx_missed_errors_since_baseline }}</strong> missed, <strong>{{ nic_status.rx_dropped_since_baseline }}</strong> dropped.
+  {% if nic_status.rx_missed_errors_since_baseline > 0 or nic_status.rx_dropped_since_baseline > 0 %}<span class="hint">Worth a closer look if this keeps climbing under normal use.</span>{% endif %}
+</p>
+{% if nic_status.counters_reset_since_baseline %}
+<p class="hint">Note: the raw counters are now lower than the stored baseline -- this interface itself was reset since then (e.g. a reboot), so its real counts genuinely restarted from 0. Reset again below to re-baseline.</p>
+{% endif %}
+{% else %}
+<p class="hint">
+  {% if nic_status.interface_changed_since_baseline %}A counter reset exists but is for a different interface than the one detected now -- click reset again to re-baseline this one.{% else %}No baseline set yet -- the numbers above are this NIC's entire lifetime, which may predate any actual troubleshooting.{% endif %}
+</p>
+{% endif %}
+<form method="post" action="{{ url_for('reset_nic_counters') }}">
+<button class="btn small" type="submit">Reset counters</button>
+<span class="hint">Marks a new starting point for the "since" numbers above -- doesn't touch the real hardware counters or the interface itself (that would need bouncing the NIC, which would briefly cut this whole box's network connectivity). Useful right before a troubleshooting test, so you can see what happened DURING it.</span>
+</form>
 {% endif %}
 </div>
 
@@ -7639,10 +7656,32 @@ def events_page():
     return render("events", body)
 
 
+NIC_HEALTH_BASELINE_SETTING_KEY = "nic_health_baseline"
+
+
+def _get_nic_baseline(conn) -> dict | None:
+    """The admin's last "Reset counters" click on the Health page, if
+    any -- see common/nic_health.py's `with_baseline()` docstring for
+    why this exists (the real kernel counters only reset on an
+    interface bounce/reboot, never on demand). Stored as one JSON blob
+    under a single settings key rather than three separate keys so a
+    reset is always all-or-nothing -- there's no interleaving where a
+    reader could see a new interface/timestamp paired with a stale
+    counter value from the PREVIOUS baseline."""
+    raw = db.get_setting(conn, NIC_HEALTH_BASELINE_SETTING_KEY)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
 @app.route("/health")
 @require_admin
 def health_page():
-    runtime_row = _get_runtime_row(get_db())
+    conn = get_db()
+    runtime_row = _get_runtime_row(conn)
     nft_mode_badge_class = mode_badge_class = "mode-trusted"
     mode_stale = nft_mode_stale = False
     controller_up = nft_up = False
@@ -7653,12 +7692,13 @@ def health_page():
         nft_mode_badge_class = HEALTH_MODE_BADGE_CLASS.get(runtime_row["nft_mode"], "mode-trusted")
         controller_up = _subsystem_is_up(runtime_row["mode"], mode_stale)
         nft_up = _subsystem_is_up(runtime_row["nft_mode"], nft_mode_stale)
+    nic_status = nic_health.with_baseline(nic_health.nic_load_status(), _get_nic_baseline(conn))
     body = render_template_string(
         HEALTH_BODY, runtime_row=runtime_row,
         mode_badge_class=mode_badge_class, nft_mode_badge_class=nft_mode_badge_class,
         mode_stale=mode_stale, nft_mode_stale=nft_mode_stale,
         controller_up=controller_up, nft_up=nft_up,
-        nic_status=nic_health.nic_load_status(),
+        nic_status=nic_status,
         controller_toggle_command=(
             "docker compose stop controller arp-worker" if controller_up
             else "docker compose up -d controller arp-worker"
@@ -7670,6 +7710,36 @@ def health_page():
         stale_after_seconds=HEALTH_STALE_AFTER_SECONDS,
     )
     return render("health", body)
+
+
+@app.route("/health/reset-nic-counters", methods=["POST"])
+@require_admin
+def reset_nic_counters():
+    """Marks a new "since" starting point for the NIC load-balancing
+    card's drop counters, for troubleshooting (e.g. right before a
+    sustained-upload retest, so the card shows what happened DURING the
+    test instead of this NIC's entire lifetime total). Deliberately does
+    NOT touch the real kernel counters or the interface itself -- see
+    common/nic_health.py's `with_baseline()` docstring for why an actual
+    reset would mean bouncing the NIC, cutting this box's own network
+    connectivity (and every device behind it) for however long that
+    takes. This is a purely local, reversible dashboard setting -- click
+    it again anytime to move the baseline forward."""
+    status = nic_health.nic_load_status()
+    if not status["available"]:
+        return flash_redirect("health_page", "Can't reset -- no NIC currently detected to baseline.", error=True)
+    conn = get_db()
+    db.set_setting(
+        conn, NIC_HEALTH_BASELINE_SETTING_KEY,
+        json.dumps({
+            "interface": status["interface"],
+            "rx_missed_errors": status["rx_missed_errors"],
+            "rx_dropped": status["rx_dropped"],
+            "set_at": db.now_iso(),
+        }),
+    )
+    conn.commit()
+    return flash_redirect("health_page", f"NIC counters reset for {status['interface']}.")
 
 
 SETTINGS_BODY = """
