@@ -9812,6 +9812,58 @@ ceiling for full-duplex relay of an entire household's traffic on a
 single consumer-grade interface -- a harder problem than a sysctl can
 solve, worth knowing either way.
 
+### Both candidate fixes re-confirmed live, a second lever added, and the tuning made durable + reusable for future deployments
+
+Re-checked non-disruptively (no interception, read-only) before the real
+retest: `rps_cpus` was still `f` (survived only because the box hadn't
+rebooted since it was set) -- and `/proc/net/softnet_stat`'s
+`received_rps` column now shows real nonzero counts on CPU0/2/3,
+directly proving RPS is genuinely redistributing packet processing, not
+just a config value sitting inert. Softnet-level drops are at zero on
+every core right now (previously all on CPU1) -- though that alone
+doesn't prove anything yet, since there's been no forwarding load to
+drop packets from either way.
+
+**Second lever found while re-checking**: `ethtool -c enp1s0` showed
+zero interrupt coalescing configured (`rx-usecs: 0`, `rx-frames: 1`) --
+every single received frame fires its own hardware interrupt. Given
+the confirmed root cause is one interrupt line 100%-pinned to a single
+core, batching interrupts is a second, independent, complementary
+lever: fewer interrupts means less per-packet overhead on whichever
+core ends up handling them, regardless of what RPS does downstream.
+Applied live by the owner (`sudo ethtool -C enp1s0 rx-usecs 50
+rx-frames 8` -- this one needs `CAP_NET_ADMIN`, which the unprivileged
+`claude-agent` account doesn't have, unlike the plain sysfs write RPS
+uses), confirmed via readback: `rx-usecs: 50`, `rx-frames: 8`.
+
+**Made durable and generalized for every future deployment, not just
+patched on this one box**: added `nic-tuning/optigate-nic-tuning.sh` +
+`nic-tuning/optigate-nic-tuning.service` (a systemd oneshot unit,
+`RemainAfterExit=yes`, re-applies at every boot since neither `sysfs`
+RPS nor `ethtool` coalescing settings survive one). The script
+auto-detects the primary interface via the default route every time it
+runs (`ip route get 1.1.1.1 ... dev`) rather than hardcoding
+`enp1s0` -- interface names vary across hardware, and this keeps
+working if the host ever changes NICs. Deliberately best-effort at
+every step (a NIC that can't take a given knob -- no writable
+`rps_cpus`, `ethtool -C` rejected, `ethtool` not installed at all --
+just logs and moves on, never fails the unit), so this is safe to apply
+unconditionally rather than needing per-deployment hardware detection
+logic. `setup.sh` now installs and enables this unit automatically on
+Linux when run as root; prints the two-line manual install command
+instead when it isn't (matches this project's existing pattern of never
+silently assuming elevated privilege it wasn't given).
+
+**Still not yet validated under real load** -- both tweaks are live on
+the production box and the systemd unit is ready to install there once
+proven, but the actual sustained-upload retest still needs interception
+up, which still needs the owner's explicit go-ahead per the standing
+rule. If it resolves the symptom, this project has a real, documented,
+reusable fix; if it doesn't, the `rx_missed`/ring-buffer-at-hardware-max
+evidence from the original investigation still points toward a genuine
+physical throughput ceiling on this specific consumer-grade NIC that no
+amount of software tuning can fully solve.
+
 ## Design question flagged for later: schedule-gated categories are wide open outside their scheduled window, by design
 
 Owner asked directly: "what happens to a device that doesn't have an

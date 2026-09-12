@@ -2,6 +2,7 @@
 # of the checkout platform -- a CRLF in entrypoint.sh gives "bad interpreter".
 *.sh            text eol=lf
 *.py            text eol=lf
+*.service       text eol=lf
 *.template      text eol=lf
 Dockerfile      text eol=lf
 */Dockerfile    text eol=lf

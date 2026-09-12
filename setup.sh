@@ -139,6 +139,28 @@ if grep -qE '^ADGUARD_PASSWORD=\s*$' .env 2>/dev/null; then
   echo "interception profile starts. See RoadMap.md's 2026-09-07 entry."
 fi
 
+if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+  echo
+  echo "OptiGate's interception mode does real kernel packet forwarding for"
+  echo "every intercepted device's traffic -- a real production box hit a"
+  echo "sustained-upload bottleneck on a cheap single-queue NIC with all"
+  echo "interrupts pinned to one CPU core (see RoadMap.md, \"Item 3"
+  echo "revisited\"). Installing a small, reversible boot-time tuning step"
+  echo "(RPS + interrupt coalescing) to reduce that risk on similar hardware..."
+  if [ "$(id -u)" = "0" ]; then
+    install -m 755 nic-tuning/optigate-nic-tuning.sh /usr/local/bin/optigate-nic-tuning.sh
+    install -m 644 nic-tuning/optigate-nic-tuning.service /etc/systemd/system/optigate-nic-tuning.service
+    systemctl daemon-reload
+    systemctl enable --now optigate-nic-tuning.service
+    echo "Installed optigate-nic-tuning.service (re-applies at every boot)."
+  else
+    echo "Skipped -- needs root. To install it later:"
+    echo "  sudo install -m 755 nic-tuning/optigate-nic-tuning.sh /usr/local/bin/optigate-nic-tuning.sh"
+    echo "  sudo install -m 644 nic-tuning/optigate-nic-tuning.service /etc/systemd/system/optigate-nic-tuning.service"
+    echo "  sudo systemctl daemon-reload && sudo systemctl enable --now optigate-nic-tuning.service"
+  fi
+fi
+
 echo
 echo "Building and starting containers (this can take a minute the first time)..."
 docker compose up -d --build
