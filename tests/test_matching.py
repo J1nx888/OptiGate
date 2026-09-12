@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import signal
+import threading
 import time
 
 import pytest
@@ -162,6 +163,41 @@ def test_find_domain_does_not_hang_on_catastrophic_backtracking(conn):
 
     assert elapsed < 2.0, f"find_domain() took {elapsed:.2f}s against a catastrophic pattern -- the timeout guard did not fire"
     assert result is None
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM timeout guard is Unix-only")
+def test_search_with_timeout_fails_closed_off_the_main_thread(monkeypatch):
+    """Regression test for a real gap found by code review 2026-09-11,
+    fixed 2026-09-12: signal.signal() raises ValueError off the main
+    thread, and the fallback for that case used to be a completely
+    UNGUARDED rx.search() -- silently disabling the ReDoS guard on
+    exactly the threads it exists for, not just failing to bound it as
+    tightly. This isn't hypothetical: find_categories_for_hostname()
+    is already called live from dashboard.py's route handlers and
+    adguard_report_sync.py, both running on waitress's multi-threaded
+    worker pool -- simulated here directly with a background thread.
+    Must now still complete quickly and fail closed (no match) via the
+    subprocess fallback (_search_in_subprocess), not hang the thread
+    for as long as the pattern's real backtracking cost would otherwise
+    take."""
+    import matching as matching_module
+
+    rx = matching_module._domain_regex(r"(a+)+$")
+    evil_text = "a" * 40 + "!"  # matches nothing -- forces full backtracking
+    result: dict[str, object] = {}
+
+    def _run():
+        start = time.monotonic()
+        result["matched"] = matching_module._search_with_timeout(rx, evil_text)
+        result["elapsed"] = time.monotonic() - start
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    thread.join(timeout=5.0)
+
+    assert not thread.is_alive(), "background thread never returned -- the subprocess fallback did not bound the search"
+    assert result["elapsed"] < 3.0, f"took {result['elapsed']:.2f}s off the main thread -- the guard did not fire"
+    assert result["matched"] is False
 
 
 # ---------------------------------------------------------- ip_in_configured_lan

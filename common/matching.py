@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import ipaddress
+import multiprocessing
 import re
 import signal
 import sqlite3
@@ -45,43 +46,106 @@ class _RegexTimedOut(Exception):
 
 _PATH_MATCH_TIMEOUT_SECONDS = 0.5
 
+# "spawn", not the platform default ("fork" on Linux) -- see
+# _search_with_timeout()'s own comment on why. Created once at module
+# load (cheap -- spawn doesn't fork/start anything until .Process() is
+# actually called) and reused, rather than calling
+# multiprocessing.get_context("spawn") fresh on every guarded search.
+_MP_SPAWN_CONTEXT = multiprocessing.get_context("spawn")
 
-def _search_with_timeout(rx: re.Pattern[str], text: str) -> re.Match[str] | None:
-    """Same as rx.search(text), but bounded -- added 2026-09-02 after
-    code review flagged that domain_paths patterns are admin-supplied
-    and dashboard.py's own validation only confirms re.compile()
-    succeeds, never rejecting a catastrophic-backtracking shape (e.g. a
-    pattern with nested/overlapping quantifiers). Python's stdlib `re`
-    has no linear-time guarantee the way RE2 does, and this project's
-    common/ modules are deliberately stdlib-only (see common/auth.py's
-    own docstring on why -- the proxy container must never need pip),
-    so a third-party guaranteed-linear engine isn't an option here.
+
+def _regex_matches_worker(pattern: str, flags: int, text: str, result_queue) -> None:
+    """Runs in a separate SPAWNED process -- see _search_in_subprocess()
+    for why a process, not a thread. Recompiles the pattern here rather
+    than trying to pass the already-compiled re.Pattern across the
+    process boundary: multiprocessing has to pickle everything crossing
+    that boundary regardless, and re.Pattern's own pickling support
+    already just stores/recompiles the pattern+flags under the hood, so
+    doing it explicitly is no less efficient and keeps this worker's
+    inputs plain, uncomplicated types."""
+    try:
+        result_queue.put(re.compile(pattern, flags).search(text) is not None)
+    except Exception:
+        result_queue.put(False)
+
+
+def _search_in_subprocess(rx: re.Pattern[str], text: str) -> bool:
+    """The non-main-thread fallback for _search_with_timeout() -- see
+    that function's own comment for the full reasoning on why this
+    exists. A real OS process stands in for the SIGALRM-based timeout
+    that only works on the main thread, specifically because Python
+    threads can't be forcibly killed: an abandoned worker THREAD stuck
+    in catastrophic backtracking would peg one CPU core forever (Python
+    has no safe thread-kill API), while an abandoned PROCESS can
+    actually be terminated. Fails closed (returns False) on a timeout
+    or any unexpected error, same convention as the SIGALRM path below.
+    """
+    result_queue = _MP_SPAWN_CONTEXT.Queue()
+    proc = _MP_SPAWN_CONTEXT.Process(
+        target=_regex_matches_worker, args=(rx.pattern, rx.flags, text, result_queue)
+    )
+    proc.start()
+    proc.join(_PATH_MATCH_TIMEOUT_SECONDS)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        return False
+    try:
+        return result_queue.get_nowait()
+    except Exception:
+        return False
+
+
+def _search_with_timeout(rx: re.Pattern[str], text: str) -> bool:
+    """Same as rx.search(text) is not None, but bounded -- added
+    2026-09-02 after code review flagged that domain_paths patterns are
+    admin-supplied and dashboard.py's own validation only confirms
+    re.compile() succeeds, never rejecting a catastrophic-backtracking
+    shape (e.g. a pattern with nested/overlapping quantifiers). Python's
+    stdlib `re` has no linear-time guarantee the way RE2 does, and this
+    project's common/ modules are deliberately stdlib-only (see
+    common/auth.py's own docstring on why -- the proxy container must
+    never need pip), so a third-party guaranteed-linear engine isn't an
+    option here.
+
+    Returns bool, not re.Match, since 2026-09-12 (see below) -- every
+    call site only ever checked truthiness, and a real re.Match object
+    isn't picklable across the subprocess boundary the non-main-thread
+    path now uses.
 
     The actual attacker-facing risk: proxy/authz_helper.py's decide()
-    (the only real caller, via path_allowed() below) runs this against
-    the CLIENT-controlled request path on every bump-mode HTTP request,
-    inside one of Squid's pooled `children-max=20` helper subprocesses
-    -- a hung match there stalls that one child indefinitely, and
-    enough hung children measurably degrade every other in-flight
-    bump-mode decision.
+    (the only hot-path caller, via path_allowed() below) runs this
+    against the CLIENT-controlled request path on every bump-mode HTTP
+    request, inside one of Squid's pooled `children-max=20` helper
+    subprocesses -- a hung match there stalls that one child
+    indefinitely, and enough hung children measurably degrade every
+    other in-flight bump-mode decision.
 
     Uses SIGALRM (Unix only, and only callable from the interpreter's
-    main thread) since that's the actual context this runs in --
-    authz_helper.py is a single-threaded subprocess reading stdin in a
-    loop, never multi-threaded. Falls back to an UNGUARDED search
-    (never silently skipping the match, just not time-bounding it) on
-    Windows (SIGALRM doesn't exist there -- fine, since proxy/ only
-    ever actually runs on Linux, see AGENTS.md) or if this is ever
-    called from a non-main thread (`signal.signal()` raises ValueError
-    there) -- e.g. a future test or caller from dashboard.py's
-    multi-threaded waitress workers. A timeout denies (fails closed),
-    consistent with this project's fail-closed convention (see
-    docs/architecture/overview.md's "everything is fail-closed by
-    convention" section) rather than treating an unmatchable-in-time
-    pattern as an allow.
+    main thread) since that's the actual context authz_helper.py runs
+    in -- a single-threaded subprocess reading stdin in a loop, never
+    multi-threaded. Falls back to an UNGUARDED search (never silently
+    skipping the match, just not time-bounding it) on Windows (SIGALRM
+    doesn't exist there -- fine, since proxy/ only ever actually runs on
+    Linux, see AGENTS.md).
+
+    **Real gap found 2026-09-11, fixed 2026-09-12**: the non-main-thread
+    case (`signal.signal()` raises ValueError there) used to fall back
+    to that SAME unguarded search -- silently disabling the ReDoS guard
+    entirely, not just failing to bound it as tightly. This wasn't a
+    hypothetical "future caller" any more by the time it was found:
+    find_categories_for_hostname() below is already called live from
+    dashboard.py's route handlers and adguard_report_sync.py, both
+    running on waitress's multi-threaded worker pool. Now routes to
+    _search_in_subprocess() instead -- see its own comment for why a
+    process rather than just accepting the unguarded search. A timeout
+    (either path) denies (fails closed), consistent with this project's
+    fail-closed convention (see docs/architecture/overview.md's
+    "everything is fail-closed by convention" section) rather than
+    treating an unmatchable-in-time pattern as an allow.
     """
     if not hasattr(signal, "SIGALRM"):
-        return rx.search(text)
+        return rx.search(text) is not None
 
     def _on_alarm(signum, frame):
         raise _RegexTimedOut()
@@ -90,16 +154,15 @@ def _search_with_timeout(rx: re.Pattern[str], text: str) -> re.Match[str] | None
         previous_handler = signal.signal(signal.SIGALRM, _on_alarm)
     except ValueError:
         # Not the main thread -- signal handlers can't be installed
-        # here at all. Search unguarded rather than raise or silently
-        # skip the check.
-        return rx.search(text)
+        # here at all.
+        return _search_in_subprocess(rx, text)
 
     try:
         signal.setitimer(signal.ITIMER_REAL, _PATH_MATCH_TIMEOUT_SECONDS)
         try:
-            return rx.search(text)
+            return rx.search(text) is not None
         except _RegexTimedOut:
-            return None
+            return False
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
