@@ -9792,3 +9792,351 @@ actual full day (e.g. if "School"/"Free Time" schedules don't
 contiguously cover all waking hours, there could be an unintended gap
 between them where restricted categories are briefly wide open)? No
 code change proposed -- this needs a product decision first.
+
+## Full-codebase max-effort code review, same night: 6 real bugs fixed, 6 more flagged for a decision
+
+Owner asked for a `/code-review max` pass scoped to the WHOLE
+codebase, not just tonight's diff (working tree was clean, HEAD ==
+origin/main, so there was no diff to scope to) -- specifically calling
+out efficiency, security, performance, dangling/dead code, and
+duplication that should be a shared helper, with explicit standing
+authorization to fix what's clearly a bug and flag anything needing a
+decision. Ran as 13 parallel finder passes across common/, controller/,
+dashboard/, proxy/, defaults/, and the two Go modules under phase3/,
+each independently verified against the actual current code (not just
+trusted from the finder's own report) before anything was touched.
+
+**Fixed tonight (all covered by the existing test suite, which passes
+in full for every Python change; the two Go changes below have no
+toolchain in this sandbox to compile-check and need `go build`/`go
+vet`/`go test` before deploying):**
+
+- **`controller/adguard_sync.py`'s `_fetch_eligible_devices()`** was
+  still doing the plain `devices d JOIN device_bindings b ON
+  b.device_id = d.id` INNER JOIN -- a FOURTH occurrence of tonight's
+  earlier orphaned-binding bug (the first three: `desired_state.py`,
+  `policy_state.py`, `device_identity.py`'s `resolve_device()`), found
+  by the review specifically because it's the same pattern. A deleted
+  device's still-active binding got NO AdGuard-side deny rule of any
+  kind -- unrestricted DNS resolution to every domain/category AdGuard
+  is supposed to be blocking. Fixed with the same LEFT JOIN pattern as
+  the other three sites.
+- **`common/device_identity.py`'s `resolve_device()` self-heal**
+  (tonight's own earlier fix) had a race: two near-simultaneous
+  requests for the same orphaned IP could both try to
+  `create_pending_device()` for the same MAC, and the second INSERT
+  would raise an unhandled `IntegrityError` (`devices.mac_address` is
+  UNIQUE). Fixed the same way `identity.record_binding()` already fixed
+  the identical race class (2026-09-02): `BEGIN IMMEDIATE` plus a
+  re-check inside the lock.
+- **`dashboard/block_page_server.py`'s block page had a reflected XSS**:
+  the client-supplied `Host` header was interpolated into the 403 page
+  unescaped (`_respond_device_info()`, a few lines away, already
+  escaped every field it renders -- this one just didn't). Any device
+  on the LAN sending a crafted `Host:` header to port 80 got it
+  reflected verbatim. Fixed with `html.escape()`. Also fixed
+  `do_HEAD()` in the same pass -- it called the same `_respond()` that
+  wrote a full body, violating HEAD semantics.
+- **`controller/mdns_lookup.py`'s `reverse_lookup()`** never checked
+  the UDP reply's source address against the IP it actually queried --
+  any host on the shared mDNS multicast channel answering with a
+  matching PTR record was trusted, letting a rogue device race the real
+  one with a forged hostname that would land in
+  `device_bindings.hostname` and show on the admin dashboard. Fixed:
+  the reply's source IP must now match the queried IP (the query
+  already sets the QU bit specifically so a real responder answers by
+  unicast from its own address). New regression test:
+  `test_reverse_lookup_ignores_a_well_formed_reply_from_the_wrong_source_ip`.
+- **`dashboard/dashboard.py`'s `update_filtering_settings()`** defaulted
+  `block_page_mode` to `"redirect"` on a missing form field, while
+  `settings_page()` reads the same setting with a `"terminate"`
+  default -- the UI's own label calls `"terminate"` the safe default
+  for devices without the CA cert installed. A malformed/replayed POST
+  omitting the field would silently flip the whole network to the
+  less-safe mode. Fixed: matched the safe default.
+- **`common/category_fetch.py`'s `_resolve_includes()`** capped each
+  individual fetch and the total file count, but not the total
+  accumulated text across the whole include chain before parsing --
+  a hostile/misconfigured include graph could approach
+  `MAX_INCLUDED_FILES * MAX_RESPONSE_BYTES` (300 * 64 MiB) of Python
+  strings before `parse_hostlist()` ever runs. Fixed: added a shared
+  256 MiB aggregate cap threaded through the recursion.
+- **`controller/rtnetlink_listener.py`**'s `on_error` callback was
+  invoked unguarded -- the same bug class `periodic.py`/`health.py`
+  were fixed for earlier tonight (a second failure inside the callback,
+  e.g. a locked DB, could silently kill the whole listener thread).
+  Fixed with an equivalent `_safe_report()` guard.
+- **Go, `phase3/arp-worker`'s `HandleReplaceTargets`**: a
+  missing/malformed `gateway` field on the wire parsed to a nil
+  `net.IP`, and `net.IP.Equal(nil)` always returns `false` -- silently
+  disabling the `is_gateway` safety check for the whole generation
+  instead of failing the request. Fixed: the handler now rejects the
+  entire generation (fails closed) when the gateway can't be parsed.
+- **Go, `phase3/nftables-manager`'s `ReadDesiredPolicy`**: nothing
+  validated that the IPs in `desired_policy_json` were well-formed
+  IPv4 before they reached a single atomic knftables transaction -- one
+  bad entry failed the WHOLE transaction, blocking every other
+  legitimate change computed that cycle. Fixed: malformed entries are
+  now dropped and logged per-set, matching arp-worker's own
+  parse-and-drop convention.
+
+**Flagged, not fixed -- each needs the owner's decision, not a guess:**
+
+- `phase3/arp-worker/internal/worker/safety.go`'s `ResolveGateway()` --
+  the function that live-verifies the gateway's real MAC via an actual
+  ARP exchange instead of trusting the OS neighbor cache (this
+  project's own stated threat model: an independently-confirmed live
+  rogue ARP-spoofer already runs on the production LAN) -- is never
+  called anywhere. The worker trusts the gateway MAC verbatim from the
+  wire message. Wiring this in changes live network behavior on the
+  ARP-spoofing worker itself and needs a decision on when to call it
+  (startup only? every generation?) and what to do on failure, plus
+  live validation -- which needs the standing interception-profile
+  confirmation either way.
+- `phase3/nftables-manager`'s `ReadDesiredPolicy` treats a NULL/missing
+  `desired_policy_json` the same as "nothing to enforce," which is a
+  documented, deliberate simplicity tradeoff in the code's own comment
+  -- but it does mean nftables-manager polling with the controller
+  stopped/crashed would wipe every nftables set every cycle instead of
+  holding last-known-good state. Worth a decision on whether that's the
+  wanted behavior.
+- `phase3/arp-worker/internal/ipc/peercred_unix.go`'s `SO_PEERCRED`
+  check only verifies UID, not which process/container it actually is
+  -- fine if the controller is the only thing on the host running as
+  its configured UID, a real gap if Docker Compose runs without
+  `--userns-remap` and multiple containers share UID 0. Depends on this
+  deployment's actual trust model.
+- `common/matching.py`'s ReDoS timeout guard
+  (`_search_with_timeout()`) silently no-ops whenever `signal.signal()`
+  raises off the main thread -- and `find_categories_for_hostname()` is
+  already called live from `dashboard.py`'s waitress worker threads,
+  not the main thread. A real fix needs picking a different
+  cross-thread timeout mechanism, not a guess.
+- `common/category_fetch.py`'s `fetch_and_sync_category()` still does
+  an unconditional DELETE+INSERT of every `source='subscription'` row
+  on every cycle even when nothing changed (the ~953K-domain "Adult"
+  category, refreshed daily) -- the same shape as tonight's AdGuard
+  full-replace fix, but a real fix here needs a schema change
+  (`categories` is shared across all three Docker images) rather than
+  an unreviewed migration.
+- `controller/rtnetlink_listener.py` still hand-rolls its own
+  thread lifecycle instead of composing with `controller/periodic.py`'s
+  `PeriodicTask` (the immediate bug -- the unguarded callback -- is
+  fixed above; the duplication itself is a lower-risk cleanup, not
+  addressed tonight).
+
+One review candidate (`common/series_resolve.py`'s CR-fallback loop)
+was reported as a bug but refuted on closer trace: `_cache_get()`'s own
+documented behavior means an expired negative-cache entry is never
+served stale regardless of `allow_stale`, so the described "hit=True,
+series_id=None mistaken for a miss" state cannot actually occur in that
+code path. No change made -- logged here specifically so a future
+reviewer doesn't re-flag the same already-checked dead end.
+
+## Next night: `arp-worker`'s dead gateway-verification check wired in
+
+Picked up the first (and most severe) item flagged the previous night
+for a decision: `phase3/arp-worker/internal/worker/safety.go`'s
+`ResolveGateway()` -- a genuine ARP request/reply exchange to learn the
+gateway's real MAC, explicitly never satisfied from the OS neighbor
+cache because this project's own threat model includes an
+independently-confirmed live rogue ARP-spoofer already running on the
+production LAN -- existed but was never called from anywhere. The
+worker trusted whatever gateway MAC the controller sent over the wire,
+outright.
+
+Owner's decisions on the two open questions:
+- **When to verify**: once per `replace_targets` generation, not just
+  at worker startup and not on a separate timer -- naturally paced by
+  how often targets actually change, no second background goroutine
+  needed.
+- **On a resolve failure or a confirmed MAC mismatch**: reject the
+  whole generation (fail closed), matching this project's own
+  "everything is fail-closed by convention" rule.
+
+**Implementation**:
+- `internal/worker/worker.go` gained `(*Worker).ResolveGateway(ip)`,
+  wrapping the existing package-level `ResolveGateway` with a
+  `gatewayResolveTimeout` (2s, matching `DefaultConfig.Interval`) so an
+  unresponsive gateway can't hang the IPC dispatch path indefinitely.
+  Documented tradeoff: on timeout the underlying `ARPSender.Resolve()`
+  call is abandoned, not cancelled (`github.com/mdlayher/arp`'s
+  `Client.Resolve` has no context/deadline parameter) -- a small,
+  bounded per-timeout goroutine leak, accepted since a gateway that
+  never answers ARP at all is itself a rare condition.
+- `cmd/pp-arp-worker/main.go`'s `HandleReplaceTargets` now calls this
+  right after the existing gateway-field parse check, before building
+  `gw`. A resolve error or a `bytes.Equal` mismatch against the
+  wire-supplied MAC both reject the whole generation via a new shared
+  `rejectGeneration()` helper (factored out since there are now two
+  "the gateway can't be trusted" exits sharing the same response
+  shape).
+- `main_test.go`'s `fakeSender` gained configurable `resolveMAC`/
+  `resolveErr` fields (it used to unconditionally return `(nil, nil)`,
+  which would have failed EVERY existing `HandleReplaceTargets` test
+  the moment this check went live) -- `newTestHandler()` now defaults
+  to resolving to the same gateway MAC those tests' wire messages
+  already used, so they keep testing their own concern unmodified. Two
+  new tests cover the new behavior directly:
+  `TestHandleReplaceTargets_RejectsTheGenerationOnGatewayResolveFailure`
+  and `_OnGatewayMACMismatch`.
+
+**Compiled and tested clean on the smoke-test VM** (no Go toolchain in
+this sandbox itself -- confirmed via both Git Bash and PowerShell, so
+the VM's pre-installed Go 1.23.4/`GOTOOLCHAIN=auto` 1.25.0 was used
+instead): synced the changed files over a repo already reset to
+`origin/main` (`806f75c`, matching this sandbox's own base exactly, not
+just "close enough" -- see this VM's own process-lesson note about not
+trusting a green run against a mixed/stale checkout). `go build ./...`,
+`go vet ./...`, and `go test ./...` all clean for `phase3/arp-worker/`;
+the two new tests also flake-checked with `-count=20`, all passing.
+`gofmt -l` caught one real alignment issue in `main_test.go` (thrown
+off by hand-editing the `fakeSender` struct without a formatter
+available locally) -- fixed with `gofmt -w` on the VM and copied back.
+
+Still needed before production: a real live-interception verification
+pass (a wrong/mismatched gateway MAC should now get every target in
+that generation reported as a resolution failure instead of silently
+poisoning) -- which needs the owner's explicit go-ahead to bring the
+`interception` profile up, same standing rule as every other live test
+this project runs.
+
+## Same night: item 2 -- `nftables-manager` no longer confuses "no policy yet" with "policy is empty"
+
+Second item picked up from the previous night's decision list:
+`phase3/nftables-manager/internal/dbsource/sqlite.go`'s
+`ReadDesiredPolicy()` collapsed "the `interception_runtime` row/column
+is missing" and "the controller computed a real policy where every
+list happens to be empty" into the exact same return value --
+`DesiredPolicy{}, nil` -- even though the code already had a
+definitive, SQL-level answer for which one it actually was
+(`sql.NullString.Valid` / `sql.ErrNoRows`) before that information got
+thrown away.
+
+**Owner's decision, after comparing two approaches**: rather than
+having `nftables-manager` remember its own history ("have I seen real
+data before?") to guess at emptiness -- a heuristic that can't actually
+distinguish a real "every device was deleted" policy from a missing
+row, since both look identical once parsed into empty lists, and which
+would have fought this module's own deliberate "always re-read fresh,
+never trust a cache" design -- the fix uses the SQL-level distinction
+that already exists, at the one point where it's still available.
+
+**Implementation**:
+- `dbsource.ErrNoDesiredPolicy` is a new sentinel error.
+  `ReadDesiredPolicy()` now returns it (instead of a silent empty
+  policy) for both cases that used to collapse together: `sql.ErrNoRows`
+  and `!raw.Valid` (NULL column). A REAL empty policy (valid JSON, every
+  list empty) still returns normally -- that's a legitimate desired
+  state and must still apply.
+- `cmd/pp-nftables-manager/main.go`'s reconcile loop now checks
+  `errors.Is(err, dbsource.ErrNoDesiredPolicy)` specifically: logs it,
+  reports health as `"running"` (this process isn't broken -- it's
+  correctly holding whatever the kernel already has), and skips
+  applying anything that cycle, instead of falling into the same
+  `fail_open`-reporting path as a real error.
+- Three tests in `sqlite_test.go` now cover all three cases distinctly:
+  missing row, NULL column, and a real all-empty policy (renamed from
+  the old test that asserted the now-wrong "no error" behavior).
+
+**Compiled and tested clean on the smoke-test VM**, same pass as item 1
+above: `go build ./...`, `go vet ./...`, and `go test ./...` all clean
+for `phase3/nftables-manager/`, including all three `ReadDesiredPolicy`
+tests (missing row, NULL column, real empty policy) run individually
+with `-v` to confirm each one actually exercised its own code path, not
+just "the package passed."
+
+## Same night, items 3-5: the user stepped away with "move forward with the decisions you need"
+
+Explicit authorization to make the remaining three decisions solo
+rather than confirm each one live. All three investigated/implemented
+in order.
+
+### Item 3: `SO_PEERCRED` UID-only check -- investigated, no code change warranted
+
+Checked the actual deployment topology instead of guessing at the
+trust model: `docker-compose.yml`'s `optigate_run` volume (where
+`arp-worker.sock` lives) is explicitly commented "Shared between
+arp-worker and controller ONLY," and that's enforced by Docker's
+per-container mount namespacing, not just the comment -- `dashboard`,
+`proxy`, `adguard`, and `nftables-manager` never mount it, so they have
+no filesystem path to the socket regardless of what UID they run as.
+`controller/Dockerfile` has no `USER` directive (runs as root, UID 0,
+matching `-controller-uid`'s own `${CONTROLLER_UID:-0}` compose
+default) and is the only other container sharing the volume -- exactly
+the one caller this check exists to allow.
+
+The residual gap (any OTHER UID-0 process reaching the socket's real
+host-filesystem path directly, e.g. a compromised host root shell, or
+a future sibling container that starts mounting `optigate_run`) is
+real but not something this check was ever going to close: a
+compromised host root already has strictly worse options (the shared
+DB, the containers themselves), and Docker's default (no
+`--userns-remap`) makes container UID 0 and host UID 0 the same
+identity project-wide -- not a one-file fix. Documented directly in
+`peercred_unix.go`'s own doc comment (dated, with the specific
+conditions that would warrant revisiting) so a future review doesn't
+re-flag this as an unexamined gap.
+
+### Item 4: ReDoS timeout guard dead off the main thread -- fixed with a real, killable subprocess
+
+`common/matching.py`'s `_search_with_timeout()` used SIGALRM, which
+only works on the main thread -- the fallback for "not the main
+thread" (`signal.signal()` raises `ValueError` there) used to be a
+completely UNGUARDED search, silently disabling the ReDoS guard on
+exactly the threads it exists for. Not hypothetical: `find_categories_
+for_hostname()` already runs live from `dashboard.py`'s route handlers
+and `adguard_report_sync.py`, both on waitress's multi-threaded worker
+pool.
+
+Considered and rejected a thread-based bounded wait (the same shape as
+tonight's earlier `ResolveGateway` Go fix): Python threads can't be
+forcibly killed, so an abandoned worker THREAD stuck in catastrophic
+backtracking would peg one CPU core forever -- a real leak, unlike the
+Go case's network-bounded goroutine. Used a real OS **process**
+instead (`multiprocessing`), which CAN be terminated after a timeout
+regardless of what it's doing internally. Deliberately uses the
+`"spawn"` start method, not the platform default (`"fork"` on Linux):
+forking from a multi-threaded process (dashboard.py's own situation)
+risks a deadlocked child if another thread held an internal lock
+(malloc, logging) at fork time -- exactly why `dashboard.py`'s own
+`if __name__ == "__main__":` guard (confirmed present) matters here:
+`spawn`'s bootstrap re-imports that module in the child without
+re-running `main()`/`serve()`, so this is safe. `_search_with_timeout`'s
+return type changed from `re.Match | None` to `bool` in the same pass
+(every call site only ever checked truthiness, and a real `re.Match`
+isn't picklable across the process boundary anyway).
+
+New regression test `test_search_with_timeout_fails_closed_off_the_
+main_thread` in `tests/test_matching.py` -- skips on Windows (SIGALRM-
+gated, same as the two sibling ReDoS tests) so verified on the
+smoke-test VM instead: passes, and the full suite (1360+ tests) run
+there too before moving on.
+
+### Item 5: category subscription sync always full-replaces -- fixed with a stored content hash
+
+`common/db.py`'s `categories` table gained `last_subscription_hash`
+(schema + idempotent migration, same `PRAGMA table_info` pattern as
+every other additive column). `common/category_fetch.py`'s
+`fetch_and_sync_category()` now hashes the sorted, deduplicated,
+already-`re.escape()`d domain set (so a source that just reordered its
+lines, with no real content change, doesn't look "changed") and
+compares against the category's stored hash from the previous sync --
+skipping the DELETE+INSERT of every `source='subscription'` row
+entirely when they match. `last_synced_at` still advances either way:
+a skipped cycle still successfully checked, it just found nothing to
+apply, and the dashboard's staleness display should reflect that.
+
+Two new tests in `tests/test_category_fetch.py` (skip-when-unchanged,
+proven by `category_domains` row ids staying identical across the
+second sync since a real rewrite would hand out fresh autoincrement
+ids; still-rewrites-on-a-real-change) plus a new dedicated migration
+test file (`test_db_category_subscription_hash_migration.py`, matching
+this project's one-file-per-migration convention). Full local suite:
+all passing.
+
+**Not yet run on the smoke-test VM** (items 4/5 were validated locally
+plus, for item 4's Linux-only path, on the VM; item 5 needed no
+Linux-specific behavior so a local Windows run was sufficient) --
+flagged here so a future full VM pass has an accurate record of what
+was and wasn't re-verified there.
