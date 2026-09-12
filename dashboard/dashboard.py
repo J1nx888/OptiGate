@@ -8435,7 +8435,14 @@ def update_filtering_settings():
     not a persisted setting."""
     url = request.form.get("adguard_url", "").strip()
     safesearch_enabled = "1" if request.form.get("safesearch_enabled") else "0"
-    block_page_mode = request.form.get("block_page_mode", "redirect")
+    # "terminate", not "redirect": matches settings_page()'s own read
+    # default and the option's own label ("default -- safe for devices
+    # that haven't installed the certificate yet"). A missing/malformed
+    # POST (stale cached form, future UI change) must fail safe, not
+    # silently flip every splice-mode block to the certificate-requiring
+    # mode (found by code review 2026-09-11 -- this used to default the
+    # other way).
+    block_page_mode = request.form.get("block_page_mode", "terminate")
     if block_page_mode not in ("redirect", "terminate"):
         return flash_redirect("settings_page", "Invalid blocked-site experience option.", error=True)
     conn = get_db()

@@ -186,6 +186,14 @@ class _FakeSocket:
         self.raise_on_sendto: Exception | None = None
         self.recv_queue: list[bytes] = []
         self.timeout_after_queue_empty = True
+        # Fixed 2026-09-11 alongside reverse_lookup()'s own source-address
+        # check (real gap found by code review: any host replying with a
+        # matching PTR record was trusted, regardless of who actually
+        # sent it): an arbitrary placeholder that no test's IP_N happens
+        # to equal, so every existing test keeps exercising the same
+        # "reply source doesn't match" path unless a test deliberately
+        # overrides it to look like a genuine responder.
+        self.reply_addr: tuple[str, int] = ("192.168.1.1", mdns_lookup._MDNS_PORT)
         _FakeSocket.instances.append(self)
 
     def sendto(self, data, addr):
@@ -198,7 +206,7 @@ class _FakeSocket:
 
     def recvfrom(self, bufsize):
         if self.recv_queue:
-            return self.recv_queue.pop(0), ("192.168.1.1", mdns_lookup._MDNS_PORT)
+            return self.recv_queue.pop(0), self.reply_addr
         raise real_socket.timeout()
 
     def close(self):
@@ -221,6 +229,11 @@ def test_reverse_lookup_returns_hostname_on_a_valid_reply(monkeypatch):
     def _make_socket(*a, **k):
         sock = _FakeSocket()
         sock.recv_queue = [response]
+        # A genuine responder answers this query FROM the IP we asked
+        # about (the QU bit requests a unicast reply straight back --
+        # see reverse_lookup()'s own docstring) -- reverse_lookup() now
+        # checks this, so a "valid reply" test has to look like one.
+        sock.reply_addr = (IP_1, mdns_lookup._MDNS_PORT)
         return sock
 
     monkeypatch.setattr(mdns_lookup.socket, "socket", _make_socket)
@@ -229,6 +242,29 @@ def test_reverse_lookup_returns_hostname_on_a_valid_reply(monkeypatch):
 
     assert hostname == "Kids-Tablet"
     assert _FakeSocket.instances[0].closed
+
+
+def test_reverse_lookup_ignores_a_well_formed_reply_from_the_wrong_source_ip(monkeypatch):
+    """Real gap found live by code review 2026-09-11: mDNS is a shared
+    multicast channel, and this used to trust any reply whose PTR record
+    matched the expected name, regardless of who actually sent it -- a
+    rogue device could race the real one with a forged hostname. A
+    well-formed, correctly-matching PTR response from a source OTHER
+    than the queried IP must be ignored, not accepted."""
+    expected_name = mdns_lookup._reverse_arpa_name(IP_1)
+    response = _build_response(expected_name, mdns_lookup._TYPE_PTR, "Rogue-Device.local")
+
+    def _make_socket(*a, **k):
+        sock = _FakeSocket()
+        sock.recv_queue = [response]
+        sock.reply_addr = ("192.168.1.66", mdns_lookup._MDNS_PORT)  # NOT IP_1
+        return sock
+
+    monkeypatch.setattr(mdns_lookup.socket, "socket", _make_socket)
+
+    hostname = mdns_lookup.reverse_lookup(IP_1, timeout=0.05)
+
+    assert hostname is None
 
 
 def test_reverse_lookup_returns_none_on_timeout(monkeypatch):

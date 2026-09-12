@@ -201,9 +201,22 @@ def reverse_lookup(ipv4_address: str, timeout: float = 1.0) -> str | None:
                 return None
             sock.settimeout(remaining)
             try:
-                data, _addr = sock.recvfrom(_MAX_MESSAGE_BYTES)
+                data, addr = sock.recvfrom(_MAX_MESSAGE_BYTES)
             except (socket.timeout, OSError):
                 return None
+            if addr[0] != ipv4_address:
+                # Fixed 2026-09-11, found by code review: mDNS is a
+                # shared multicast channel, and this query's QU bit (see
+                # module docstring) asks the real responder to reply by
+                # unicast straight back to this socket -- so a legitimate
+                # answer always arrives FROM ipv4_address itself. Without
+                # this check, any other host on the segment answering
+                # with a PTR record matching the expected reverse-arpa
+                # name (a forged reply racing the real device, or just an
+                # unrelated bystander packet) was trusted and written
+                # into device_bindings.hostname as if it came from the
+                # device we actually asked.
+                continue
             try:
                 hostname = _parse_ptr_response(data, expected_name)
             except (ValueError, struct.error):

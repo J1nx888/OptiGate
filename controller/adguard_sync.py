@@ -255,15 +255,35 @@ def _fetch_eligible_devices(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     and 40 bump/splice domains, the nested per-domain/per-device
     authorization check inside `_build_domain_deny_rules()` alone made
     this query (and the classification pass over it) run 2-3x more than
-    necessary every single cycle."""
+    necessary every single cycle.
+
+    **Real gap found 2026-09-11, same session/same bug class as
+    controller/desired_state.py and controller/policy_state.py's own
+    fixes**: this used to INNER JOIN `devices d ON b.device_id = d.id`,
+    which silently excludes an orphaned binding (`device_id` NULL via
+    `ON DELETE SET NULL` after a device delete -- see db.py's schema
+    comment) from AdGuard's eligible-device list entirely, rather than
+    including it as a PREAUTH device the way the nftables-side query
+    now correctly does. A deleted device's still-active binding used to
+    get NO AdGuard-side deny rule of any kind (bump, splice, or
+    category) -- unrestricted DNS resolution, indistinguishable from a
+    deliberate bypass. LEFT JOIN from device_bindings, with `d.*`
+    NULL-safe: `classify_device()` on an all-NULL row resolves to
+    PREAUTH (never BYPASS, so it stays eligible here), and
+    `matching.device_domain_reason()`/`category_applies_to_device()`
+    both null-guard `device["user_id"]`/`["group_id"]` before querying,
+    so an orphaned device correctly falls through to only
+    globally-applied domains/categories -- the same safe default a
+    genuinely-unknown device gets."""
     devices = conn.execute(
         """
         SELECT DISTINCT d.id, d.user_id, d.group_id, d.ignored, d.quarantined_at,
                d.is_authenticated, d.bump_enabled, d.bypass_login,
                COALESCE(g.ignored, 0) AS group_ignored, b.ipv4_address
-        FROM devices d
-        JOIN device_bindings b ON b.device_id = d.id AND b.active = 1
+        FROM device_bindings b
+        LEFT JOIN devices d ON d.id = b.device_id
         LEFT JOIN groups g ON g.id = d.group_id
+        WHERE b.active = 1
         ORDER BY b.ipv4_address
         """
     ).fetchall()

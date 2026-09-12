@@ -137,11 +137,27 @@ class RtnetlinkListener:
                 try:
                     self._listen_once(conn)
                 except Exception as exc:  # noqa: BLE001 -- deliberately broad, see class docstring
-                    if self._on_error:
-                        self._on_error(exc)
+                    self._safe_report(exc)
                     self._stop.wait(self._retry_backoff)
         finally:
             conn.close()
+
+    def _safe_report(self, exc: Exception) -> None:
+        """Wraps `self._on_error(exc)` in its own try/except -- fixed
+        2026-09-11, found by code review, the same bug class as
+        `controller/periodic.py`'s own `_safe_report()` fix this same
+        session: an unguarded callback invocation meant a SECOND failure
+        inside `on_error` itself (e.g. `system_events.py`'s DB write
+        hitting `sqlite3.OperationalError: database is locked`) would
+        propagate straight out of `_run()`'s except block, silently
+        killing this background thread for good instead of just skipping
+        this one report and retrying next cycle."""
+        if not self._on_error:
+            return
+        try:
+            self._on_error(exc)
+        except Exception:
+            log.exception("rtnetlink listener's own on_error callback raised -- ignoring, continuing to retry")
 
     def _listen_once(self, conn) -> None:
         """One full "open a netlink socket, listen until stopped or it

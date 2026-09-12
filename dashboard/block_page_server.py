@@ -171,13 +171,17 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
             if conn is not None:
                 conn.close()
 
-    def _respond_device_info(self, hostname: str) -> None:
+    def _respond_device_info(self, hostname: str, send_body: bool = True) -> None:
         """Renders the optigate.home page -- see this module's own
         comment above _DEVICE_INFO_TEMPLATE for why it lives here. Best-
         effort identity resolution: a DB hiccup shows the page with just
         the bare IP rather than a broken response (same "never let a
         logging/lookup failure break the real response" posture
-        _log_block() already established below)."""
+        _log_block() already established below).
+
+        send_body=False (from do_HEAD) still computes and sends the real
+        Content-Length -- a HEAD response must carry the headers a GET
+        would, just not the body itself."""
         client_ip = self.client_address[0]
         rows = [("IP address", html.escape(client_ip))]
         conn = None
@@ -235,9 +239,10 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if send_body:
+            self.wfile.write(body)
 
-    def _respond(self) -> None:
+    def _respond(self, send_body: bool = True) -> None:
         host = self.headers.get("Host", "this site")
         # Strip a trailing :port from the Host header -- browsers
         # include it for a non-default port, but showing "site.com:80"
@@ -257,22 +262,30 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
             # the ordinary blocked-page response below.
             log.warning("failed to read optigate hostname setting", exc_info=True)
         if optigate_host and host.lower() == optigate_host.lower():
-            self._respond_device_info(optigate_host)
+            self._respond_device_info(optigate_host, send_body=send_body)
             return
 
         self._log_block(host)
-        body = _PAGE_TEMPLATE.format(host=host).encode("utf-8")
+        # html.escape(host): `host` is the raw client-supplied Host
+        # header (real bug found 2026-09-11 review -- was interpolated
+        # unescaped here, a reflected-XSS vector, unlike every other
+        # field this handler renders elsewhere in this file).
+        body = _PAGE_TEMPLATE.format(host=html.escape(host)).encode("utf-8")
         self.send_response(403)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if send_body:
+            self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler's own naming convention
         self._respond()
 
     def do_HEAD(self) -> None:  # noqa: N802
-        self._respond()
+        # Fixed 2026-09-11: this used to call _respond() the same as
+        # do_GET, which wrote a full body -- a HEAD response must carry
+        # only the headers a GET would send.
+        self._respond(send_body=False)
 
     def do_POST(self) -> None:  # noqa: N802
         self._respond()

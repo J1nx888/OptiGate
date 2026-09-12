@@ -112,6 +112,22 @@ def resolve_device(conn: sqlite3.Connection, client_ip: str) -> sqlite3.Row | No
     describe this call site -- reaching here means a real HTTP request
     (a login attempt, an admin action, an intercepted connection) is
     actively in flight for this exact device right now.
+
+    **Race fixed 2026-09-11, found live by code review the same day this
+    self-heal was added**: two near-simultaneous requests for the same
+    orphaned IP (plausible -- sni_helper.py/authz_helper.py both resolve
+    identity for one connection, and captive_portal_server.py/
+    block_page_server.py do too for portal loads) used to both see the
+    same orphaned row before either wrote, both call
+    `create_pending_device()`, and the second `INSERT` into
+    `devices(mac_address, ...)` would raise an unhandled
+    `sqlite3.IntegrityError` (mac_address is UNIQUE) straight out of this
+    function. Fixed the same way `identity.record_binding()` already
+    fixed the identical class of check-then-act race (2026-09-02):
+    `BEGIN IMMEDIATE` acquires SQLite's write lock up front, and the
+    healed-row check is repeated once inside it -- a concurrent caller
+    that already healed this MAC while we waited for the lock is picked
+    up here instead of racing a second INSERT.
     """
     row = conn.execute(
         """
@@ -133,10 +149,27 @@ def resolve_device(conn: sqlite3.Connection, client_ip: str) -> sqlite3.Row | No
     if orphaned is None:
         return None
 
-    device_id = identity.create_pending_device(conn, orphaned["mac_address"], db.now_iso())
-    conn.execute(
-        "UPDATE device_bindings SET device_id = ? WHERE mac_address = ? AND device_id IS NULL",
-        (device_id, orphaned["mac_address"]),
-    )
-    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-check under the write lock: another concurrent caller may
+        # have already healed this exact MAC between our unlocked SELECT
+        # above and acquiring the lock here.
+        healed = conn.execute(
+            "SELECT d.* FROM device_bindings b JOIN devices d ON d.id = b.device_id "
+            "WHERE b.mac_address = ? AND b.device_id IS NOT NULL LIMIT 1",
+            (orphaned["mac_address"],),
+        ).fetchone()
+        if healed is None:
+            device_id = identity.create_pending_device(conn, orphaned["mac_address"], db.now_iso())
+            conn.execute(
+                "UPDATE device_bindings SET device_id = ? WHERE mac_address = ? AND device_id IS NULL",
+                (device_id, orphaned["mac_address"]),
+            )
+        else:
+            device_id = healed["id"]
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
     return conn.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
