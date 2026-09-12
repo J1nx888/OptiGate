@@ -9701,6 +9701,63 @@ tested against production as of this entry -- needs the owner's
 explicit go-ahead to bring interception up again first, per the
 standing instruction above.
 
+### AdGuard's real recompile latency, measured directly against production: ~3.9s to apply, ~1.9s to revert -- confirms the theory outright, doesn't just support it
+
+Measured for real rather than left as an open question -- built a
+standalone, non-disruptive test script run directly on the Beelink
+against the real `optigate-adguard` container, with **no interception
+up and no real device touched**: pushes one synthetic custom rule
+(blocks a made-up `*.invalid` test domain via `$dnsrewrite` to an
+RFC 5737 TEST-NET-3 address, the same rule shape `_domain_rule()`
+generates for a real domain-deny) through the real
+`/control/filtering/set_rules` API, then polls the real AdGuard DNS
+listener (port 5354, confirmed via `ss` -- NOT port 53, which on this
+box is `systemd-resolved`'s own stub) every 20ms until the answer
+flips, timing the gap. Baseline rules (105 real entries) read first and
+restored byte-for-byte verified at the end; credentials read from the
+app's own `settings` table via the same `docker run -v
+parental_proxy_optigate_config:/config` pattern already established for
+DB access on this box (not from any `.env`/secrets file).
+
+**First pass, rounds fired back-to-back with no gap, was noisy and
+misleading on its own** (3933ms, then 85ms, then an outright timeout
+past 5s) -- rather than trust the fast outlier, re-ran with a deliberate
+10s cooldown between rounds, matching how far apart real syncs actually
+land now that the skip-when-unchanged fix means a write only happens
+when something genuinely changes (not every 30s regardless). **That
+run was remarkably consistent across all 4 rounds**: apply latency
+3859-3914ms, revert latency 1870-1924ms. The back-to-back run's 85ms
+blip was almost certainly this test's own artifact (a poll catching an
+overlapping in-flight recompile from the previous round), not a real
+fast path -- the honest, reproducible number is essentially always
+**~3.9 seconds to apply a new custom rule, ~1.9 seconds to revert one**.
+
+**This fully confirms the original finding's working theory, not just
+"plausible"**: nearly 4 seconds is easily enough for a household device
+mid-browsing session (many rapid DNS lookups) to land a query inside
+the gap, resolve the real IP, and then serve that cached answer for its
+own TTL long after the block is genuinely back in force -- exactly the
+"blocked, then loads anyway" pattern observed live against both
+Crunchyroll and Webtoons. The alternative theory (a client-
+identification mismatch) wasn't separately re-tested here, since
+`$client=` scoping was already confirmed live and correct in an earlier
+session (2026-08-30, two real client containers, one matched/one not) --
+given a multi-second recompile gap this large and consistent, it's
+sufficient on its own to explain the observed symptom without needing
+a second mechanism.
+
+**Still open, now a clearer decision than before**: the skip-when-
+unchanged fix (already shipped) cuts how *often* this ~4s window opens
+(only on a genuine rule change, not every 30s forever), but does not
+close the window itself -- a real schedule flip, admin edit, or new
+device binding still opens one every time. Whether that residual,
+now-infrequent gap is worth spending more complexity to close (e.g.
+shortening AdGuard's answer TTLs so a client can't ride out a stale
+"allowed" answer as long, or having `sync_once()` poll/confirm the
+change actually took effect before considering a cycle complete) is a
+product decision, not a code fix to make unilaterally -- flagged for
+the owner rather than guessed at.
+
 ## Item 3 revisited: sustained-upload failure -- a real, evidenced candidate fix found, not yet validated
 
 Non-disruptive investigation on the box itself (no interception needed,
