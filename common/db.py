@@ -216,7 +216,19 @@ CREATE TABLE IF NOT EXISTS categories (
     subscription_url TEXT,
     last_synced_at   TEXT,
     is_global        INTEGER NOT NULL DEFAULT 0,
-    created_at       TEXT NOT NULL
+    created_at       TEXT NOT NULL,
+    -- SHA-256 (hex) of the last-applied subscription fetch's PARSED
+    -- domain list (sorted, newline-joined -- see
+    -- common/category_fetch.py's fetch_and_sync_category()), not the
+    -- raw fetched bytes: a cosmetic-only change upstream (a comment
+    -- line added, whitespace) must not be treated as "changed" if the
+    -- resulting domain set is identical. NULL until the first sync.
+    -- Added 2026-09-12 so a re-sync can skip the DELETE+INSERT of every
+    -- 'subscription' row entirely when nothing actually changed --
+    -- real gap found by code review: the biggest seeded category
+    -- (Adult, ~953K domains) was rewriting itself wholesale on every
+    -- scheduled cycle even on a day the upstream list never changed.
+    last_subscription_hash TEXT
 );
 
 -- A category's resolved domain list. `source` distinguishes a
@@ -704,6 +716,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # reverse-PTR result -- see this column's own schema comment
         # above for why it's display-only.
         conn.execute("ALTER TABLE device_bindings ADD COLUMN hostname TEXT")
+
+    category_columns = {row["name"] for row in conn.execute("PRAGMA table_info(categories)")}
+    if category_columns and "last_subscription_hash" not in category_columns:
+        # 2026-09-12: see this column's own schema comment above.
+        conn.execute("ALTER TABLE categories ADD COLUMN last_subscription_hash TEXT")
 
     # system_events.severity's CHECK constraint (added 2026-09-09, see
     # that column's own schema comment for the 'info' severity's

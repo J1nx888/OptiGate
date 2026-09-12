@@ -114,6 +114,81 @@ def test_fetch_and_sync_category_raises_without_subscription_url(conn):
         category_fetch.fetch_and_sync_category(conn, category)
 
 
+def test_fetch_and_sync_category_skips_rewrite_when_content_is_unchanged(monkeypatch, conn):
+    """Regression test for a real gap found by code review 2026-09-11,
+    fixed 2026-09-12: this used to unconditionally DELETE+INSERT every
+    subscription row on every sync, even when the fetched content was
+    identical (post-parse) to what's already stored -- the confirmed-
+    live "Adult" category alone is ~953K domains. A second sync with
+    byte-for-byte-different-but-semantically-identical content
+    (reordered lines) must leave the existing category_domains rows
+    completely untouched -- proven here by their row ids staying the
+    same, since a real DELETE+INSERT would hand out fresh autoincrement
+    ids for the reinserted rows."""
+    category = _insert_category(conn, "Gambling", "https://example.invalid/gambling.txt")
+    monkeypatch.setattr(
+        category_fetch._OPENER, "open",
+        lambda request, timeout=None: FakeResponse(b"||bet.example.com^\n||wager.example.org^\n"),
+    )
+    category_fetch.fetch_and_sync_category(conn, category)
+    first_ids = {
+        r["pattern"]: r["id"]
+        for r in conn.execute("SELECT id, pattern FROM category_domains WHERE category_id = ?", (category["id"],))
+    }
+    first_row = conn.execute("SELECT last_subscription_hash FROM categories WHERE id = ?", (category["id"],)).fetchone()
+    assert first_row["last_subscription_hash"] is not None
+
+    # Re-fetch the category row so it carries the hash the first sync
+    # just wrote -- every real caller (dashboard.py, controller/
+    # adguard_sync.py's own callers) does a fresh SELECT * FROM
+    # categories before each sync call, never reuses a stale row across
+    # calls.
+    category = conn.execute("SELECT * FROM categories WHERE id = ?", (category["id"],)).fetchone()
+    # Same two domains, reordered -- a real upstream reordering with no
+    # actual content change must still be recognized as "unchanged".
+    monkeypatch.setattr(
+        category_fetch._OPENER, "open",
+        lambda request, timeout=None: FakeResponse(b"||wager.example.org^\n||bet.example.com^\n"),
+    )
+    count = category_fetch.fetch_and_sync_category(conn, category)
+
+    assert count == 2
+    second_ids = {
+        r["pattern"]: r["id"]
+        for r in conn.execute("SELECT id, pattern FROM category_domains WHERE category_id = ?", (category["id"],))
+    }
+    assert second_ids == first_ids, "rows were rewritten even though the resulting domain set didn't change"
+    second_row = conn.execute("SELECT last_synced_at, last_subscription_hash FROM categories WHERE id = ?", (category["id"],)).fetchone()
+    assert second_row["last_subscription_hash"] == first_row["last_subscription_hash"]
+    assert second_row["last_synced_at"] is not None, "a skipped-rewrite cycle must still advance last_synced_at"
+
+
+def test_fetch_and_sync_category_still_rewrites_when_content_actually_changes(monkeypatch, conn):
+    """Sibling case: a REAL content change must still trigger the
+    rewrite -- the skip-when-unchanged fix must not get stuck skipping
+    forever once a hash has been recorded."""
+    category = _insert_category(conn, "Gambling", "https://example.invalid/gambling.txt")
+    monkeypatch.setattr(
+        category_fetch._OPENER, "open",
+        lambda request, timeout=None: FakeResponse(b"||bet.example.com^\n"),
+    )
+    category_fetch.fetch_and_sync_category(conn, category)
+
+    category = conn.execute("SELECT * FROM categories WHERE id = ?", (category["id"],)).fetchone()
+    monkeypatch.setattr(
+        category_fetch._OPENER, "open",
+        lambda request, timeout=None: FakeResponse(b"||bet.example.com^\n||newsite.example.com^\n"),
+    )
+    count = category_fetch.fetch_and_sync_category(conn, category)
+
+    assert count == 2
+    patterns = {
+        r["pattern"]
+        for r in conn.execute("SELECT pattern FROM category_domains WHERE category_id = ?", (category["id"],))
+    }
+    assert patterns == {r"bet\.example\.com", r"newsite\.example\.com"}
+
+
 def test_sync_is_one_atomic_transaction_not_thousands_of_autocommits(monkeypatch, conn):
     """Regression for a real, severe performance bug found live
     2026-09-07 (RoadMap.md's dated entry): `conn` opens with

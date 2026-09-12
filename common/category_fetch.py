@@ -36,6 +36,7 @@ for the caveat on that native-subscription API shape.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import sqlite3
@@ -110,9 +111,24 @@ _INCLUDE_ATTR_RE = re.compile(r"(?:\s+@\S+)+\s*$")
 # files) with headroom, while still refusing a pathological/hostile one.
 MAX_INCLUDED_FILES = 300
 
+# Bounds total accumulated text across the WHOLE include chain, not just
+# each individual fetch (MAX_RESPONSE_BYTES) or the file count
+# (MAX_INCLUDED_FILES) -- found by code review 2026-09-11: those two
+# caps alone still allow up to MAX_INCLUDED_FILES * MAX_RESPONSE_BYTES
+# (300 * 64 MiB) of Python strings to accumulate in `merged` before
+# parse_hostlist() ever runs, risking an OOM kill of the container mid-
+# sync. 256 MiB is generous relative to any real category (the biggest
+# confirmed live, Porn, is "tens of MB" per this module's own docstring)
+# while staying well short of that worst case.
+MAX_TOTAL_INCLUDE_BYTES = 256 * 1024 * 1024
+
 
 def _resolve_includes(
-    base_url: str, text: str, timeout: float, _visited: set[str] | None = None
+    base_url: str,
+    text: str,
+    timeout: float,
+    _visited: set[str] | None = None,
+    _total_bytes: list[int] | None = None,
 ) -> str:
     """Recursively follows any `include:<name>` lines in `text`,
     fetching each named sibling file (same directory as `base_url`) and
@@ -125,14 +141,20 @@ def _resolve_includes(
     `base_url` itself on the outermost call) -- doubles as both the
     cycle guard (a file that includes something already merged in is
     silently skipped, not re-fetched or re-appended) and the
-    `MAX_INCLUDED_FILES` accounting. An include naming an unreachable or
-    malformed file is logged and skipped, same "one bad source doesn't
-    abort the whole sync" discipline as sync_all_categories() itself --
-    a partial category from a mostly-working include graph is better
-    than none at all.
+    `MAX_INCLUDED_FILES` accounting. `_total_bytes` is a shared
+    one-element mutable list (same "outermost call seeds it" contract
+    as `_visited`), tracking bytes accumulated across every fetch in the
+    whole recursion tree so far -- see `MAX_TOTAL_INCLUDE_BYTES`'s own
+    comment for why the per-file/per-count caps alone aren't enough. An
+    include naming an unreachable or malformed file is logged and
+    skipped, same "one bad source doesn't abort the whole sync"
+    discipline as sync_all_categories() itself -- a partial category
+    from a mostly-working include graph is better than none at all.
     """
     if _visited is None:
         _visited = {base_url}
+    if _total_bytes is None:
+        _total_bytes = [len(text)]
     base_dir = base_url.rsplit("/", 1)[0]
     merged = [text]
     for raw_line in text.splitlines():
@@ -140,6 +162,12 @@ def _resolve_includes(
             log.warning(
                 "include chain from %s exceeded the %d-file cap -- stopping early with a partial result",
                 base_url, MAX_INCLUDED_FILES,
+            )
+            break
+        if _total_bytes[0] >= MAX_TOTAL_INCLUDE_BYTES:
+            log.warning(
+                "include chain from %s exceeded the %d-byte aggregate cap -- stopping early with a partial result",
+                base_url, MAX_TOTAL_INCLUDE_BYTES,
             )
             break
         line = raw_line.strip()
@@ -160,7 +188,8 @@ def _resolve_includes(
         except CategoryFetchError as exc:
             log.warning("skipping unreachable include %r from %s: %s", name, base_url, exc)
             continue
-        merged.append(_resolve_includes(sibling_url, sibling_text, timeout, _visited))
+        _total_bytes[0] += len(sibling_text)
+        merged.append(_resolve_includes(sibling_url, sibling_text, timeout, _visited, _total_bytes))
     return "\n".join(merged)
 
 
@@ -174,6 +203,20 @@ def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, tim
     domains fetched. Raises CategoryFetchError if `subscription_url` is
     unset -- callers (run_loop below) should only ever call this for a
     category that has one.
+
+    **Skips the actual DELETE+INSERT when nothing changed** (added
+    2026-09-12, real gap found by code review): the fetched, parsed
+    domain set is hashed (sorted + deduplicated first, so a source that
+    just reordered its lines doesn't look "changed") and compared
+    against `categories.last_subscription_hash` from the PREVIOUS sync.
+    Only a real difference triggers the rewrite -- see
+    `category_domains`' own schema comment for why the previous
+    always-rewrite behavior was expensive at real scale (the confirmed-
+    live "Adult" category alone is ~953K domains). `last_synced_at` is
+    still advanced either way: a no-op cycle still successfully checked,
+    it just found nothing to apply, and the dashboard's staleness
+    display should reflect that this category is actively being kept up
+    to date, not that the sync job silently stopped running.
     """
     url = category["subscription_url"]
     if not url:
@@ -183,7 +226,20 @@ def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, tim
     text = _resolve_includes(url, text, timeout=timeout)
     domains = parse_hostlist(text)
 
+    # Sorted + deduplicated -- exactly the set INSERT OR IGNORE ends up
+    # storing anyway (category_domains has a UNIQUE(category_id,
+    # pattern) constraint), computed once here and reused for both the
+    # hash and (below) the actual insert, instead of calling re.escape()
+    # a second time per domain.
+    patterns = sorted({re.escape(domain) for domain in domains})
+    content_hash = hashlib.sha256("\n".join(patterns).encode("utf-8")).hexdigest()
+
     now = db.now_iso()
+    if content_hash == category["last_subscription_hash"]:
+        conn.execute("UPDATE categories SET last_synced_at = ? WHERE id = ?", (now, category["id"]))
+        conn.commit()
+        return len(domains)
+
     # Explicit transaction, fixed 2026-09-07 (RoadMap.md's dated entry) --
     # a real, severe performance bug found live the first time this ever
     # ran against real subscription data at real scale (~953K domains for
@@ -204,9 +260,12 @@ def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, tim
         conn.executemany(
             "INSERT OR IGNORE INTO category_domains (category_id, pattern, source, created_at) "
             "VALUES (?, ?, 'subscription', ?)",
-            [(category["id"], re.escape(domain), now) for domain in domains],
+            [(category["id"], pattern, now) for pattern in patterns],
         )
-        conn.execute("UPDATE categories SET last_synced_at = ? WHERE id = ?", (now, category["id"]))
+        conn.execute(
+            "UPDATE categories SET last_synced_at = ?, last_subscription_hash = ? WHERE id = ?",
+            (now, content_hash, category["id"]),
+        )
     except BaseException:
         conn.execute("ROLLBACK")
         raise
