@@ -2378,6 +2378,55 @@ def test_health_page_shows_not_running_when_no_runtime_row(client):
     assert b"interception" in resp.data.lower()
 
 
+def test_health_page_nic_card_shows_not_available_off_this_host(client, monkeypatch):
+    """common/nic_health.py can't see the host's real interfaces from
+    this test process (no network_mode: host, no real /proc/net/route
+    entry to match) -- confirms the page renders the neutral
+    "not available" branch rather than erroring or silently omitting
+    the card."""
+    import dashboard
+    monkeypatch.setattr(dashboard.nic_health, "nic_load_status", lambda: {"available": False, "interface": None})
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"NIC load balancing" in resp.data
+    assert b"Not available" in resp.data
+
+
+def test_health_page_nic_card_shows_rps_enabled(client, monkeypatch):
+    import dashboard
+    monkeypatch.setattr(
+        dashboard.nic_health, "nic_load_status",
+        lambda: {
+            "available": True, "interface": "enp1s0", "rps_enabled": True,
+            "rx_missed_errors": 0, "rx_dropped": 0,
+        },
+    )
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"enp1s0" in resp.data
+    assert b"RPS enabled" in resp.data
+    # The "why this matters" explanation is specific to the NOT-enabled
+    # case -- must not show up here and imply the opposite of the badge.
+    assert b"funnels every packet" not in resp.data
+
+
+def test_health_page_nic_card_shows_rps_not_enabled_with_explanation(client, monkeypatch):
+    import dashboard
+    monkeypatch.setattr(
+        dashboard.nic_health, "nic_load_status",
+        lambda: {
+            "available": True, "interface": "enp1s0", "rps_enabled": False,
+            "rx_missed_errors": 833, "rx_dropped": 30,
+        },
+    )
+    resp = client.get("/health", headers=_auth_header())
+    assert resp.status_code == 200
+    assert b"RPS not enabled" in resp.data
+    assert b"funnels every packet" in resp.data
+    assert b"833" in resp.data and b"30" in resp.data
+    assert b"worth a closer look" in resp.data
+
+
 def test_health_page_shows_running_mode_and_generation(client, db_conn):
     # A hardcoded absolute timestamp here (an earlier version of this test
     # used '2026-08-30T12:00:00Z') silently ages past HEALTH_STALE_AFTER_

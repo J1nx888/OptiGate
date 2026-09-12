@@ -47,6 +47,7 @@ import category_fetch
 import cr_api
 import db
 import matching
+import nic_health
 import optigate_rewrite
 import oui_lookup
 import rate_limit
@@ -7468,12 +7469,31 @@ HEALTH_BODY = """
   <br><code>{{ nft_toggle_command }}</code>
 </p>
 </div>
+{% endif %}
+
+<div class="card">
+<h2>NIC load balancing <span class="hint" style="font-weight:normal;">(interrupt/packet-processing distribution)</span></h2>
+{% if not nic_status.available %}
+<p class="hint">Not available -- this container can't see the host's network interfaces directly (needs <code>network_mode: host</code>), or no default-route interface was found yet.</p>
+{% else %}
+<p>
+  Interface <code>{{ nic_status.interface }}</code>:
+  <span class="badge {{ 'allowed' if nic_status.rps_enabled else 'pending' }}">{{ 'RPS enabled' if nic_status.rps_enabled else 'RPS not enabled' }}</span>
+</p>
+{% if not nic_status.rps_enabled %}
+<p class="hint">A single-queue NIC funnels every packet's processing through whichever one CPU core its hardware interrupt lands on -- under sustained, high-volume traffic (a large upload, full-duplex relay of a whole household's traffic) that one core can bottleneck even while the others sit idle. Receive Packet Steering (RPS) spreads that processing across every core in software. This matters even before the interception layer above is ever turned on, since it's what does that full-duplex relay work. See RoadMap.md's "Item 3 revisited" entry for how a real production box hit exactly this; <code>nic-tuning/optigate-nic-tuning.sh</code> plus its systemd unit turn this on automatically at every boot, installed by <code>setup.sh</code> (or manually if this deployment predates that).</p>
+{% endif %}
+<p class="hint">
+  Hardware-level packet loss on this interface, lifetime (since the driver/interface last reset, not since this dashboard started): <strong>{{ nic_status.rx_missed_errors }}</strong> missed, <strong>{{ nic_status.rx_dropped }}</strong> dropped.
+  {% if nic_status.rx_missed_errors > 0 or nic_status.rx_dropped > 0 %}A nonzero count means this NIC really has dropped packets at some point -- worth a closer look if it keeps climbing under normal use.{% endif %}
+</p>
+{% endif %}
+</div>
 
 <div class="card">
 <h2>Auto-refresh</h2>
 <p class="hint">This page doesn't poll live -- reload to see the latest status.</p>
 </div>
-{% endif %}
 """
 
 
@@ -7638,6 +7658,7 @@ def health_page():
         mode_badge_class=mode_badge_class, nft_mode_badge_class=nft_mode_badge_class,
         mode_stale=mode_stale, nft_mode_stale=nft_mode_stale,
         controller_up=controller_up, nft_up=nft_up,
+        nic_status=nic_health.nic_load_status(),
         controller_toggle_command=(
             "docker compose stop controller arp-worker" if controller_up
             else "docker compose up -d controller arp-worker"
