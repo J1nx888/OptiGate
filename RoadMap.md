@@ -10140,3 +10140,58 @@ plus, for item 4's Linux-only path, on the VM; item 5 needed no
 Linux-specific behavior so a local Windows run was sufficient) --
 flagged here so a future full VM pass has an accurate record of what
 was and wasn't re-verified there.
+
+All six decision items from the same review are now closed; items 1/2/3
+were committed and pushed first (`a95ac50`, `40e0ebb`, folded into
+`d2b61ab`), items 4/5 in `fc84d26`/`a095a44`.
+
+### Item 6: `RtnetlinkListener` hand-rolled its own thread lifecycle a second time -- now composes with `PeriodicTask`
+
+The lowest-priority item from the same review, picked up separately
+once 3/4/5 were done: `controller/rtnetlink_listener.py`'s
+`RtnetlinkListener` had its own `threading.Event`/`threading.Thread`,
+its own retry-backoff wait, and its own copy of the `_safe_report()`
+guard `controller/periodic.py`'s `PeriodicTask` already gained on
+2026-09-11 -- the exact duplication `PeriodicTask`'s own docstring
+exists to prevent (see `HeartbeatPacer`'s "thin subclass" note).
+
+Composing directly wasn't quite a drop-in: `RtnetlinkListener` owns a
+`sqlite3.Connection` that must be opened and closed on the SAME thread
+(sqlite3 connections are thread-affine by default), reused across every
+retry for the listener's whole lifetime -- but `PeriodicTask` had no
+hook that runs once, on its own background thread, right as it's
+shutting down. Added exactly that: an optional `on_stop` callback
+(fires from inside `_run()`'s own `finally`, guarded by the same
+`_safe_report()` every other callback uses) plus a `stop_requested`
+property, so a `task` that polls in its own inner loop (rather than
+returning quickly every cycle, like this listener's blocking netlink
+read) can cooperate with shutdown without needing a second stop signal
+of its own. Both are additive and keyword/property-only, so every
+existing caller (`discovery.py`, `adguard_discovery.py`,
+`category_fetch.py`, `network_sweep.py`, `adguard_sync.py`,
+`active_scan.py`, `mdns_lookup.py`, `HeartbeatPacer`) is unaffected.
+
+`RtnetlinkListener` now: opens `self._conn` lazily on `PeriodicTask`'s
+own thread inside `_tick()` (the `task`), reuses it across retries,
+and closes it in `_close_conn()` (the `on_stop`) -- covering the case
+the naive version of this refactor would have missed, where the last
+`_listen_once()` before shutdown raised and `stop()` landed during the
+retry-backoff wait rather than between clean cycles, which would have
+leaked the connection. `_listen_once()`'s inner loop now checks
+`PeriodicTask`'s own `stop_requested` instead of a second `self._stop`.
+Net effect: `RtnetlinkListener`'s own duplicate `_safe_report()` method
+is gone entirely -- one guard, defined once, instead of two copies that
+could drift.
+
+New tests: `tests/test_controller_periodic.py` gained
+`test_on_stop_fires_exactly_once_after_the_loop_exits`,
+`test_on_stop_fires_even_when_the_final_tick_raised` (the leak case
+above), `test_on_stop_itself_raising_does_not_propagate`, and
+`test_stop_requested_reflects_whether_stop_has_been_called`.
+`tests/test_controller_rtnetlink_listener.py` needed no changes --
+its existing behavioral tests (fake `pyroute2` via `sys.modules`) pass
+unmodified against the refactored implementation, which is itself
+useful confirmation the observable behavior didn't shift. Pure Python,
+no Linux-only code path touched, so a local Windows run was sufficient:
+full suite, 1369 passed / 35 skipped (the pre-existing SIGALRM/Windows
+skips, unrelated).

@@ -218,6 +218,88 @@ def test_on_success_itself_raising_does_not_kill_the_loop(caplog):
     assert "on_error/on_success callback itself raised" in caplog.text
 
 
+def test_on_stop_fires_exactly_once_after_the_loop_exits():
+    """Added 2026-09-12 alongside `stop_requested` so
+    controller/rtnetlink_listener.py could delegate its own
+    thread/stop-Event bookkeeping to this class -- on_stop is that
+    listener's one guaranteed place to close its thread-affine sqlite
+    connection."""
+    events = []
+    lock = threading.Lock()
+
+    def task():
+        with lock:
+            events.append("tick")
+
+    def on_stop():
+        with lock:
+            events.append("stop")
+
+    pt = PeriodicTask(0.02, task, on_stop=on_stop)
+    pt.start()
+    time.sleep(0.06)
+    pt.stop()
+
+    with lock:
+        snapshot = list(events)
+    assert snapshot.count("stop") == 1, f"expected on_stop exactly once, got {snapshot.count('stop')}"
+    assert snapshot[-1] == "stop", "on_stop must fire after the last tick, not before"
+
+
+def test_on_stop_fires_even_when_the_final_tick_raised():
+    """The whole reason on_stop exists rather than callers wrapping their
+    own task in try/finally: stop() can race in during the post-error
+    backoff wait, so the very last cycle to actually run may have been a
+    raising one. on_stop must still fire so a resource opened by task()
+    is never leaked."""
+    events = []
+    lock = threading.Lock()
+
+    def task():
+        with lock:
+            events.append("tick")
+        raise RuntimeError("boom")
+
+    def on_stop():
+        with lock:
+            events.append("stop")
+
+    pt = PeriodicTask(0.02, task, on_stop=on_stop)
+    pt.start()
+    time.sleep(0.05)
+    pt.stop()
+
+    with lock:
+        snapshot = list(events)
+    assert snapshot.count("stop") == 1, f"expected on_stop exactly once even after a raising tick, got {snapshot}"
+
+
+def test_on_stop_itself_raising_does_not_propagate(caplog):
+    """Same guard as on_error/on_success -- on_stop is reported via the
+    same _safe_report() path, so a bad on_stop must not raise out of
+    stop()."""
+
+    def task():
+        pass
+
+    def bad_on_stop():
+        raise RuntimeError("on_stop itself blew up")
+
+    pt = PeriodicTask(0.02, task, on_stop=bad_on_stop)
+    pt.start()
+    time.sleep(0.03)
+    pt.stop()  # must not raise
+
+    assert "on_error/on_success callback itself raised" in caplog.text
+
+
+def test_stop_requested_reflects_whether_stop_has_been_called():
+    pt = PeriodicTask(3600.0, lambda: None)
+    assert pt.stop_requested is False
+    pt.stop()
+    assert pt.stop_requested is True
+
+
 def test_on_success_and_on_error_alternate_correctly_across_a_transition():
     """A real regression class: on_success firing for a FAILED cycle (or
     vice versa) would silently corrupt system_events.py's own

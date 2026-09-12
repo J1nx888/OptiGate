@@ -51,13 +51,10 @@ assumed from documentation:
 """
 from __future__ import annotations
 
-import logging
 import socket
-import threading
 
 import identity
-
-log = logging.getLogger("controller.rtnetlink_listener")
+from periodic import PeriodicTask
 
 # NUD_REACHABLE | NUD_STALE | NUD_DELAY | NUD_PROBE | NUD_NOARP | NUD_PERMANENT
 # -- the exact same set of states discovery.py's own _TRUSTED_STATES
@@ -94,10 +91,14 @@ def extract_ipv4_binding(message: dict) -> tuple[str, str] | None:
 
 
 class RtnetlinkListener:
-    """Owns the background thread and the live netlink socket. Started
-    via `run_loop()` below; `stop()` joins the thread with a bounded
-    timeout, matching `PeriodicTask.stop()`'s own contract elsewhere in
-    this package.
+    """Owns the live netlink socket and the sqlite connection it records
+    bindings through; the background thread and stop/retry bookkeeping
+    itself is delegated entirely to `periodic.PeriodicTask` (refactored
+    2026-09-12 -- this class used to hand-roll the exact same
+    thread+stop-Event+retry-backoff shape PeriodicTask already provides,
+    including its own copy of the `_safe_report()` guard PeriodicTask
+    gained on 2026-09-11; composing means that guard, and any future
+    fix to this shape, only has to exist once).
 
     A hard failure while listening (permission denied, the socket
     erroring out, `pyroute2` itself misbehaving) is reported via
@@ -105,7 +106,11 @@ class RtnetlinkListener:
     `retry_backoff` seconds, rather than letting the background thread
     silently die -- same "one bad cycle is a reason to log and retry,
     never a reason to stop watching for devices entirely" philosophy as
-    `discovery.run_loop()` and `HeartbeatPacer`.
+    `discovery.run_loop()` and `HeartbeatPacer`. `retry_backoff` doubles
+    as `PeriodicTask`'s own `interval`: `_tick()` below only ever returns
+    (letting the next cycle run) after `_listen_once()` has either raised
+    or observed `stop()`, so there is no separate "wait between cycles"
+    concept here the way a normal fixed-interval task has.
     """
 
     def __init__(
@@ -114,63 +119,61 @@ class RtnetlinkListener:
         poll_timeout: float = _DEFAULT_POLL_TIMEOUT,
         retry_backoff: float = _DEFAULT_RETRY_BACKOFF,
     ):
-        self._on_error = on_error
         self._poll_timeout = poll_timeout
-        self._retry_backoff = retry_backoff
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="rtnetlink-listener", daemon=True)
+        self._conn = None
+        self._periodic = PeriodicTask(
+            retry_backoff,
+            self._tick,
+            on_error=on_error,
+            on_stop=self._close_conn,
+            thread_name="rtnetlink-listener",
+        )
 
     def start(self) -> None:
-        self._thread.start()
+        self._periodic.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=5.0)
+        self._periodic.stop()
 
-    def _run(self) -> None:
+    def _tick(self) -> None:
+        """PeriodicTask's `task`. Opens the sqlite connection lazily, on
+        first call -- always from PeriodicTask's own background thread,
+        never the thread that calls `start()`/`stop()`, since a
+        `sqlite3.Connection` may only be used from the thread that
+        created it -- and reuses it across every retry for this
+        listener's lifetime; only the `pyroute2.IPRoute` socket itself is
+        recreated per retry, inside `_listen_once()`."""
         import db  # local import: mirrors discovery.run_loop's own lazy `import db`
 
-        conn = db.get_conn()
-        db.init_db(conn)
-        try:
-            while not self._stop.is_set():
-                try:
-                    self._listen_once(conn)
-                except Exception as exc:  # noqa: BLE001 -- deliberately broad, see class docstring
-                    self._safe_report(exc)
-                    self._stop.wait(self._retry_backoff)
-        finally:
-            conn.close()
+        if self._conn is None:
+            self._conn = db.get_conn()
+            db.init_db(self._conn)
+        self._listen_once(self._conn)
 
-    def _safe_report(self, exc: Exception) -> None:
-        """Wraps `self._on_error(exc)` in its own try/except -- fixed
-        2026-09-11, found by code review, the same bug class as
-        `controller/periodic.py`'s own `_safe_report()` fix this same
-        session: an unguarded callback invocation meant a SECOND failure
-        inside `on_error` itself (e.g. `system_events.py`'s DB write
-        hitting `sqlite3.OperationalError: database is locked`) would
-        propagate straight out of `_run()`'s except block, silently
-        killing this background thread for good instead of just skipping
-        this one report and retrying next cycle."""
-        if not self._on_error:
-            return
-        try:
-            self._on_error(exc)
-        except Exception:
-            log.exception("rtnetlink listener's own on_error callback raised -- ignoring, continuing to retry")
+    def _close_conn(self) -> None:
+        """PeriodicTask's `on_stop`: runs exactly once, on the same
+        background thread that created `self._conn`, right before that
+        thread exits for good -- whichever cycle happened to be running
+        when `stop()` was called."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
     def _listen_once(self, conn) -> None:
         """One full "open a netlink socket, listen until stopped or it
-        breaks" cycle. Split out from `_run()` specifically so a single
+        breaks" cycle. Split out from `_tick()` specifically so a single
         socket-level failure re-enters here with a fresh `IPRoute`
         instance on retry, rather than reusing a socket that already
-        proved broken."""
+        proved broken. Returns normally only once `stop()` has been
+        called (checked via PeriodicTask's own `stop_requested`, rather
+        than this class keeping a second stop signal of its own) --
+        anything else exiting this loop is a raised exception."""
         from pyroute2 import IPRoute  # local import: pyroute2 is Linux-only, see module docstring
 
         with IPRoute() as ipr:
             ipr.bind()
             ipr.settimeout(self._poll_timeout)
-            while not self._stop.is_set():
+            while not self._periodic.stop_requested:
                 try:
                     messages = ipr.get()
                 except socket.timeout:

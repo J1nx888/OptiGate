@@ -54,6 +54,16 @@ class PeriodicTask:
     try/except, logging via the stdlib `logging` module (which never
     touches the DB, so it can't fail the same way) rather than letting
     either one bring the loop down.
+
+    `on_stop` (added 2026-09-12 so `controller/rtnetlink_listener.py`
+    could compose with this class instead of hand-rolling its own
+    thread/stop-event bookkeeping a second time) fires exactly once, on
+    this same background thread, right before it exits -- whether the
+    final cycle returned cleanly or raised. It exists for a `task` that
+    owns a resource only its own thread may touch (a `sqlite3.Connection`
+    is thread-affine by default) and needs a guaranteed place to release
+    it on shutdown, regardless of which cycle happened to be running when
+    `stop()` was called.
     """
 
     def __init__(
@@ -62,6 +72,7 @@ class PeriodicTask:
         task: Callable[[], None],
         on_error: Callable[[Exception], None] | None = None,
         on_success: Callable[[], None] | None = None,
+        on_stop: Callable[[], None] | None = None,
         *,
         thread_name: str = "periodic-task",
     ) -> None:
@@ -69,9 +80,19 @@ class PeriodicTask:
         self._task = task
         self._on_error = on_error
         self._on_success = on_success
+        self._on_stop = on_stop
         self._thread_name = thread_name
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    @property
+    def stop_requested(self) -> bool:
+        """True once stop() has been called. Lets a `task` that polls in
+        its own inner loop (rather than returning quickly every cycle --
+        e.g. controller/rtnetlink_listener.py's blocking netlink read)
+        cooperate with shutdown instead of running until it happens to
+        return on its own."""
+        return self._stop.is_set()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name=self._thread_name)
@@ -102,10 +123,23 @@ class PeriodicTask:
         # before this thread's first tick (start() returns immediately;
         # nothing otherwise stops a stop-before-first-tick sequence from
         # still running one cycle it shouldn't).
-        if not self._stop.is_set():
-            self._tick()
-        while not self._stop.wait(self._interval):
-            self._tick()
+        try:
+            if not self._stop.is_set():
+                self._tick()
+            while not self._stop.wait(self._interval):
+                self._tick()
+        finally:
+            # Runs exactly once, on this same background thread, no
+            # matter how the loop above ended -- including when the very
+            # last tick raised and stop() was requested during the
+            # post-error backoff wait rather than between clean cycles.
+            # Exists so a task that owns a thread-affine resource (e.g.
+            # rtnetlink_listener.py's sqlite3 connection, which can only
+            # be closed from the thread that created it) has a reliable
+            # place to release it, instead of every such task
+            # reimplementing its own try/finally around the whole loop.
+            if self._on_stop is not None:
+                self._safe_report(self._on_stop)
 
     def _tick(self) -> None:
         try:
