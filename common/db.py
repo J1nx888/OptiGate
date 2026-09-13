@@ -38,12 +38,20 @@ CREATE TABLE IF NOT EXISTS users (
 --         resolution layer on top of the normal domain/path checks)
 --   is_global: 1 = every user gets this automatically (infra deps);
 --              0 = each user needs an explicit assignment (user_domains)
+-- protected: 1 = infrastructure the Crunchyroll integration depends on
+-- (seeded by defaults/seed_defaults.py's GLOBAL_SPLICE_DOMAINS/
+-- TRUSTED_DOMAINS/crunchyroll.com itself) -- can't be deleted from the
+-- dashboard (dashboard.py's delete_domain()/bulk_delete_domains()), and is
+-- surfaced on the Crunchyroll integration page instead of the general
+-- Domains page, so an admin browsing "my" domains doesn't mistake one for
+-- something they added and safe to remove.
 CREATE TABLE IF NOT EXISTS domains (
     id         INTEGER PRIMARY KEY,
     pattern    TEXT UNIQUE NOT NULL,
     mode       TEXT NOT NULL CHECK (mode IN ('splice', 'bump', 'trusted')),
     kind       TEXT NOT NULL DEFAULT 'generic' CHECK (kind IN ('generic', 'crunchyroll')),
     is_global  INTEGER NOT NULL DEFAULT 0,
+    protected  INTEGER NOT NULL DEFAULT 0,
     note       TEXT,
     created_at TEXT NOT NULL
 );
@@ -722,6 +730,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if category_columns and "last_subscription_hash" not in category_columns:
         # 2026-09-12: see this column's own schema comment above.
         conn.execute("ALTER TABLE categories ADD COLUMN last_subscription_hash TEXT")
+
+    domain_columns = {row["name"] for row in conn.execute("PRAGMA table_info(domains)")}
+    if domain_columns and "protected" not in domain_columns:
+        # 2026-09-13: see this column's own schema comment above. Existing
+        # rows default to 0 (unprotected) -- defaults/seed_defaults.py's
+        # seed() backfills 1 onto its own known infrastructure patterns
+        # the next time the proxy container starts, the same way it
+        # already owns those patterns' notes.
+        conn.execute("ALTER TABLE domains ADD COLUMN protected INTEGER NOT NULL DEFAULT 0")
 
     # system_events.severity's CHECK constraint (added 2026-09-09, see
     # that column's own schema comment for the 'info' severity's

@@ -188,23 +188,38 @@ DEFAULT_CATEGORIES = [
 
 
 def seed(conn) -> None:
+    # `protected` (2026-09-13, RoadMap.md, project owner's explicit
+    # request): these domains -- and the two loops/insert below -- are
+    # infrastructure the Crunchyroll integration depends on, not sites an
+    # admin picked, so they're not deletable from the dashboard and don't
+    # show up on the general Domains page at all (see dashboard.py's
+    # delete_domain()/bulk_delete_domains()/domains() and the Crunchyroll
+    # integration page's own "Required domains" card, which is where an
+    # admin sees and manages them instead). `ON CONFLICT DO UPDATE`
+    # instead of `INSERT OR IGNORE` so a database that already has these
+    # rows from before this column existed gets backfilled to protected=1
+    # the next time this runs (every proxy container start), without
+    # touching anything else an admin may have since edited (mode, note).
     for pattern, note in GLOBAL_SPLICE_DOMAINS:
         conn.execute(
-            "INSERT OR IGNORE INTO domains (pattern, mode, kind, is_global, note, created_at) "
-            "VALUES (?, 'splice', 'generic', 1, ?, ?)",
+            "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+            "VALUES (?, 'splice', 'generic', 1, 1, ?, ?) "
+            "ON CONFLICT(pattern) DO UPDATE SET protected = 1",
             (pattern, note, db.now_iso()),
         )
 
     for pattern, note in TRUSTED_DOMAINS:
         conn.execute(
-            "INSERT OR IGNORE INTO domains (pattern, mode, kind, is_global, note, created_at) "
-            "VALUES (?, 'trusted', 'generic', 1, ?, ?)",
+            "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+            "VALUES (?, 'trusted', 'generic', 1, 1, ?, ?) "
+            "ON CONFLICT(pattern) DO UPDATE SET protected = 1",
             (pattern, note, db.now_iso()),
         )
 
     conn.execute(
-        "INSERT OR IGNORE INTO domains (pattern, mode, kind, is_global, note, created_at) "
-        "VALUES ('crunchyroll\\.com', 'bump', 'crunchyroll', 1, 'Crunchyroll -- shows approved per-user', ?)",
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('crunchyroll\\.com', 'bump', 'crunchyroll', 1, 1, 'Crunchyroll -- shows approved per-user', ?) "
+        "ON CONFLICT(pattern) DO UPDATE SET protected = 1",
         (db.now_iso(),),
     )
     # No separate crunchyrollsvc.com playback-service domain: confirmed

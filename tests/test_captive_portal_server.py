@@ -174,6 +174,21 @@ def test_successful_login_authenticates_the_device_and_shows_success(server, con
     assert row["user_id"] == user_id
 
 
+def test_login_matches_username_case_insensitively(server, conn):
+    """Real live-testing feedback (RoadMap.md): a kid typing "Alex" for a
+    household username created as "alex" got a flat "Incorrect username or
+    password" -- nothing else about this login is case-sensitive."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    user_id = _add_user(conn, "kid1", "correcthorse")
+
+    status, body = _post(server, "KID1", "correcthorse")
+
+    assert status == 200
+    assert "signed in" in body.lower()
+    row = conn.execute("SELECT user_id FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["user_id"] == user_id
+
+
 def test_success_page_has_no_bump_reminder_for_a_kid_with_no_other_devices(server, conn):
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")

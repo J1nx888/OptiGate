@@ -401,7 +401,17 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             self._send_html(200, _render(groups=_fetch_groups(conn)))
             return
 
-        user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        # Case-insensitive on purpose (RoadMap.md, project owner's live-testing
+        # feedback): a kid typing "Alex" for a household username created as
+        # "alex" got a flat "Incorrect username or password" with no hint why --
+        # nothing else about this login (the password itself, the admin
+        # dashboard login) is case-sensitive, so this one surprised the one
+        # person who couldn't fix it themselves. add_user() now also refuses to
+        # create a second username that only differs by case, so this can never
+        # become ambiguous between two real accounts.
+        user = conn.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
         if user is None or not auth.verify_password(password, user["password_hash"]):
             _LOGIN_LIMITER.record_failure(client_ip)
             log.info("failed login for username=%r from device %s", username, device["mac_address"])

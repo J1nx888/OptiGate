@@ -209,6 +209,16 @@ def test_add_user_duplicate_username_rejected(client, db_conn):
     assert count == 1
 
 
+def test_add_user_rejects_a_username_differing_only_by_case(client, db_conn):
+    """The captive-portal login now matches usernames case-insensitively, so
+    letting both "kid1" and "Kid1" exist would make that login ambiguous."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    resp = client.post("/users/add", data={"username": "Kid1", "password": "pw2"}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    count = db_conn.execute("SELECT COUNT(*) c FROM users WHERE username = 'kid1'").fetchone()["c"]
+    assert count == 1
+
+
 def test_delete_user_removes_row(client, db_conn):
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
@@ -283,6 +293,24 @@ def test_delete_domain_refuses_crunchyroll_builtin(client, db_conn):
     assert db_conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone() is not None
 
 
+def test_delete_domain_refuses_a_protected_infrastructure_domain(client, db_conn):
+    """2026-09-13, RoadMap.md, project owner's explicit request: same
+    can't-delete protection as the built-in Crunchyroll domain, extended to
+    the infrastructure domains it depends on (defaults/seed_defaults.py's
+    GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS)."""
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.commit()
+    domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = 'gstatic\\.com'").fetchone()[0]
+
+    resp = client.post("/domains/delete", data={"domain_id": domain_id}, headers=_auth_header())
+
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone() is not None
+
+
 def test_domain_access_grants_and_revokes_a_user(client, db_conn):
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
@@ -319,6 +347,43 @@ def test_domains_page_lists_bulk_access_form_and_row_checkboxes(client, db_conn)
     assert b'action="/domains/bulk-access"' in resp.data
     assert b'class="bulk-domain-check"' in resp.data
     assert b'id="domainSelectAll"' in resp.data
+
+
+def test_domains_page_excludes_protected_infrastructure_domains(client, db_conn):
+    """2026-09-13, RoadMap.md, project owner's explicit request: these
+    aren't something an admin added or can act on from here -- they live on
+    the Crunchyroll integration page's own "Required domains" card instead
+    (see test_integrations_crunchyroll_page_lists_required_domains)."""
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.commit()
+
+    resp = client.get("/domains", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"gstatic" not in resp.data
+    assert b"Domains (0)" in resp.data
+
+
+def test_domains_page_search_does_not_surface_a_protected_infrastructure_domain(client, db_conn):
+    """Searching for its pattern must not surface it -- the search box
+    itself echoes the query text back into its value attribute, so this
+    checks for the domain's own note (never otherwise on the page) rather
+    than the search term itself, which the input field would still contain
+    even with the domain correctly excluded."""
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.commit()
+
+    resp = client.get("/domains?q=gstatic", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"Google static assets" not in resp.data
+    assert b"No domains match" in resp.data
 
 
 def test_bulk_update_domain_access_applies_to_every_selected_domain(client, db_conn):
@@ -479,6 +544,22 @@ def test_bulk_delete_domains_skips_builtin_crunchyroll_domain(client, db_conn):
     assert [r["kind"] for r in remaining] == ["crunchyroll"]
 
 
+def test_bulk_delete_domains_skips_protected_infrastructure_domains(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.commit()
+    client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
+    ids = [r["id"] for r in db_conn.execute("SELECT id FROM domains")]
+
+    resp = client.post("/domains/bulk-delete", data={"domain_ids": [str(i) for i in ids]}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    remaining = {r["pattern"] for r in db_conn.execute("SELECT pattern FROM domains")}
+    assert remaining == {r"gstatic\.com"}
+
+
 def test_export_domains_csv_includes_every_domain_and_key_fields(client, db_conn):
     client.post(
         "/domains/add",
@@ -496,6 +577,18 @@ def test_export_domains_csv_includes_every_domain_and_key_fields(client, db_conn
     assert "bump" in body
     assert "Everyone" in body
     assert "family site" in body
+
+
+def test_export_domains_csv_excludes_protected_infrastructure_domains(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.commit()
+
+    resp = client.get("/domains/export", headers=_auth_header())
+
+    assert "gstatic" not in resp.data.decode()
 
 
 def test_export_domains_csv_requires_admin_auth(client):
@@ -1511,6 +1604,43 @@ def test_integrations_empty_state(client, db_conn):
     assert "No Crunchyroll shows approved for anyone yet." in resp.get_data(as_text=True)
 
 
+def test_integrations_crunchyroll_page_lists_required_domains(client, db_conn):
+    """2026-09-13, RoadMap.md, project owner's explicit request: protected
+    infrastructure domains are moved off the general Domains page and shown
+    here instead, since they're required for this integration specifically
+    (see test_domains_page_excludes_protected_infrastructure_domains)."""
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('example\\.com', 'splice', 'generic', 1, 0, 'not required', datetime('now'))"
+    )
+    db_conn.commit()
+
+    resp = client.get("/integrations/crunchyroll", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "Required domains (1)" in body
+    assert "gstatic" in body
+    assert "Google static assets" in body
+    assert "not required" not in body
+
+
+def test_integrations_crunchyroll_required_domains_have_no_delete_action(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.commit()
+
+    resp = client.get("/integrations/crunchyroll", headers=_auth_header())
+
+    assert b'action="/domains/delete"' not in resp.data
+
+
 def test_integrations_lists_every_series_with_all_its_users(client, db_conn):
     kids = _mk_kids(client, db_conn, "kid1", "kid2", "kid3")
     _approve_direct(db_conn, kids["kid1"], "GYE5K0XVR", "Ace Attorney")
@@ -1865,6 +1995,22 @@ def test_domain_detail_unknown_id_redirects_with_error(client):
     resp = client.get("/domains/999999", headers=_auth_header())
     assert resp.status_code == 302
     assert "error=1" in resp.headers["Location"]
+
+
+def test_domain_detail_explains_protection_and_links_back_to_integration_page(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
+    )
+    db_conn.commit()
+    domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = 'gstatic\\.com'").fetchone()[0]
+
+    resp = client.get(f"/domains/{domain_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "required for Crunchyroll to work" in body
+    assert 'href="/integrations/crunchyroll"' in body
 
 
 def test_update_domain_changes_mode_and_note(client, db_conn):
@@ -4228,6 +4374,25 @@ def test_user_detail_shows_its_assigned_devices(client, db_conn):
     assert "Active" in body
 
 
+def test_user_detail_devices_card_links_each_device_to_the_devices_page(client, db_conn):
+    """Real live-testing feedback (RoadMap.md): reaching a device from here
+    used to mean copying its MAC, going to Devices, and searching for it --
+    this links straight there, reusing Devices' own ?q= server-side search."""
+    client.post("/users/add", data={"username": "kid5b", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid5b'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, user_id, created_at) "
+        "VALUES ('aa:bb:cc:dd:ee:75', ?, datetime('now'))",
+        (user_id,),
+    )
+    db_conn.commit()
+
+    resp = client.get(f"/users/{user_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"/devices?q=aa:bb:cc:dd:ee:75" in resp.data
+
+
 def test_user_detail_devices_card_shows_no_devices_message_when_empty(client, db_conn):
     client.post("/users/add", data={"username": "kid6", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid6'").fetchone()["id"]
@@ -4699,6 +4864,22 @@ def test_group_detail_page_renders(client, db_conn):
     assert b"TVs" in resp.data
     assert b"Active right now" in resp.data
     assert b"Pause the internet" in resp.data
+
+
+def test_group_detail_devices_card_links_each_device_to_the_devices_page(client, db_conn):
+    client.post("/groups/add", data={"name": "TVs2"}, headers=_auth_header())
+    group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs2'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO devices (mac_address, group_id, created_at) "
+        "VALUES ('aa:bb:cc:dd:ee:76', ?, datetime('now'))",
+        (group_id,),
+    )
+    db_conn.commit()
+
+    resp = client.get(f"/groups/{group_id}", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"/devices?q=aa:bb:cc:dd:ee:76" in resp.data
 
 
 def test_group_detail_shows_global_domains_separately_from_assigned(client, db_conn):

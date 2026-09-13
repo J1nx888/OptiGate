@@ -10579,4 +10579,113 @@ started syncing for real. Reordered each to mock before the add call.
 4 new tests for `add_category()`'s own sync-now-immediately behavior
 (success, failure-still-creates-the-category, zero-domains, and
 no-URL-means-no-sync-attempt). Full suite: 1407 passed, 35 skipped.
-Not yet deployed to production.
+
+**Deployed and verified same day**: owner added a real category ("Web
+Archive") through the dashboard and confirmed it synced immediately from
+the Add action itself, 18 domains, no separate "Sync now" click needed.
+
+## Cross-category domain overlap -- confirmed, not a bug
+
+Owner's question: if `dailymotion.com` sits in both an ENABLED category
+("YouTube") and a DISABLED one ("Entertainment"), does it still get
+blocked? Read `common/matching.py`'s `category_applies_to_device()` and
+`controller/adguard_sync.py`'s `build_category_deny_rules()`/
+`_category_domain_patterns()` directly rather than answering from memory:
+categories are independent deny-lists with no cross-category override or
+dedup -- each category that currently applies to a device emits its own
+deny rules for its own domain list, regardless of what any other category
+(even one covering the same domain, even a more permissive one) does.
+Only `category_overrides` (an admin's explicit per-category Allow
+exception) can carve a domain out of one category's own blocks. Confirmed
+correct against the owner's expectation -- no code change.
+
+## Devices reachable directly from a user's/group's own page
+
+Owner's report: seeing a kid's assigned devices on their own page, then
+wanting to actually act on one, meant copying its MAC, going to Devices,
+and searching for it by hand. Both `user_detail()`'s and `group_detail()`'s
+own "Devices" cards got a `View on Devices` link per row
+(`url_for('devices', q=d.mac_address)`), reusing that page's own existing
+server-side `?q=` search (added 2026-09-08 for the paginated roster) --
+no new route or search logic needed, since a MAC address is already an
+exact, unambiguous match for that search.
+
+2 new tests (`test_user_detail_devices_card_links_each_device_to_the_devices_page`,
+`test_group_detail_devices_card_links_each_device_to_the_devices_page`).
+
+## Captive-portal login usernames were case-sensitive
+
+Owner's report: a household username's case had to match exactly to log
+in from the captive portal -- nothing else about this login (or the
+dashboard's own admin login) is case-sensitive, so this silently
+confused whoever mistyped the case. `captive_portal_server.py`'s
+`_handle_login()` now looks the username up with `COLLATE NOCASE`.
+
+That alone would make two accounts differing only by case (`"alex"` and
+`"Alex"`) ambiguous to that same lookup, so `dashboard.py`'s `add_user()`
+now also refuses to create a username that already exists
+case-insensitively, closing the gap before it could ever open one.
+
+2 new tests: `test_login_matches_username_case_insensitively`
+(`tests/test_captive_portal_server.py`), and
+`test_add_user_rejects_a_username_differing_only_by_case`
+(`tests/test_dashboard.py`).
+
+## Crunchyroll-required domains: protected from deletion, moved off the Domains page
+
+Owner's observation: most of the `is_global=1` domains on the Domains
+page aren't sites anyone picked -- they're cookie-consent/CDN/SSO
+infrastructure (`google.com`, `gstatic.com`, `akamaized.net`, etc.,
+`defaults/seed_defaults.py`'s `GLOBAL_SPLICE_DOMAINS`/`TRUSTED_DOMAINS`)
+that Crunchyroll's own site and playback depend on. Deleting one by
+mistake, thinking it was just an old test entry (`google.com` was
+originally added for testing), could silently break Crunchyroll for
+everyone with no obvious link back to "the domain an admin deleted."
+The built-in `crunchyroll.com` domain itself already had exactly this
+"can't be deleted" protection (`kind = 'crunchyroll'`,
+`delete_domain()`/`bulk_delete_domains()`) -- this extends the same idea
+to the domains its own playback actually depends on, and also moves them
+off the general Domains page entirely per the owner's explicit request,
+so an admin browsing "my domains" never mistakes one for something they
+added and can safely remove.
+
+Added a `domains.protected` column (`common/db.py`, migrated via the
+usual idempotent `PRAGMA table_info` + `ALTER TABLE` pattern). `defaults/
+seed_defaults.py`'s `seed()` now inserts `GLOBAL_SPLICE_DOMAINS`,
+`TRUSTED_DOMAINS`, and the `crunchyroll.com` row itself with
+`protected = 1`, using `INSERT ... ON CONFLICT(pattern) DO UPDATE SET
+protected = 1` instead of `INSERT OR IGNORE` so a production database
+that already has these rows from before this column existed gets
+backfilled the next time the proxy container starts, without touching
+anything an admin may have since edited (mode, note).
+
+`dashboard.py` changes:
+- `delete_domain()`/`bulk_delete_domains()`: refuse to delete a
+  `protected = 1` row (same shape as the existing `kind = 'crunchyroll'`
+  check, kept separate since it has its own, more specific message).
+- `domains()`, `export_domains_csv()`, and the page's own
+  `any_domains_exist` check: exclude `protected = 1` rows entirely --
+  still fully enforced by the proxy either way (`matching.py` doesn't
+  care where a row is displayed), this only changes what an admin sees
+  to browse/search/delete.
+- `_global_domains()` (the "Global sites" card on `user_detail()`/
+  `group_detail()`) and `users()`'s/`export_users_csv()`'s own "N
+  assigned" domain counts: also exclude `protected = 1`, so they stay
+  consistent with what the Domains page itself now shows -- without
+  this they'd have kept counting/listing domains that no longer appear
+  there at all.
+- New "Required domains" card on the Crunchyroll integration page
+  (`integrations_crunchyroll()`/`INTEGRATIONS_BODY`): read-only list of
+  every `protected = 1` domain (pattern, mode, note) with a `Manage`
+  link to its own detail page for mode/note edits, no delete action.
+  `domain_detail()` also grows a `protected`-aware hint and back-link
+  (points to the Crunchyroll integration page instead of "All domains").
+
+12 new tests across `tests/test_dashboard.py`,
+`tests/test_seed_idempotent.py`, and a new
+`tests/test_db_domains_protected_migration.py` (fresh-database column
+presence, migration-without-data-loss, migration idempotency, seed-time
+backfill onto a pre-existing row, single- and bulk-delete refusal,
+Domains-page/search/CSV exclusion, Crunchyroll-page listing and its
+missing delete action, domain_detail's hint/back-link). Full suite: 1425
+passed, 35 skipped. Not yet deployed to production.

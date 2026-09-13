@@ -243,6 +243,46 @@ def test_seed_twice_leaves_admin_edits_untouched(conn):
     assert row["mode"] == "bump"  # re-seeding must not clobber an admin's change
 
 
+def test_seed_marks_global_splice_and_trusted_domains_protected(conn):
+    """2026-09-13, RoadMap.md: these are infrastructure the Crunchyroll
+    integration depends on, not an admin's own pick -- delete_domain()/
+    bulk_delete_domains() refuse to remove a protected=1 row, and the
+    Domains page hides them entirely (they live on the Crunchyroll
+    integration page instead)."""
+    seed_defaults.seed(conn)
+    conn.commit()
+    for pattern, _note in seed_defaults.GLOBAL_SPLICE_DOMAINS + seed_defaults.TRUSTED_DOMAINS:
+        row = conn.execute("SELECT protected FROM domains WHERE pattern = ?", (pattern,)).fetchone()
+        assert row is not None
+        assert row["protected"] == 1, f"{pattern!r} should be seeded protected"
+
+
+def test_seed_backfills_protected_onto_a_pre_existing_infrastructure_domain(conn):
+    """A database created before the `protected` column existed has these
+    rows already, at the column's default of 0 -- seed() must flip them to
+    1 on the next run (every proxy container start) rather than only
+    protecting a freshly-inserted row."""
+    conn.execute(
+        "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
+        "VALUES (?, 'splice', 'generic', 1, 0, 'Google', datetime('now'))",
+        (r"google\.com",),
+    )
+    conn.commit()
+
+    seed_defaults.seed(conn)
+    conn.commit()
+
+    row = conn.execute("SELECT protected FROM domains WHERE pattern = ?", (r"google\.com",)).fetchone()
+    assert row["protected"] == 1
+
+
+def test_seed_marks_crunchyroll_domain_protected(conn):
+    seed_defaults.seed(conn)
+    conn.commit()
+    row = conn.execute("SELECT protected FROM domains WHERE pattern = ?", (r"crunchyroll\.com",)).fetchone()
+    assert row["protected"] == 1
+
+
 def test_crunchyrollcdn_is_trusted_not_splice(conn):
     """S2.2: crunchyrollcdn.com must end up 'trusted', not silently dropped
     into 'splice' by being listed in both domain lists."""

@@ -1374,11 +1374,16 @@ def users():
     out = []
     for u in rows:
         # Matches what the "N assigned" link's ?user_id= filter on /domains
-        # actually shows: explicit assignments plus every global domain.
+        # actually shows: explicit assignments plus every global domain --
+        # excluding protected=1 infrastructure domains (2026-09-13,
+        # RoadMap.md), same as that page's own query, since those no
+        # longer appear there at all (they're on the Crunchyroll
+        # integration page instead) and this count would otherwise promise
+        # more rows than clicking through actually shows.
         domain_count = conn.execute(
             "SELECT COUNT(*) c FROM domains d "
             "LEFT JOIN user_domains ud ON ud.domain_id = d.id AND ud.user_id = ? "
-            "WHERE d.is_global = 1 OR ud.user_id IS NOT NULL",
+            "WHERE (d.is_global = 1 AND d.protected = 0) OR ud.user_id IS NOT NULL",
             (u["id"],),
         ).fetchone()["c"]
         show_count = conn.execute(
@@ -1411,6 +1416,16 @@ def add_user():
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
         return flash_redirect("users", "Username can only contain letters, numbers, _ . -", error=True)
     conn = get_db()
+    # The captive-portal login now matches usernames case-insensitively (see
+    # captive_portal_server.py's own comment) -- the UNIQUE constraint on this
+    # column is still case-sensitive, so without this check "alex" and "Alex"
+    # could both exist and that login's own SELECT would have no way to know
+    # which one a bare "alex" attempt meant.
+    existing = conn.execute(
+        "SELECT username FROM users WHERE username = ? COLLATE NOCASE", (username,)
+    ).fetchone()
+    if existing is not None:
+        return flash_redirect("users", f"Username {username!r} already exists.", error=True)
     try:
         conn.execute(
             "INSERT INTO users (username, display_name, password_hash, created_at) VALUES (?,?,?,?)",
@@ -1496,10 +1511,12 @@ def export_users_csv():
     writer = csv.writer(buf)
     writer.writerow(["Username", "Display name", "Sites assigned", "Shows approved"])
     for u in rows:
+        # Same protected=0 exclusion as users()'s own domain_count -- see
+        # that query's comment.
         domain_count = conn.execute(
             "SELECT COUNT(*) c FROM domains d "
             "LEFT JOIN user_domains ud ON ud.domain_id = d.id AND ud.user_id = ? "
-            "WHERE d.is_global = 1 OR ud.user_id IS NOT NULL",
+            "WHERE (d.is_global = 1 AND d.protected = 0) OR ud.user_id IS NOT NULL",
             (u["id"],),
         ).fetchone()["c"]
         show_count = conn.execute("SELECT COUNT(*) c FROM user_shows WHERE user_id = ?", (u["id"],)).fetchone()["c"]
@@ -1662,7 +1679,7 @@ USER_DETAIL_BODY = """
 <h2>Devices ({{ assigned_devices|length }})</h2>
 <div class="table-scroll">
 <table>
-  <tr><th>MAC address</th><th>Label</th><th>Status</th></tr>
+  <tr><th>MAC address</th><th>Label</th><th>Status</th><th></th></tr>
   {% for d in assigned_devices %}
   <tr>
     <td><code>{{ d.mac_address }}</code></td>
@@ -1672,9 +1689,10 @@ USER_DETAIL_BODY = """
       {% elif d.quarantined_at %}<span class="badge blocked">Paused</span>
       {% else %}<span class="badge allowed">Active</span>{% endif %}
     </td>
+    <td><a class="btn small" href="{{ url_for('devices', q=d.mac_address) }}">View on Devices</a></td>
   </tr>
   {% else %}
-  <tr><td colspan="3"><em>No devices assigned.</em></td></tr>
+  <tr><td colspan="4"><em>No devices assigned.</em></td></tr>
   {% endfor %}
 </table>
 </div>
@@ -1997,6 +2015,33 @@ INTEGRATIONS_BODY = """
 </div>
 
 <div class="card">
+<h2>Required domains ({{ required_domains|length }})</h2>
+<p class="hint">
+  Infrastructure Crunchyroll's site and video playback depend on --
+  cookie consent, CDNs, single sign-on, and the raw video CDN itself, plus
+  the main <code>crunchyroll.com</code> domain the per-user show
+  approvals above are enforced against. Everyone gets these automatically
+  (they're not a per-kid decision), and they can't be deleted from the
+  dashboard -- removing one could silently break playback or login for
+  everyone, with no obvious link back to "the domain an admin deleted."
+  Edit a domain's mode or note from its own Manage page if you need to.
+</p>
+<div class="table-scroll">
+<table>
+  <tr><th>Pattern</th><th>Mode</th><th>Note</th><th></th></tr>
+  {% for d in required_domains %}
+  <tr>
+    <td><code>{{ d.pattern }}</code></td>
+    <td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td>
+    <td>{{ d.note or '' }}</td>
+    <td><a class="btn small" href="{{ url_for('domain_detail', domain_id=d.id) }}">Manage</a></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+</div>
+
+<div class="card">
 <h2>Approved Crunchyroll shows &mdash; everyone ({{ series|length }})</h2>
 <div class="table-scroll">
 <table>
@@ -2126,11 +2171,20 @@ def integrations_crunchyroll():
     users = conn.execute(
         "SELECT id, display_name FROM users ORDER BY display_name COLLATE NOCASE"
     ).fetchall()
+    # protected=1: infrastructure this integration depends on (defaults/
+    # seed_defaults.py's GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS/crunchyroll.com
+    # itself) -- read-only here, moved off the general Domains page entirely
+    # (2026-09-13, RoadMap.md, project owner's explicit request) so it isn't
+    # mistaken for a domain an admin added and can freely delete.
+    required_domains = conn.execute(
+        "SELECT * FROM domains WHERE protected = 1 ORDER BY pattern"
+    ).fetchall()
     body = render_template_string(
         INTEGRATIONS_BODY,
         series=series,
         known_series=_entity_combo(known_series, lambda s: s["series_name"]),
         users=users,
+        required_domains=required_domains,
     )
     return render("integrations_crunchyroll", body)
 
@@ -2206,11 +2260,16 @@ def path_to_pattern(path: str) -> str:
 
 
 def _global_domains(conn) -> list:
-    """Every is_global=1 domain, for GLOBAL_SITES_CARD -- shared by
-    user_detail() and group_detail() (see that constant's own docstring
-    for why this exists)."""
+    """Every is_global=1, non-protected domain, for GLOBAL_SITES_CARD --
+    shared by user_detail() and group_detail() (see that constant's own
+    docstring for why this exists). Excludes protected=1 infrastructure
+    domains (2026-09-13, RoadMap.md) for the same reason users()'s own
+    "N assigned" count does: they're not on the Domains page this card's
+    hint text points admins toward, they're on the Crunchyroll integration
+    page instead, so counting them in here would make this card and that
+    count disagree with each other."""
     return conn.execute(
-        "SELECT pattern, mode, note FROM domains WHERE is_global = 1 ORDER BY pattern"
+        "SELECT pattern, mode, note FROM domains WHERE is_global = 1 AND protected = 0 ORDER BY pattern"
     ).fetchall()
 
 
@@ -2671,7 +2730,16 @@ def domains():
         # Same rule the proxy itself uses at request time (matching.py),
         # reused here rather than reimplemented as a second copy of the
         # "is this domain visible to this user/group/device" logic.
-        all_rows = conn.execute("SELECT * FROM domains ORDER BY is_global DESC, pattern").fetchall()
+        # protected = 0: infrastructure the Crunchyroll integration depends
+        # on (2026-09-13, RoadMap.md) doesn't belong on this page at all --
+        # it's not something an admin assigned or can delete, so it lives
+        # on the Crunchyroll integration page's own "Required domains" card
+        # instead. Still fully enforced either way (matching.py doesn't
+        # care where a row is displayed) -- this only affects what shows up
+        # here to browse/search/delete.
+        all_rows = conn.execute(
+            "SELECT * FROM domains WHERE protected = 0 ORDER BY is_global DESC, pattern"
+        ).fetchall()
         if filtered_user:
             rows = [d for d in all_rows if bool(d["is_global"]) or matching.user_has_domain(conn, filtered_user["id"], d["id"])]
         elif filtered_group:
@@ -2679,7 +2747,9 @@ def domains():
         else:
             rows = [d for d in all_rows if bool(d["is_global"]) or matching.device_has_domain(conn, filtered_device["id"], d["id"])]
     else:
-        rows = conn.execute("SELECT * FROM domains ORDER BY is_global DESC, pattern").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM domains WHERE protected = 0 ORDER BY is_global DESC, pattern"
+        ).fetchall()
 
     # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
     # 2026-09-07 pagination work, project owner's explicit request): now
@@ -2707,7 +2777,9 @@ def domains():
     # searched view would silently drop back to the unfiltered full list.
     filter_query_args = {k: v for k, v in request.args.items() if k not in ("page", "per_page")}
     clear_search_args = {k: v for k, v in filter_query_args.items() if k != "q"}
-    any_domains_exist = bool(conn.execute("SELECT EXISTS(SELECT 1 FROM domains) AS c").fetchone()["c"])
+    any_domains_exist = bool(
+        conn.execute("SELECT EXISTS(SELECT 1 FROM domains WHERE protected = 0) AS c").fetchone()["c"]
+    )
 
     all_users = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
     all_groups = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
@@ -2881,12 +2953,26 @@ def delete_domain():
     elif request.form.get("device_id"):
         redirect_kwargs["device_id"] = request.form["device_id"]
     conn = get_db()
-    row = conn.execute("SELECT kind FROM domains WHERE id = ?", (domain_id,)).fetchone()
+    row = conn.execute("SELECT kind, protected FROM domains WHERE id = ?", (domain_id,)).fetchone()
     if row and row["kind"] == "crunchyroll":
         return flash_redirect(
             "domains",
             "The Crunchyroll domain is built into the show-approval feature and can't be deleted "
             "(edit its mode/paths from Manage instead).",
+            error=True, **redirect_kwargs,
+        )
+    # 2026-09-13, RoadMap.md, project owner's explicit request: infrastructure
+    # the Crunchyroll integration depends on (defaults/seed_defaults.py's
+    # GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS) -- same "can't be deleted from
+    # here" protection the built-in Crunchyroll domain above already had,
+    # extended to the domains its own playback actually depends on. Managed
+    # (viewed, mode/note edited) from the Crunchyroll integration page's own
+    # "Required domains" card instead, not this generic Domains page.
+    if row and row["protected"]:
+        return flash_redirect(
+            "domains",
+            "This domain is required for Crunchyroll to work and can't be deleted "
+            "-- see the Crunchyroll integration page.",
             error=True, **redirect_kwargs,
         )
     conn.execute("DELETE FROM domains WHERE id = ?", (domain_id,))
@@ -2895,10 +2981,16 @@ def delete_domain():
 
 
 DOMAIN_DETAIL_BODY = """
+{% if d.protected %}
+<p><a href="{{ url_for('integrations_crunchyroll') }}">&larr; Crunchyroll integration</a></p>
+{% else %}
 <p><a href="{{ url_for('domains') }}">&larr; All domains</a></p>
+{% endif %}
 <h1><code>{{ d.pattern }}</code> <span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></h1>
 {% if d.kind == 'crunchyroll' %}
 <p class="hint">This is the built-in Crunchyroll domain. Shows are approved per-user from each user's page; the paths below are a defense-in-depth safety net, not the main show filter.</p>
+{% elif d.protected %}
+<p class="hint">This domain is required for Crunchyroll to work and can't be deleted from the dashboard -- see the <a href="{{ url_for('integrations_crunchyroll') }}">Crunchyroll integration page</a> for the full list.</p>
 {% endif %}
 
 <div class="card">
@@ -3113,7 +3205,11 @@ def export_domains_csv():
     selection, same "always available regardless of selection" role every
     other page's own Download button plays."""
     conn = get_db()
-    rows = conn.execute("SELECT * FROM domains ORDER BY is_global DESC, pattern").fetchall()
+    # protected domains are excluded here too -- see domains()'s own comment;
+    # they're not something an admin added or can act on from this page.
+    rows = conn.execute(
+        "SELECT * FROM domains WHERE protected = 0 ORDER BY is_global DESC, pattern"
+    ).fetchall()
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["Pattern", "Mode", "Access", "Note"])
@@ -3133,10 +3229,14 @@ def export_domains_csv():
 @require_admin
 def bulk_delete_domains():
     """Domains list's toolbar "Delete" button. Same built-in-Crunchyroll
-    protection as the single-domain delete_domain() route above: that
-    domain is load-bearing for the show-approval feature, so it's silently
-    skipped (not deleted) even if checked, rather than erroring out the
-    whole batch."""
+    protection as the single-domain delete_domain() route above (that
+    domain is load-bearing for the show-approval feature), plus the same
+    protection for the infrastructure domains it depends on (protected=1,
+    2026-09-13, RoadMap.md) -- either kind is silently skipped (not
+    deleted) even if checked, rather than erroring out the whole batch.
+    These no longer even appear on this page's own list to be checked in
+    the first place (see domains()), but this guard stays regardless --
+    never trust the UI alone to be the only thing enforcing this."""
     domain_ids = {int(x) for x in request.form.getlist("domain_ids") if x.isdigit()}
     if not domain_ids:
         return flash_redirect("domains", "No domains selected.", error=True)
@@ -3144,7 +3244,7 @@ def bulk_delete_domains():
     placeholders = ",".join("?" * len(domain_ids))
     protected = {
         row["id"] for row in conn.execute(
-            f"SELECT id FROM domains WHERE id IN ({placeholders}) AND kind = 'crunchyroll'",
+            f"SELECT id FROM domains WHERE id IN ({placeholders}) AND (kind = 'crunchyroll' OR protected = 1)",
             tuple(domain_ids),
         ).fetchall()
     }
@@ -3155,7 +3255,10 @@ def bulk_delete_domains():
         conn.commit()
     message = f"Deleted {len(deletable)} domain{'s' if len(deletable) != 1 else ''}."
     if protected:
-        message += " Skipped the built-in Crunchyroll domain (can't be deleted)."
+        message += (
+            f" Skipped {len(protected)} domain{'s' if len(protected) != 1 else ''} "
+            "required for Crunchyroll to work (can't be deleted)."
+        )
     return flash_redirect("domains", message, error=not deletable and bool(protected))
 
 
@@ -6488,15 +6591,16 @@ GROUP_DETAIL_BODY = """
 <h2>Devices in this group ({{ group_devices|length }})</h2>
 <div class="table-scroll">
 <table>
-  <tr><th>MAC address</th><th>Label</th><th>Status</th></tr>
+  <tr><th>MAC address</th><th>Label</th><th>Status</th><th></th></tr>
   {% for d in group_devices %}
   <tr>
     <td><code>{{ d.mac_address }}</code></td>
     <td>{{ d.label or '' }}</td>
     <td>{% if d.quarantined_at %}<span class="badge blocked">Paused</span>{% else %}<span class="badge">Active</span>{% endif %}</td>
+    <td><a class="btn small" href="{{ url_for('devices', q=d.mac_address) }}">View on Devices</a></td>
   </tr>
   {% else %}
-  <tr><td colspan="3"><em>No devices assigned.</em></td></tr>
+  <tr><td colspan="4"><em>No devices assigned.</em></td></tr>
   {% endfor %}
 </table>
 </div>
