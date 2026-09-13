@@ -10304,3 +10304,75 @@ useful confirmation the observable behavior didn't shift. Pure Python,
 no Linux-only code path touched, so a local Windows run was sufficient:
 full suite, 1369 passed / 35 skipped (the pre-existing SIGALRM/Windows
 skips, unrelated).
+
+## Health page gets a NIC load-balancing card, so the item-3 NIC bottleneck is visible without SSHing in
+
+Owner's request, after seeing the RPS/coalescing tuning applied live:
+future deployments on similarly cheap single-queue NIC hardware would
+hit the exact same sustained-upload bottleneck with nothing to go on
+besides `ethtool`/`/proc` output an admin has to know to even look for.
+Added `common/nic_health.py` -- reads plain, world-readable
+sysfs/procfs files only (`/proc/net/route` to auto-detect the primary
+interface, `/sys/class/net/<iface>/queues/rx-*/rps_cpus`,
+`.../statistics/{rx_missed_errors,rx_dropped}`) -- no `ethtool` binary
+or elevated privilege needed, confirmed live inside the real
+`dashboard` container (`network_mode: host` gives it the same
+`/sys/class/net` view as the host itself). Wired into `/health` as an
+unconditional card: a green/amber badge for whether RPS is enabled,
+with the same "why this matters" explanation this session's earlier
+finding is built on, plus the interface's lifetime `rx_missed`/
+`rx_dropped` counts.
+
+**Owner asked a sharp follow-up**: those are real kernel counters tied
+to the interface itself -- they never reset on their own, only on a
+reboot or an interface bounce, so an admin could easily mistake a
+climbing lifetime total for something caused by this card, or for
+something they can't get a fresh read on. Actually resetting them for
+real means bouncing the NIC, which would cut this box's own network
+connectivity (every device behind it) for however long that takes --
+not something a dashboard button should ever do. Added a software-side
+baseline instead (`nic_health.with_baseline()`): a "Reset counters"
+button stores the current reading (interface, both counts, timestamp)
+as one JSON blob in the `settings` table, and the card then shows
+"since counters were last reset" deltas alongside the untouched
+lifetime totals -- clamped to 0 and flagged if the live count is ever
+lower than the stored baseline (the interface itself reset in the
+meantime). No polling or background cost either way -- the whole card
+is a handful of tiny synchronous file reads, done only when an admin
+loads a page that explicitly doesn't auto-refresh -- so there was
+nothing to gate behind an enable/disable toggle, which the owner also
+asked about and agreed wasn't needed once that was clear.
+
+22 new tests total (13 for `nic_health.py`'s pure functions against a
+fake sysfs tree, 5 for `with_baseline()`, 4 dashboard-level covering
+the reset route and both render states). Full suite: 1394 passed, 35
+skipped.
+
+## Deployed: every fix from tonight's review, the AdGuard measurement, and the NIC tuning/health work, live on production (2026-09-13)
+
+`dashboard` and `proxy` rebuilt and recreated from `46de07a` (the
+accumulated commits from `806f75c` through the NIC health card above --
+7 code-review fixes, the AdGuard recompile-latency writeup, the
+`nic-tuning` setup-script addition, and the Health page's new NIC
+card). `arp-worker`/`nftables-manager`/`controller` were NOT touched --
+the interception profile stays down until the owner brings it up
+deliberately, unaffected by this deploy.
+
+Verified for real, not just assumed from a clean build: both
+containers came up with no errors in their startup logs, `/health`
+correctly still returns 401 without credentials (the app is genuinely
+serving, not crash-looping into some permissive fallback), and --
+the first live exercise of `common/nic_health.py` outside a test's
+fake sysfs tree -- `docker exec`'d into the real `dashboard` container
+and called `nic_health.nic_load_status()` directly: `{"available":
+true, "interface": "enp1s0", "rps_enabled": true, "rx_missed_errors":
+833, "rx_dropped": 30}`, matching the exact host-level numbers from
+earlier byte for byte. Full local suite re-confirmed green (1394
+passed, 35 skipped) before deploying.
+
+**Still not done**: the RPS/coalescing fix itself remains unvalidated
+under real sustained-upload load -- that retest still needs
+interception up, which still needs the owner's explicit go-ahead per
+the standing rule. Two open product decisions (schedule-gated
+categories' default-open posture, and the block-page SNI-only logging
+gap) remain undecided, no code attached.
