@@ -8,6 +8,7 @@ server.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -833,6 +834,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 rows,
             )
 
+    # Real bug, RoadMap.md 2026-09-13: dashboard.py's update_device() and
+    # _batch_assign_devices_to_group() started setting is_authenticated=1
+    # the moment an admin assigns a device to a user/group (2026-09-11,
+    # "assigning a device IS the vouching act") -- but that fix only
+    # applies going forward. Any device assigned BEFORE that date (a
+    # real one found live: a device with a real label and group
+    # assignment, still stuck showing on "Devices awaiting login" days
+    # later) never got backfilled, since nothing else ever re-checks
+    # this. Safe to run on every startup indefinitely: no code path in
+    # this app assigns a user/group to a device while leaving
+    # is_authenticated=0, so once every pre-fix row is caught up this
+    # becomes a permanent no-op, never overwriting an admin's own later
+    # choice to actually un-assign (which clears user_id/group_id, not
+    # just is_authenticated) or ignore/bypass a device.
+    conn.execute(
+        "UPDATE devices SET is_authenticated = 1 "
+        "WHERE is_authenticated = 0 AND (user_id IS NOT NULL OR group_id IS NOT NULL)"
+    )
+
 
 # ==========================================================
 # SETTINGS
@@ -856,6 +876,42 @@ def set_setting_if_absent(conn: sqlite3.Connection, key: str, value: str) -> Non
         "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
         (key, value),
     )
+
+
+_DELETED_CATEGORY_NAMES_SETTING_KEY = "deleted_category_names"
+
+
+def get_deleted_category_names(conn: sqlite3.Connection) -> list[str]:
+    """Category names an admin has explicitly deleted from the dashboard
+    (dashboard.py's delete_category()/bulk_delete_categories()) --
+    defaults/seed_defaults.py's seed() checks this before re-inserting
+    any of its DEFAULT_CATEGORIES starter rows (e.g. "Weapons"), which
+    otherwise runs on every proxy container start/restart and has no
+    way to tell "never created yet" apart from "an admin removed this
+    on purpose" (real bug, RoadMap.md 2026-09-13: a deleted starter
+    category silently came back on the next restart). Stored as one
+    JSON list under a single settings key, same convention as the
+    AdGuard recompile-latency card's baseline (RoadMap.md 2026-09-12)."""
+    raw = get_setting(conn, _DELETED_CATEGORY_NAMES_SETTING_KEY, "[]")
+    try:
+        names = json.loads(raw)
+    except ValueError:
+        return []
+    return names if isinstance(names, list) else []
+
+
+def add_deleted_category_name(conn: sqlite3.Connection, name: str) -> None:
+    """Records `name` as explicitly deleted -- see
+    get_deleted_category_names() above for why. Harmless to call for a
+    category name that was never one of the starters: seed() only ever
+    checks its own DEFAULT_CATEGORIES names against this list, so an
+    unrelated name sitting here is simply never consulted, not a source
+    of bugs. Idempotent -- deleting the same name twice (e.g. delete,
+    manually re-add under the same name, delete again) just re-records
+    the same entry."""
+    names = set(get_deleted_category_names(conn))
+    names.add(name)
+    set_setting(conn, _DELETED_CATEGORY_NAMES_SETTING_KEY, json.dumps(sorted(names)))
 
 
 # The memorable-URL feature (RoadMap.md's dated entry, 2026-09-07): a

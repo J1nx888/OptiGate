@@ -497,15 +497,15 @@ document.addEventListener("input", function (event) {
     }
     return { missing: missing, s: raw.toLowerCase() };
   }
-  document.addEventListener("click", function (event) {
-    var th = event.target.closest("th[data-sort]");
-    if (!th) return;
-    var table = th.closest("table[data-sortable]");
-    if (!table) return;
+
+  function sortStorageKey(table) { return "og_table_sort_" + table.id; }
+
+  // Actually reorders the rows for one column/direction -- factored out
+  // of the click handler (2026-09-13, project owner's explicit request)
+  // so the same logic can also run once on page load to RESTORE a saved
+  // sort, not just respond to a live click.
+  function applySort(table, th, idx, kind, asc) {
     var headerRow = th.parentNode;
-    var idx = Array.prototype.indexOf.call(headerRow.cells, th);
-    var kind = th.getAttribute("data-sort") || "";
-    var asc = th.getAttribute("data-sort-dir") !== "asc";
     Array.prototype.forEach.call(headerRow.cells, function (c) {
       c.removeAttribute("data-sort-dir");
       if (c.dataset && c.dataset.sortLabel !== undefined) c.textContent = c.dataset.sortLabel;
@@ -527,6 +527,54 @@ document.addEventListener("input", function (event) {
     });
     var parent = body.length ? body[0].parentNode : null;
     if (parent) body.forEach(function (r) { parent.appendChild(r); });
+  }
+
+  document.addEventListener("click", function (event) {
+    var th = event.target.closest("th[data-sort]");
+    if (!th) return;
+    var table = th.closest("table[data-sortable]");
+    if (!table) return;
+    var headerRow = th.parentNode;
+    var idx = Array.prototype.indexOf.call(headerRow.cells, th);
+    var kind = th.getAttribute("data-sort") || "";
+    var asc = th.getAttribute("data-sort-dir") !== "asc";
+    applySort(table, th, idx, kind, asc);
+    // Persist per browser via localStorage, keyed by the table's own id
+    // and the column's plain label text (stable across a page reload,
+    // unlike a raw column index which would break if columns are ever
+    // reordered) -- 2026-09-13, project owner's explicit request:
+    // sorting the pending-devices card, then taking a row action
+    // (Bypass/Dismiss/etc, a plain form POST that reloads the whole
+    // page) silently lost the sort every time, since this was purely an
+    // in-memory DOM reorder with nothing remembering it across a fresh
+    // page load. A display preference, not real data, so a per-browser
+    // client-side memory is the right place for it -- same reasoning
+    // the sidebar's own collapsed-group state already uses.
+    if (table.id) {
+      try {
+        localStorage.setItem(sortStorageKey(table), JSON.stringify({ label: th.dataset.sortLabel, kind: kind, asc: asc }));
+      } catch (e) { /* private-browsing/storage-disabled: sort still works, just isn't remembered */ }
+    }
+  });
+
+  // Restore any saved sort once each sortable table's rows exist on the
+  // page (this script runs at the end of <body>, after every table
+  // template above it, so this is safe without a DOMContentLoaded wait).
+  Array.prototype.forEach.call(document.querySelectorAll("table[data-sortable][id]"), function (table) {
+    var raw;
+    try { raw = localStorage.getItem(sortStorageKey(table)); } catch (e) { raw = null; }
+    if (!raw) return;
+    var saved;
+    try { saved = JSON.parse(raw); } catch (e) { return; }
+    if (!saved || !saved.label) return;
+    var ths = table.querySelectorAll("th[data-sort]");
+    var th = null;
+    for (var i = 0; i < ths.length; i++) {
+      if (ths[i].textContent.trim() === saved.label) { th = ths[i]; break; }
+    }
+    if (!th) return; // a column was renamed/removed since -- nothing safe to restore
+    var idx = Array.prototype.indexOf.call(th.parentNode.cells, th);
+    applySort(table, th, idx, saved.kind, saved.asc);
   });
 })();
 
@@ -637,17 +685,20 @@ document.addEventListener("input", function (event) {
       var pool = items.filter(function (item) { return !(mode === "multi" && selectedIds[item.id]); });
       var showAll = pool.length <= SHOW_ALL_THRESHOLD;
       results.innerHTML = "";
-      if (!query && !showAll) {
-        results.style.display = "block";
-        var hint = document.createElement("div");
-        hint.className = "combobox-empty";
-        hint.textContent = "Type to search " + pool.length + " entries.";
-        results.appendChild(hint);
-        return;
-      }
+      // 2026-09-13, project owner's explicit request: past
+      // SHOW_ALL_THRESHOLD entries, this used to render literally
+      // nothing until you typed -- fine for "search 200 domains," but
+      // for "assign to" (a household's own users/groups, rarely more
+      // than a couple dozen) it meant knowing an exact name in advance
+      // just to see any option at all. Now shows a capped alphabetical
+      // preview (same MAX_RESULTS cap a real search result gets) with a
+      // hint that there's more to find by typing, instead of an empty
+      // dropdown -- bounded rendering cost either way, just never zero
+      // options to look at.
+      var preview = !query && !showAll ? pool.slice(0, MAX_RESULTS) : null;
       var found = query
         ? pool.filter(function (item) { return item.label.toLowerCase().indexOf(query) !== -1; }).slice(0, MAX_RESULTS)
-        : pool;
+        : (preview || pool);
       if (!found.length) {
         results.style.display = "block";
         var empty = document.createElement("div");
@@ -671,6 +722,12 @@ document.addEventListener("input", function (event) {
         });
         results.appendChild(row);
       });
+      if (preview && pool.length > preview.length) {
+        var more = document.createElement("div");
+        more.className = "combobox-empty";
+        more.textContent = "Showing " + preview.length + " of " + pool.length + " -- type to search.";
+        results.appendChild(more);
+      }
     }
 
     input.addEventListener("input", renderResults);
@@ -3302,7 +3359,7 @@ DEVICES_BODY = """
   to assign it to a kid or group directly instead of waiting on a login.
 </p>
 <div class="table-scroll">
-<table data-sortable>
+<table id="pendingDevicesTable" data-sortable>
   <tr><th data-sort>MAC address</th><th data-sort>Manufacturer</th><th data-sort>Hostname</th><th data-sort="ip">Current IP</th><th data-sort="date">First seen</th><th data-sort="date">Last seen</th><th data-sort>Seen via</th><th data-sort="num">Login attempts</th><th></th></tr>
   {% for d in pending_devices %}
   <tr>
@@ -4054,7 +4111,15 @@ def add_category():
 def delete_category():
     category_id = request.form.get("category_id", "")
     conn = get_db()
+    row = conn.execute("SELECT name FROM categories WHERE id = ?", (category_id,)).fetchone()
     conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+    # Real bug, RoadMap.md 2026-09-13: without this, a deleted starter
+    # category (defaults/seed_defaults.py's DEFAULT_CATEGORIES, e.g.
+    # "Weapons") silently came back on the very next proxy container
+    # start/restart -- seed()'s own INSERT OR IGNORE has no way to tell
+    # "never created" apart from "an admin removed this on purpose".
+    if row is not None:
+        db.add_deleted_category_name(conn, row["name"])
     conn.commit()
     return flash_redirect("categories", "Category removed.")
 
@@ -4072,6 +4137,15 @@ def bulk_delete_categories():
         return flash_redirect("categories", "No categories selected.", error=True)
     conn = get_db()
     placeholders = ",".join("?" * len(category_ids))
+    # Same tombstone as the single-category delete_category() above --
+    # see its comment and db.add_deleted_category_name()'s own docstring.
+    # .fetchall() first, deliberately: add_deleted_category_name() below
+    # issues its own conn.execute() calls, and interleaving those with a
+    # still-open cursor from the SELECT is worth avoiding even though
+    # sqlite3 generally tolerates it.
+    to_delete = conn.execute(f"SELECT name FROM categories WHERE id IN ({placeholders})", tuple(category_ids)).fetchall()
+    for row in to_delete:
+        db.add_deleted_category_name(conn, row["name"])
     conn.execute(f"DELETE FROM categories WHERE id IN ({placeholders})", tuple(category_ids))
     conn.commit()
     return flash_redirect(

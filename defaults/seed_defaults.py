@@ -224,7 +224,19 @@ def seed(conn) -> None:
                 (cr_row["id"], pattern),
             )
 
+    # Real bug, RoadMap.md 2026-09-13: this runs on every proxy container
+    # start/restart, and INSERT OR IGNORE only skips a name that's
+    # CURRENTLY present -- it has no way to tell "never created yet"
+    # apart from "an admin deleted this on purpose" (e.g. "Weapons"),
+    # so a deliberately-removed starter category silently came back on
+    # the very next restart. deleted_category_names is dashboard.py's
+    # own record of every category name an admin has explicitly deleted
+    # (db.add_deleted_category_name(), written from delete_category()/
+    # bulk_delete_categories()) -- checked here so seeding respects it.
+    deleted_names = set(db.get_deleted_category_names(conn))
     for name, subscription_url in DEFAULT_CATEGORIES:
+        if name in deleted_names:
+            continue
         conn.execute(
             "INSERT OR IGNORE INTO categories (name, subscription_url, is_global, created_at) "
             "VALUES (?, ?, 0, ?)",

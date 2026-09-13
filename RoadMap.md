@@ -10440,3 +10440,89 @@ monkeypatching the vendor lookup for a deterministic assertion rather
 than depending on the real bundled OUI dataset containing any specific
 prefix forever). Full suite: 1395 passed, 35 skipped. Not yet deployed
 to production -- pending the next deploy window.
+
+## Four more real bugs, reported by the owner in one message after using the dashboard for a while
+
+**1. A deleted starter category (e.g. "Weapons") silently came back.**
+Root cause: `defaults/seed_defaults.py`'s `seed()` runs on every `proxy`
+container start/restart (confirmed live -- `proxy/entrypoint.sh` calls
+it unconditionally), and its `INSERT OR IGNORE INTO categories` only
+skips a name that's CURRENTLY present -- it has no way to tell "never
+created yet" apart from "an admin deleted this on purpose," so any of
+the 10 `DEFAULT_CATEGORIES` an admin removes comes back on the very
+next restart, not just Weapons. Fixed with a tombstone: `common/db.py`
+gained `add_deleted_category_name()`/`get_deleted_category_names()`
+(one JSON list under a single `settings` key, same convention as the
+AdGuard-baseline card), called from `dashboard.py`'s
+`delete_category()`/`bulk_delete_categories()`, and checked by `seed()`
+before each insert. Deliberately records EVERY deleted category's name,
+not just starter ones -- harmless for a name `seed()` never looks for,
+and avoids dashboard.py needing to import `defaults/` at all (it isn't
+even copied into that Docker image). An admin can still bring a
+deleted starter back at any time via the normal "Add category" form
+under the same name -- that path was never gated by this tombstone,
+since it's an explicit admin add, not the automatic reseed.
+
+**2. The "Assign to" combobox required already knowing an exact
+name.** Past `SHOW_ALL_THRESHOLD` (8) combined users+groups, the
+combobox rendered nothing at all until you typed -- fine for searching
+hundreds of domains, but for a household's own users/groups (rarely
+more than a couple dozen) it meant blind typing with no way to browse.
+Now shows a capped alphabetical preview (same `MAX_RESULTS` cap a real
+search gets, so rendering cost is bounded either way) with a "Showing 8
+of N -- type to search" hint, instead of an empty dropdown. Verified
+live: seeded a household past the threshold (4 users + 4 groups + the
+2 pseudo-entries), confirmed the preview renders 8 real, clickable
+options plus the hint, not nothing.
+
+**3. Sorting "Devices awaiting login," then taking a row action
+(Bypass/Dismiss/etc), lost the sort.** Root cause: the sortable-table
+JS is a purely in-memory DOM reorder, and every row action is a plain
+form POST that reloads the whole page -- nothing remembered the sort
+across that reload. Fixed with localStorage, keyed by the table's own
+`id` (added `id="pendingDevicesTable"`, the main roster already had
+`id="devicesTable"`) and the clicked column's plain label text (stable
+across a reload, unlike a raw index that would break if columns are
+ever reordered): a click now saves `{label, kind, asc}`, and a small
+restore pass runs once on page load, before anyone interacts, matching
+against each sortable table's current headers. A per-browser display
+preference, not real data, so client-side storage is the right home
+for it -- same reasoning the sidebar's own collapsed-group memory
+already uses. Verified live: sorted descending by MAC address, did a
+full page reload (simulating the redirect a real Bypass/Dismiss would
+trigger), confirmed the descending order and the ▼ indicator both
+survived automatically.
+
+**4. `38:c1:21:19:97:d1` showed on "Devices awaiting login" despite
+already having a real label and group assignment.** Confirmed against
+the actual production row before guessing at a fix: `group_id` set,
+`label='GAMING1-Laptop'`, `created_at: 2026-09-09` -- but
+`is_authenticated: 0`. This device was assigned two days BEFORE the
+2026-09-11 fix that makes `update_device()`/
+`_batch_assign_devices_to_group()` also set `is_authenticated=1` on
+assignment ("assigning a device IS the vouching act") -- that fix only
+applies going forward, and nothing ever backfilled devices assigned
+under the old behavior. Added a one-time-per-startup backfill to
+`common/db.py`'s `_migrate()`: `UPDATE devices SET is_authenticated=1
+WHERE is_authenticated=0 AND (user_id IS NOT NULL OR group_id IS NOT
+NULL)` -- safe to run forever, since no code path in this app assigns a
+user/group while leaving `is_authenticated=0`, so once every pre-fix
+row is caught up this becomes a permanent no-op. Confirmed it does NOT
+touch a genuinely unassigned PREAUTH device (the actual point of
+"pending") or clobber an already-correct row.
+
+**A fifth thing found along the way, not a real bug**: two of my own
+new JS comments/strings ("Devices awaiting login", "type to find
+another") happened to contain phrases three EXISTING, unrelated tests
+checked for as a substring of the ENTIRE page body -- since the
+sortable-table/combobox script is part of the shared base template
+rendered on every page, my own prose collided with assertions on
+completely different pages (a domain-access test, an ignored-group
+test). Reworded both; not a functional issue, just a reminder that
+this app's broad `assert b"..." not in resp.data` checks are fragile
+against any page-wide text, including inline script comments.
+
+5 new tests for the `is_authenticated` backfill
+(`tests/test_db_device_authentication_backfill.py`), 1 for the seed
+tombstone, 2 for the delete-route tombstone recording. Full suite: 1403
+passed, 35 skipped. Not yet deployed to production.

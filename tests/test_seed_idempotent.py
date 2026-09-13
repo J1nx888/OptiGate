@@ -33,6 +33,32 @@ def test_seed_is_idempotent_on_row_counts(conn):
     assert first["category_domains"] == len(AI_SITE_DOMAINS)
 
 
+def test_seed_does_not_resurrect_an_explicitly_deleted_default_category(conn):
+    """Real bug, RoadMap.md 2026-09-13: seed() runs on every proxy
+    container start/restart, and its own INSERT OR IGNORE can't tell
+    "never created yet" apart from "an admin deleted this on purpose" --
+    a deleted starter category (e.g. "Weapons") silently came back on
+    the very next restart. db.add_deleted_category_name() is
+    dashboard.py's own record of an explicit delete; seed() must skip
+    re-inserting any name recorded there."""
+    seed_defaults.seed(conn)
+    conn.commit()
+    before = conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"]
+    assert before == len(seed_defaults.DEFAULT_CATEGORIES)
+
+    weapons_id = conn.execute("SELECT id FROM categories WHERE name = 'Weapons'").fetchone()["id"]
+    conn.execute("DELETE FROM categories WHERE id = ?", (weapons_id,))
+    db.add_deleted_category_name(conn, "Weapons")
+    conn.commit()
+
+    seed_defaults.seed(conn)
+    conn.commit()
+
+    after = conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"]
+    assert after == before - 1, "a deliberately-deleted starter category must not be re-seeded"
+    assert conn.execute("SELECT id FROM categories WHERE name = 'Weapons'").fetchone() is None
+
+
 def test_default_categories_seeded_not_global(conn):
     """Seeding a category row alone blocks nothing -- is_global defaults to
     0 for every starter category, AI included, regardless of whether it has

@@ -6464,6 +6464,39 @@ def test_delete_category_removes_it(client, db_conn):
     assert db_conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone() is None
 
 
+def test_delete_category_records_a_tombstone_so_seeding_wont_resurrect_it(client, db_conn):
+    """RoadMap.md 2026-09-13: a deleted starter category (e.g. "Weapons")
+    used to silently come back on the next proxy container restart,
+    since defaults/seed_defaults.py's seed() had no way to tell "never
+    created" apart from "deleted on purpose". delete_category() must
+    record the name so seed() can skip it later (see
+    tests/test_seed_idempotent.py for the seed()-side assertion)."""
+    import db
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    client.post("/categories/delete", data={"category_id": category_id}, headers=_auth_header())
+    assert "Gambling" in db.get_deleted_category_names(db_conn)
+
+
+def test_bulk_delete_categories_records_a_tombstone_for_each(client, db_conn):
+    import db
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    client.post("/categories/add", data={"name": "Drugs"}, headers=_auth_header())
+    ids = [
+        r["id"] for r in db_conn.execute(
+            "SELECT id FROM categories WHERE name IN ('Gambling', 'Drugs')"
+        ).fetchall()
+    ]
+    client.post(
+        "/categories/bulk-delete",
+        data={"category_ids": [str(i) for i in ids]},
+        headers=_auth_header(),
+    )
+    deleted = db.get_deleted_category_names(db_conn)
+    assert "Gambling" in deleted
+    assert "Drugs" in deleted
+
+
 def test_category_detail_shows_added_domains(client, db_conn):
     client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
