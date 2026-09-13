@@ -4103,7 +4103,42 @@ def add_category():
         if "UNIQUE" in str(exc):
             return flash_redirect("categories", f"{name!r} already exists.", error=True)
         raise
-    return flash_redirect("categories", f"Added {name}.")
+    if not subscription_url:
+        return flash_redirect("categories", f"Added {name}.")
+    # Real UX gap, RoadMap.md 2026-09-14, project owner's explicit
+    # request: a newly-added subscription category used to sit empty
+    # (blocking nothing) until the admin separately clicked "Sync now"
+    # on its own page -- easy to miss, and not obvious that a freshly-
+    # added category needs a second manual step at all. Syncs
+    # synchronously right here, the exact same call sync_category_now()
+    # already makes and already tolerates taking a while for a large
+    # source (DEFAULT_TIMEOUT=20s) -- "Add" alone is now enough.
+    #
+    # Deliberately does NOT promise an automatic retry on failure/
+    # timeout: controller/main.py's own background category-fetch loop
+    # defaults to once every 24h AND only runs at all while the
+    # interception profile is up, which this household leaves off most
+    # of the time (RoadMap.md's standing interception-confirmation
+    # rule) -- there is no dependable "it'll just appear in a few
+    # minutes" to honestly promise here, so a failure says exactly
+    # that and points at the one thing that actually works on demand.
+    category = conn.execute("SELECT * FROM categories WHERE name = ?", (name,)).fetchone()
+    try:
+        count = category_fetch.fetch_and_sync_category(conn, category)
+    except category_fetch.CategoryFetchError as exc:
+        return flash_redirect(
+            "categories",
+            f"Added {name}, but the initial sync failed ({exc}) -- use \"Sync now\" on its own page to retry.",
+            error=True,
+        )
+    if count == 0:
+        return flash_redirect(
+            "categories",
+            f"Added {name}, but the initial sync found 0 recognizable domains -- this almost always means "
+            "the URL isn't a supported format. Use \"Sync now\" on its own page after fixing it.",
+            error=True,
+        )
+    return flash_redirect("categories", f"Added {name} and synced {count} domains.")
 
 
 @app.route("/categories/delete", methods=["POST"])

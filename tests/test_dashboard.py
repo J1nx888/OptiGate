@@ -5621,7 +5621,9 @@ def test_bulk_delete_categories_without_selection_shows_error(client, db_conn):
     assert db_conn.execute("SELECT COUNT(*) c FROM categories").fetchone()["c"] == 1
 
 
-def test_export_categories_csv_includes_every_category_and_key_fields(client, db_conn):
+def test_export_categories_csv_includes_every_category_and_key_fields(client, db_conn, monkeypatch):
+    import category_fetch
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
     client.post(
         "/categories/add", data={"name": "TestCat", "subscription_url": "https://example.invalid/list.txt"},
         headers=_auth_header(),
@@ -5866,6 +5868,12 @@ def test_schedules_page_shows_bulk_manage_access_toolbar(client, db_conn):
 def test_bulk_sync_categories_syncs_every_selected_subscribed_category(client, db_conn, monkeypatch):
     import category_fetch
 
+    # Mocked before either add(), not just before the later bulk-sync
+    # call: add_category() now syncs a subscribed category immediately
+    # (RoadMap.md 2026-09-14), so this must already be safe to call at
+    # add-time too, not just at the bulk-sync step this test is really
+    # about.
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 10)
     client.post(
         "/categories/add", data={"name": "Cat1", "subscription_url": "https://example.invalid/a.txt"},
         headers=_auth_header(),
@@ -5875,7 +5883,6 @@ def test_bulk_sync_categories_syncs_every_selected_subscribed_category(client, d
         headers=_auth_header(),
     )
     ids = [r["id"] for r in db_conn.execute("SELECT id FROM categories")]
-    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 10)
 
     resp = client.post(
         "/categories/bulk-sync", data={"category_ids": [str(i) for i in ids]}, headers=_auth_header()
@@ -5909,6 +5916,17 @@ def test_bulk_sync_categories_skips_manual_only_categories(client, db_conn, monk
 def test_bulk_sync_categories_reports_a_failure_without_aborting_the_rest(client, db_conn, monkeypatch):
     import category_fetch
 
+    def _fake(conn, category, timeout=None):
+        if category["name"] == "Broken":
+            raise category_fetch.CategoryFetchError("could not reach host")
+        return 5
+
+    # Mocked before either add(), not just before the later bulk-sync
+    # call: add_category() now syncs a subscribed category immediately
+    # (RoadMap.md 2026-09-14) -- "Broken" failing at add-time too is
+    # fine and expected, it doesn't stop the category from being
+    # created, which is all this test's own setup needs.
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", _fake)
     client.post(
         "/categories/add", data={"name": "Broken", "subscription_url": "https://example.invalid/broken.txt"},
         headers=_auth_header(),
@@ -5920,13 +5938,6 @@ def test_bulk_sync_categories_reports_a_failure_without_aborting_the_rest(client
     ids = {
         r["name"]: r["id"] for r in db_conn.execute("SELECT id, name FROM categories WHERE name IN ('Broken', 'Good')")
     }
-
-    def _fake(conn, category, timeout=None):
-        if category["name"] == "Broken":
-            raise category_fetch.CategoryFetchError("could not reach host")
-        return 5
-
-    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", _fake)
 
     resp = client.post(
         "/categories/bulk-sync",
@@ -6301,6 +6312,76 @@ def test_add_category_then_appears(client, db_conn):
     assert row["is_global"] == 0
 
 
+def test_add_category_with_a_subscription_url_syncs_immediately(client, db_conn, monkeypatch):
+    """RoadMap.md 2026-09-14, project owner's explicit request: a newly
+    added subscription category used to sit empty until a separate
+    manual "Sync now" click -- add_category() must fetch it right away
+    instead."""
+    import category_fetch
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 17)
+
+    resp = client.post(
+        "/categories/add",
+        data={"name": "Gambling", "subscription_url": "https://example.invalid/gambling.txt"},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert "synced+17+domains" in resp.headers["Location"]
+
+
+def test_add_category_reports_a_sync_failure_but_still_creates_the_category(client, db_conn, monkeypatch):
+    import category_fetch
+    monkeypatch.setattr(
+        category_fetch, "fetch_and_sync_category",
+        lambda conn, category, timeout=None: (_ for _ in ()).throw(category_fetch.CategoryFetchError("could not reach host")),
+    )
+
+    resp = client.post(
+        "/categories/add",
+        data={"name": "Gambling", "subscription_url": "https://example.invalid/gambling.txt"},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" in resp.headers["Location"]
+    assert "Sync+now" in resp.headers["Location"]
+    row = db_conn.execute("SELECT * FROM categories WHERE name = 'Gambling'").fetchone()
+    assert row is not None, "the category itself must still be created even when the initial sync fails"
+
+
+def test_add_category_reports_zero_synced_domains_as_a_likely_format_problem(client, db_conn, monkeypatch):
+    import category_fetch
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
+
+    resp = client.post(
+        "/categories/add",
+        data={"name": "Gambling", "subscription_url": "https://example.invalid/not-a-blocklist"},
+        headers=_auth_header(),
+    )
+
+    assert resp.status_code == 302
+    assert "error=1" in resp.headers["Location"]
+    row = db_conn.execute("SELECT * FROM categories WHERE name = 'Gambling'").fetchone()
+    assert row is not None
+
+
+def test_add_category_without_a_url_does_not_attempt_a_sync(client, db_conn, monkeypatch):
+    import category_fetch
+    called = []
+    monkeypatch.setattr(
+        category_fetch, "fetch_and_sync_category",
+        lambda conn, category, timeout=None: called.append(1) or 0,
+    )
+
+    resp = client.post("/categories/add", data={"name": "Manual"}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    assert not called
+
+
 def test_categories_page_shows_the_catalog_picker_with_bundled_entries(client, db_conn):
     """common/db.py's _migrate() seeds category_catalog from the bundled
     v2fly snapshot on first init -- the picker should show a well-known
@@ -6438,7 +6519,9 @@ def test_add_category_rejects_a_private_subscription_url(client, db_conn, bad_ur
     assert db_conn.execute("SELECT * FROM categories WHERE name = 'Evil'").fetchone() is None
 
 
-def test_add_category_accepts_a_normal_public_subscription_url(client, db_conn):
+def test_add_category_accepts_a_normal_public_subscription_url(client, db_conn, monkeypatch):
+    import category_fetch
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
     resp = client.post(
         "/categories/add",
         data={"name": "Gambling", "subscription_url": "raw.githubusercontent.com/example/list.txt"},
@@ -6878,7 +6961,9 @@ def test_update_category_subscription_sets_url_on_a_manual_only_category(client,
     assert row["subscription_url"] == "https://blocklistproject.github.io/Lists/adguard/gambling-ags.txt"
 
 
-def test_update_category_subscription_changes_an_existing_url_and_drops_old_synced_domains(client, db_conn):
+def test_update_category_subscription_changes_an_existing_url_and_drops_old_synced_domains(client, db_conn, monkeypatch):
+    import category_fetch
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
     client.post(
         "/categories/add",
         data={"name": "Gambling", "subscription_url": "https://example.invalid/old.txt"},
@@ -6907,7 +6992,9 @@ def test_update_category_subscription_changes_an_existing_url_and_drops_old_sync
     assert remaining == {r"kept\.example\.com"}  # old subscription row gone, manual row untouched
 
 
-def test_update_category_subscription_can_clear_it_to_manual_only(client, db_conn):
+def test_update_category_subscription_can_clear_it_to_manual_only(client, db_conn, monkeypatch):
+    import category_fetch
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
     client.post(
         "/categories/add",
         data={"name": "Gambling", "subscription_url": "https://example.invalid/list.txt"},
@@ -6937,7 +7024,9 @@ def test_update_category_subscription_rejects_an_invalid_url(client, db_conn):
     assert row["subscription_url"] is None
 
 
-def test_update_category_subscription_no_change_is_a_no_op(client, db_conn):
+def test_update_category_subscription_no_change_is_a_no_op(client, db_conn, monkeypatch):
+    import category_fetch
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
     client.post(
         "/categories/add",
         data={"name": "Gambling", "subscription_url": "https://example.invalid/list.txt"},
@@ -6977,6 +7066,15 @@ def test_category_detail_always_shows_subscription_card(client, db_conn):
 def test_sync_category_now_reports_failure_cleanly(client, db_conn, monkeypatch):
     import category_fetch
 
+    def _boom(conn, category, timeout=None):
+        raise category_fetch.CategoryFetchError("could not reach host")
+
+    # Mocked before add(), not just before the later explicit "Sync now"
+    # call this test is really about: add_category() now syncs a
+    # subscribed category immediately (RoadMap.md 2026-09-14), and a
+    # failure there must not prevent the category itself from being
+    # created (it isn't -- see add_category()'s own error handling).
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", _boom)
     client.post(
         "/categories/add",
         data={"name": "Gambling", "subscription_url": "https://example.invalid/gambling.txt"},
@@ -6984,10 +7082,6 @@ def test_sync_category_now_reports_failure_cleanly(client, db_conn, monkeypatch)
     )
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
 
-    def _boom(conn, category, timeout=None):
-        raise category_fetch.CategoryFetchError("could not reach host")
-
-    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", _boom)
     resp = client.post(f"/categories/{category_id}/sync", headers=_auth_header())
     assert resp.status_code == 302
     assert "error=1" in resp.headers["Location"]
@@ -7000,13 +7094,13 @@ def test_sync_category_now_flags_zero_domains_as_likely_wrong_format(client, db_
     # an unhelpful "Synced 0 domains." with nothing explaining why.
     import category_fetch
 
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
     client.post(
         "/categories/add",
         data={"name": "AI", "subscription_url": "https://example.invalid/not-a-blocklist"},
         headers=_auth_header(),
     )
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'AI'").fetchone()["id"]
-    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
 
     resp = client.post(f"/categories/{category_id}/sync", headers=_auth_header())
     assert resp.status_code == 302
@@ -7017,12 +7111,12 @@ def test_sync_category_now_flags_zero_domains_as_likely_wrong_format(client, db_
 def test_sync_category_now_normal_nonzero_result_is_not_flagged_as_an_error(client, db_conn, monkeypatch):
     import category_fetch
 
+    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 42)
     client.post(
         "/categories/add", data={"name": "Gambling", "subscription_url": "https://example.invalid/real.txt"},
         headers=_auth_header(),
     )
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
-    monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 42)
 
     resp = client.post(f"/categories/{category_id}/sync", headers=_auth_header())
     assert "error=1" not in resp.headers["Location"]

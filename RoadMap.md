@@ -10525,4 +10525,58 @@ against any page-wide text, including inline script comments.
 5 new tests for the `is_authenticated` backfill
 (`tests/test_db_device_authentication_backfill.py`), 1 for the seed
 tombstone, 2 for the delete-route tombstone recording. Full suite: 1403
-passed, 35 skipped. Not yet deployed to production.
+passed, 35 skipped.
+
+**Deployed and verified same day**: `dashboard`/`proxy` rebuilt from
+`6bce61e`. Confirmed live against the real production data, not just
+assumed from a clean build: `38:c1:21:19:97:d1` now reads
+`is_authenticated: 1` (was stuck at `0` since 2026-09-09); the owner
+then deleted "Weapons" themselves and a follow-up check confirmed
+`get_deleted_category_names()` recorded it and the row stayed gone.
+
+## Adding a subscription category sat empty until a separate manual "Sync now" click -- fixed to sync immediately
+
+Owner's report: "when I add a category it always comes up as empty
+until I click the sync button, that seems silly." Confirmed:
+`add_category()` only ever inserted the `categories` row -- fetching
+its domains was ENTIRELY a separate, easy-to-miss manual step (the
+"Sync now" button on the category's own detail page, or waiting for
+`controller/main.py`'s background loop, which defaults to once every
+24 HOURS and only runs at all while the interception profile is up --
+which this household leaves off most of the time per the standing
+confirmation rule). A newly-added category enforced nothing until an
+admin took a second action nobody would think to look for.
+
+Considered the owner's own suggested fallback ("if that takes time,
+tell the admin it will appear in X timeframe") and rejected it as
+dishonest given the above: there is no dependable "it'll just appear
+in a few minutes" this app could actually promise, since the one
+automatic path is both rare (interception mostly off) and slow (24h).
+Fetching synchronously, right in the request, is both simpler and
+already a proven pattern -- the existing "Sync now" button
+(`sync_category_now()`) has always called
+`category_fetch.fetch_and_sync_category()` this same synchronous way,
+tolerating its `DEFAULT_TIMEOUT=20s` for even the largest sources
+without complaint. `add_category()` now makes that same call
+immediately after inserting the row (only when a `subscription_url`
+was given -- a manual-only category is unaffected), reusing the exact
+same failure handling `sync_category_now()` already has: a fetch
+failure or a 0-domains result still leaves the category created (never
+rolled back), just flagged with a message pointing at "Sync now" for a
+retry, since that really is the one thing that reliably works on
+demand here.
+
+**Found and fixed a real test-suite gap while wiring this up**: 10
+existing tests added a subscription category via `/categories/add`
+and only mocked `category_fetch.fetch_and_sync_category` AFTER that
+call, specifically because add-time never used to touch it -- every
+one of them would have hit this test session's real-network-blocking
+guard (a bare `RuntimeError`, not a `URLError`/`HTTPError`/
+`TimeoutError`, so `category_fetch._fetch()`'s own exception handling
+doesn't catch it) and failed with an uncaught 500 the moment `/add`
+started syncing for real. Reordered each to mock before the add call.
+
+4 new tests for `add_category()`'s own sync-now-immediately behavior
+(success, failure-still-creates-the-category, zero-domains, and
+no-URL-means-no-sync-attempt). Full suite: 1407 passed, 35 skipped.
+Not yet deployed to production.
