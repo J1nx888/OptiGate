@@ -364,6 +364,22 @@ td.nowrap { white-space: nowrap; }
 }
 .cell-truncate-sm { max-width: 22ch; }
 
+/* An actions cell packs several buttons/one-button forms into the last
+   column of a wide, many-column table (Devices, Devices awaiting login).
+   `table-layout: auto` treats a `width:100%` table's specified width as a
+   TARGET, not a hard cap, EXCEPT each column still never shrinks below
+   its own minimum content width -- and since every button here is
+   `display:inline-block` with no width of its own, the browser is free to
+   squeeze this column far narrower than its buttons actually need,
+   leaving no room for the .table-scroll wrapper's overflow-x:auto to ever
+   engage (real bug, RoadMap.md 2026-09-13: the last 2-3 buttons rendered
+   clipped to a couple of characters, illegible, no way to reach them).
+   Flex + wrap fixes it at the source: each button/form becomes one
+   flex item that can never be squeezed narrower than its own text, so a
+   too-narrow column wraps them onto additional lines as whole, fully
+   readable buttons instead of letting any single one get cut off. */
+.actions-cell { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+
 /* ---- Forms ---- */
 form.inline { display: inline; }
 .add-form {

@@ -10376,3 +10376,67 @@ interception up, which still needs the owner's explicit go-ahead per
 the standing rule. Two open product decisions (schedule-gated
 categories' default-open posture, and the block-page SNI-only logging
 gap) remain undecided, no code attached.
+
+## Two real Devices-page bugs, reported by the owner right after seeing the new NIC card: a table-layout clip and two missing columns
+
+**Bug 1 -- the "Devices awaiting login" card's action buttons were
+rendering illegibly clipped**, screenshotted by the owner: `Manage`/
+`Bypass`/`Ignore`/`Dismiss` each showed only their first couple of
+characters, with no way to reach the rest. Root cause: that last
+column packs several `display:inline-block` buttons with no width of
+their own, and `table-layout: auto` on a `width:100%` table only
+guarantees each column its OWN minimum content width -- for inline text
+with no forced break, that minimum is roughly "however narrow the
+browser can make it," not "wide enough to show every button." With
+9-10 other columns (a monospace MAC, a full manufacturer name, ISO
+timestamps) competing for the same fixed-width row, the actions column
+got squeezed far narrower than its buttons actually needed, and
+`.table-scroll`'s own `overflow-x:auto` never engaged because the
+table dutifully stayed within its specified 100% width instead of
+overflowing it.
+
+**Fixed** with a reusable `.actions-cell` class (`display:flex;
+flex-wrap:wrap`) wrapping each action column's buttons/forms: every
+button becomes a flex item that can never be squeezed narrower than
+its own text, so a too-narrow column now wraps the WHOLE group onto
+additional lines as complete, readable buttons instead of letting any
+single one clip. Applied to both the pending-devices card's actions
+column and the main roster's (which has up to 6 buttons per row,
+Manage/Domains/Bypass/Ignore/Pause-or-Resume/Delete -- the same bug,
+just not yet reported there).
+
+**Verified visually, not just by reading the CSS**: ran the dashboard
+locally (`dashboard/dev_server.py`, this project's existing dev-preview
+launcher) against a real MAC prefix from the owner's own screenshot
+(`04:f4:d8:e8:42:e0` -> "Hui Zhou Gaoshengda Technology Co.,LTD" from
+the real bundled OUI dataset, not a fake one), forced it into a pending
+state, and confirmed via direct DOM measurement
+(`getBoundingClientRect()`/`scrollWidth` on every button in every
+`.actions-cell` on the page) that nothing clips: every button's
+rendered width is >= its own text's natural width. A screenshot of the
+pending card confirmed the same thing visually -- four full-width
+stacked buttons, no cut-off text. (Process note: the first dev-server
+launch attempt silently ran from the wrong working directory --
+`C:\Users\jonat\ClaudCode` instead of the repo root -- and never
+actually started; caught by checking `preview_list`'s cwd/status
+rather than trusting that a response on the port meant the right code
+was serving it.)
+
+**Bug 2 -- the main Devices roster never showed Manufacturer or
+Hostname at all**, only the pending-devices card above it did, despite
+`_DEVICE_LIST_SELECT` (shared by both queries) already returning
+`current_hostname` on every row regardless of which one used it, and
+`oui_lookup.vendor_for_mac()` being a pure MAC-address function with no
+per-query restriction. Added both columns to the main table (same
+position as the pending card, right after MAC address), and a
+`device_manufacturers` dict in the `devices()` route built the same
+way `pending_manufacturers` already was, just scoped to the current
+page's rows instead of the full pending set. Table now has 12 columns
+total (was 10) -- the empty-state row's `colspan` updated to match.
+
+One new dashboard test
+(`test_devices_roster_shows_manufacturer_and_hostname_columns`,
+monkeypatching the vendor lookup for a deterministic assertion rather
+than depending on the real bundled OUI dataset containing any specific
+prefix forever). Full suite: 1395 passed, 35 skipped. Not yet deployed
+to production -- pending the next deploy window.

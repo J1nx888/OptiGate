@@ -3831,6 +3831,33 @@ def test_devices_roster_shows_the_current_ip_column(client, db_conn):
     assert "192.168.1.123" in body
 
 
+def test_devices_roster_shows_manufacturer_and_hostname_columns(client, db_conn, monkeypatch):
+    """2026-09-13, project owner's explicit request: the main roster only
+    ever showed Manufacturer/Hostname on the "Devices awaiting login" card
+    above it, even though _DEVICE_LIST_SELECT already returns
+    current_hostname on every row regardless of which query uses it, and
+    oui_lookup.vendor_for_mac() is a pure MAC-address lookup with no
+    per-table restriction. Monkeypatches the lookup (rather than depending
+    on the real bundled OUI dataset containing any specific prefix
+    forever) for a deterministic assertion."""
+    import dashboard
+    monkeypatch.setattr(dashboard.oui_lookup, "vendor_for_mac", lambda mac: "Acme Widget Co.")
+    client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:73"}, headers=_auth_header())
+    db_conn.execute(
+        "INSERT INTO device_bindings (device_id, mac_address, ipv4_address, hostname, "
+        "first_seen_at, last_seen_at, source, active) "
+        "SELECT id, mac_address, '192.168.1.124', 'kids-tablet', "
+        "'2026-09-13T12:00:00Z', '2026-09-13T12:00:00Z', 'snapshot', 1 "
+        "FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:73'"
+    )
+    db_conn.commit()
+    body = client.get("/devices", headers=_auth_header()).data.decode()
+    assert "Manufacturer" in body
+    assert "Hostname" in body
+    assert "Acme Widget Co." in body
+    assert "kids-tablet" in body
+
+
 def test_devices_search_matches_on_ip(client, db_conn):
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:71"}, headers=_auth_header())
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:72"}, headers=_auth_header())

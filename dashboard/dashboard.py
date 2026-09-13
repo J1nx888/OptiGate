@@ -3324,6 +3324,7 @@ DEVICES_BODY = """
       {% endif %}
     </td>
     <td>
+      <div class="actions-cell">
       <a class="btn small" href="{{ url_for('device_detail', device_id=d.id) }}">Manage</a>
       <form class="inline" method="post" action="{{ url_for('bypass_login_device') }}">
         <input type="hidden" name="device_id" value="{{ d.id }}">
@@ -3339,6 +3340,7 @@ DEVICES_BODY = """
         <input type="hidden" name="device_id" value="{{ d.id }}">
         <button class="btn small" type="submit" title="Just hide this from the list until it's active again -- doesn't change anything about the device itself">Dismiss</button>
       </form>
+      </div>
     </td>
   </tr>
   {% endfor %}
@@ -3495,12 +3497,14 @@ DEVICES_BODY = """
 {% endif %}
 <div class="table-scroll">
 <table id="devicesTable" data-sortable>
-  <tr><th>{% if devices %}<input type="checkbox" id="deviceSelectAll" title="Select all">{% endif %}</th><th data-sort>MAC address</th><th data-sort="ip">Current IP</th><th data-sort>Label</th><th data-sort>Assigned to</th><th data-sort>Status</th><th data-sort>SSL-Bump</th><th data-sort>Bypass login</th><th data-sort="date">Last seen</th><th></th></tr>
+  <tr><th>{% if devices %}<input type="checkbox" id="deviceSelectAll" title="Select all">{% endif %}</th><th data-sort>MAC address</th><th data-sort>Manufacturer</th><th data-sort>Hostname</th><th data-sort="ip">Current IP</th><th data-sort>Label</th><th data-sort>Assigned to</th><th data-sort>Status</th><th data-sort>SSL-Bump</th><th data-sort>Bypass login</th><th data-sort="date">Last seen</th><th></th></tr>
   {% for d in devices %}
   {% set effective_ignored = d.ignored or d.group_ignored %}
   <tr>
     <td><input type="checkbox" class="bulk-device-check" value="{{ d.id }}"></td>
     <td><code>{{ d.mac_address }}</code></td>
+    <td>{{ device_manufacturers.get(d.mac_address) or '&mdash;' }}</td>
+    <td>{{ d.current_hostname or '&mdash;' }}</td>
     <td>{{ d.current_ip or '&mdash;' }}</td>
     <td>{{ d.label or '' }}</td>
     <td>
@@ -3519,6 +3523,7 @@ DEVICES_BODY = """
     <td>{% if d.bypass_login %}<span class="badge pending">yes</span>{% else %}&mdash;{% endif %}</td>
     <td>{{ d.network_last_seen or 'Never' }}</td>
     <td>
+      <div class="actions-cell">
       <a class="btn small" href="{{ url_for('device_detail', device_id=d.id) }}">Manage</a>
       <a class="btn small" href="{{ url_for('domains', device_id=d.id) }}">Domains</a>
       {% if d.pending %}
@@ -3558,10 +3563,11 @@ DEVICES_BODY = """
         <input type="hidden" name="device_id" value="{{ d.id }}">
         <button class="danger small" type="submit" onclick="return confirm('Remove this device?')">Delete</button>
       </form>
+      </div>
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="10"><em>{% if search %}No devices match &ldquo;{{ search }}&rdquo;.{% else %}No devices tracked yet.{% endif %}</em></td></tr>
+  <tr><td colspan="12"><em>{% if search %}No devices match &ldquo;{{ search }}&rdquo;.{% else %}No devices tracked yet.{% endif %}</em></td></tr>
   {% endfor %}
 </table>
 </div>
@@ -5718,6 +5724,17 @@ def devices():
         row["mac_address"]: oui_lookup.vendor_for_mac(row["mac_address"])
         for row in pending_devices
     }
+    # Same lookup, for the main paginated roster below the pending-devices
+    # card (2026-09-13, project owner's explicit request: Manufacturer and
+    # Hostname were only ever shown on the pending card, not here, despite
+    # _DEVICE_LIST_SELECT already returning current_hostname on every row
+    # regardless of which query used it). Bounded to just this page's rows
+    # (per_page, not the whole roster), same as pending_manufacturers is
+    # bounded to however many devices are actually pending.
+    device_manufacturers = {
+        row["mac_address"]: oui_lookup.vendor_for_mac(row["mac_address"])
+        for row in rows
+    }
     any_devices_exist = bool(conn.execute("SELECT EXISTS(SELECT 1 FROM devices) AS c").fetchone()["c"])
     search_query_args = {"q": search} if search else {}
     return render(
@@ -5727,6 +5744,7 @@ def devices():
             assignment_combo=_assignment_combo(all_users, all_groups), current="",
             pending_login_attempts=pending_login_attempts,
             pending_manufacturers=pending_manufacturers,
+            device_manufacturers=device_manufacturers,
             device_count=device_count, page=page, per_page=per_page, total_pages=total_pages,
             page_size_options=LIST_PAGE_SIZE_OPTIONS,
             range_start=0 if device_count == 0 else (page - 1) * per_page + 1,
