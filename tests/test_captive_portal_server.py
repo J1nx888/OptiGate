@@ -65,8 +65,19 @@ def _get(server, path="/", host_header="captive.apple.com", method="GET"):
         http_conn.close()
 
 
-def _post(server, username, password):
-    body = urlencode({"username": username, "password": password})
+def _post(server, username, password, label="My Device"):
+    """`label="My Device"` by default (2026-09-14, RoadMap.md: every
+    device-claiming action now requires a name up front) so every
+    existing call site below that doesn't care about the label
+    requirement itself keeps working unmodified. Pass `label=None` to
+    omit the field entirely (an old client / a bare resubmit), or
+    `label=""` to submit it present-but-blank -- both distinct from the
+    default, and both exercised by this file's own label-requirement
+    tests."""
+    fields = {"username": username, "password": password}
+    if label is not None:
+        fields["label"] = label
+    body = urlencode(fields)
     http_conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
     try:
         http_conn.request(
@@ -99,10 +110,14 @@ def _add_group(conn, name):
     return conn.execute("SELECT id FROM groups WHERE name = ?", (name,)).fetchone()["id"]
 
 
-def _post_admin(server, admin_username, admin_password, action, group_id=None):
+def _post_admin(server, admin_username, admin_password, action, group_id=None, label="My Device"):
+    """Same default-label convention as `_post()` above -- see its own
+    docstring."""
     fields = {"admin_username": admin_username, "admin_password": admin_password, "action": action}
     if group_id is not None:
         fields["group_id"] = group_id
+    if label is not None:
+        fields["label"] = label
     body = urlencode(fields)
     http_conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
     try:
@@ -187,6 +202,86 @@ def test_login_matches_username_case_insensitively(server, conn):
     assert "signed in" in body.lower()
     row = conn.execute("SELECT user_id FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
     assert row["user_id"] == user_id
+
+
+def test_successful_login_stores_the_submitted_device_name(server, conn):
+    """2026-09-14, RoadMap.md, project owner's explicit request: every
+    device-claiming action on this portal now also captures a name for
+    the device, since before this a device that arrived here only ever
+    had a bare MAC address to show for itself on the Devices page."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _add_user(conn, "kid1", "correcthorse")
+
+    status, body = _post(server, "kid1", "correcthorse", label="Alex's Phone")
+
+    assert status == 200
+    assert "signed in" in body.lower()
+    row = conn.execute("SELECT label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["label"] == "Alex's Phone"
+
+
+def test_login_refuses_to_authenticate_a_nameless_device_with_no_label_submitted(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _add_user(conn, "kid1", "correcthorse")
+
+    status, body = _post(server, "kid1", "correcthorse", label=None)
+
+    assert status == 200
+    assert "signed in" not in body.lower()
+    assert "give this device a name" in body.lower()
+    row = conn.execute("SELECT is_authenticated, label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["is_authenticated"] == 0
+    assert row["label"] is None
+
+
+def test_login_refuses_to_authenticate_a_nameless_device_with_a_blank_label(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _add_user(conn, "kid1", "correcthorse")
+
+    status, body = _post(server, "kid1", "correcthorse", label="   ")
+
+    assert "give this device a name" in body.lower()
+    row = conn.execute("SELECT is_authenticated FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["is_authenticated"] == 0
+
+
+def test_login_does_not_ask_for_a_name_when_the_device_already_has_one(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    conn.execute("UPDATE devices SET label = 'Existing Name' WHERE mac_address = ?", (MAC_A,))
+    conn.commit()
+    _add_user(conn, "kid1", "correcthorse")
+
+    status, body = _post(server, "kid1", "correcthorse", label=None)
+
+    assert status == 200
+    assert "signed in" in body.lower()
+
+
+def test_login_does_not_overwrite_an_existing_device_name(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    conn.execute("UPDATE devices SET label = 'Existing Name' WHERE mac_address = ?", (MAC_A,))
+    conn.commit()
+    _add_user(conn, "kid1", "correcthorse")
+
+    _post(server, "kid1", "correcthorse", label="Different Name")
+
+    row = conn.execute("SELECT label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["label"] == "Existing Name"
+
+
+def test_missing_device_name_does_not_spend_the_rate_limit_budget(server, conn):
+    """Same reasoning as the blank-form-submission case (RoadMap.md,
+    2026-09-10): a submission that can never succeed as-is shouldn't
+    burn the shared attempts budget a real guessing attempt is metered
+    against."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _add_user(conn, "kid1", "correcthorse")
+
+    for _ in range(captive_portal_server._MAX_ATTEMPTS + 2):
+        _post(server, "kid1", "correcthorse", label=None)
+
+    status, body = _post(server, "kid1", "correcthorse", label="Alex's Phone")
+    assert "signed in" in body.lower()
 
 
 def test_success_page_has_no_bump_reminder_for_a_kid_with_no_other_devices(server, conn):
@@ -490,6 +585,31 @@ def test_login_page_shows_the_admin_section(server):
     assert 'action="/admin"' in body
 
 
+def test_login_page_has_no_device_name_field_when_no_device_is_identified(server):
+    """No `identity.record_binding()` call here -- matches
+    `test_login_from_an_ip_with_no_active_binding_fails_gracefully`'s own
+    setup, the same "not the common case, but must fail closed rather
+    than assume" situation `resolve_device()` documents."""
+    _, body, _ = _get(server)
+    assert 'name="label"' not in body
+
+
+def test_login_page_shows_a_device_name_field_for_an_unnamed_device(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _, body, _ = _get(server)
+    assert 'name="label"' in body
+
+
+def test_login_page_has_no_device_name_field_for_an_already_named_device(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    conn.execute("UPDATE devices SET label = 'Existing Name' WHERE mac_address = ?", (MAC_A,))
+    conn.commit()
+
+    _, body, _ = _get(server)
+
+    assert 'name="label"' not in body
+
+
 def test_login_page_has_no_group_dropdown_when_no_groups_exist(server):
     _, body, _ = _get(server)
     assert "assign_group" not in body
@@ -521,6 +641,43 @@ def test_admin_bypass_sets_bypass_login_and_lands_the_device_in_authenticated(se
     assert classify_device(full_row) == PolicyClass.AUTHENTICATED
 
 
+def test_admin_bypass_stores_the_submitted_device_name(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+
+    _post_admin(server, "admin", "adminpw", "bypass", label="Kitchen Echo")
+
+    row = conn.execute("SELECT label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["label"] == "Kitchen Echo"
+
+
+def test_admin_bypass_refuses_a_nameless_device_with_no_label_submitted(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+
+    status, body = _post_admin(server, "admin", "adminpw", "bypass", label=None)
+
+    assert status == 200
+    assert "give this device a name" in body.lower()
+    row = conn.execute("SELECT bypass_login, label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["bypass_login"] == 0
+    assert row["label"] is None
+
+
+def test_admin_bypass_does_not_ask_for_a_name_when_the_device_already_has_one(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    conn.execute("UPDATE devices SET label = 'Existing Name' WHERE mac_address = ?", (MAC_A,))
+    conn.commit()
+    _set_admin_credentials(conn)
+
+    status, body = _post_admin(server, "admin", "adminpw", "bypass", label=None)
+
+    assert status == 200
+    assert "no longer needs to log in" in body
+    row = conn.execute("SELECT label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["label"] == "Existing Name"
+
+
 def test_admin_ignore_sets_ignored_and_excludes_the_device_from_filtering(server, conn):
     """RoadMap.md item 22: bypass alone isn't enough for a device
     running its own DNS-hijack-detecting security software -- it needs
@@ -536,6 +693,32 @@ def test_admin_ignore_sets_ignored_and_excludes_the_device_from_filtering(server
     assert "excluded from filtering" in body
     row = conn.execute("SELECT ignored FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
     assert row["ignored"] == 1
+
+
+def test_admin_ignore_stores_the_submitted_device_name(server, conn):
+    """The docstring's own motivating example -- a work laptop running
+    Cisco Umbrella/OpenDNS -- is exactly the kind of device an admin
+    wants to recognize by name later, not just by MAC, so this requires
+    (and stores) a name the same as bypass/assign_group."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+
+    _post_admin(server, "admin", "adminpw", "ignore", label="Dad's Work Laptop")
+
+    row = conn.execute("SELECT label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["label"] == "Dad's Work Laptop"
+
+
+def test_admin_ignore_refuses_a_nameless_device_with_no_label_submitted(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+
+    status, body = _post_admin(server, "admin", "adminpw", "ignore", label=None)
+
+    assert status == 200
+    assert "give this device a name" in body.lower()
+    row = conn.execute("SELECT ignored FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["ignored"] == 0
 
 
 def test_admin_ignore_clears_a_prior_user_assignment(server, conn):
@@ -601,6 +784,30 @@ def test_admin_assign_group_sets_group_and_authenticates_the_device(server, conn
     assert row["group_id"] == group_id
     assert row["user_id"] is None
     assert row["is_authenticated"] == 1
+
+
+def test_admin_assign_group_stores_the_submitted_device_name(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+    group_id = _add_group(conn, "IoT")
+
+    _post_admin(server, "admin", "adminpw", "assign_group", group_id=group_id, label="Living Room Roku")
+
+    row = conn.execute("SELECT label FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["label"] == "Living Room Roku"
+
+
+def test_admin_assign_group_refuses_a_nameless_device_with_no_label_submitted(server, conn):
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    _set_admin_credentials(conn)
+    group_id = _add_group(conn, "IoT")
+
+    status, body = _post_admin(server, "admin", "adminpw", "assign_group", group_id=group_id, label=None)
+
+    assert status == 200
+    assert "give this device a name" in body.lower()
+    row = conn.execute("SELECT group_id FROM devices WHERE mac_address = ?", (MAC_A,)).fetchone()
+    assert row["group_id"] is None
 
 
 def test_admin_assign_group_clears_a_prior_user_assignment(server, conn):

@@ -78,6 +78,19 @@ group**. Shares this module's own per-IP rate limiter with the kid
 login form above -- a wrong admin-password guess counts against the
 same budget, which is the more conservative choice given this surface
 grants strictly more than the kid login ever does.
+
+**Device name required, added 2026-09-14**: project owner's explicit
+request -- every device-claiming action here (the kid-login form, and
+Bypass/Ignore/Assign-to-group in the admin section) now requires a
+device name before it succeeds, whenever the device doesn't already
+have one. Before this, a device that arrived on this portal only ever
+had a bare MAC address to show for itself on the dashboard's Devices
+page, until an admin happened to notice and rename it by hand
+afterward -- sometimes never. Asked exactly once per device: skipped
+entirely once a name exists, whether set here or directly on the
+Devices page (`_handle_login()`'s and `_handle_admin_action()`'s own
+`needs_label` checks), and `label = COALESCE(label, ?)` on every
+resulting UPDATE makes writing it back a safe no-op either way.
 """
 from __future__ import annotations
 
@@ -189,6 +202,7 @@ stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l8 3.5v5.2c0 4.7-3.
 <form method="post" action="/">
   <input type="text" name="username" placeholder="Username" autocapitalize="none" autocorrect="off" required>
   <input type="password" name="password" placeholder="Password" required>
+{label_field}
   <button type="submit">Sign in</button>
 </form>
 <p>Not your login? Ask a parent to bypass or assign this device from the dashboard instead.</p>
@@ -198,12 +212,24 @@ stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l8 3.5v5.2c0 4.7-3.
   {admin_error}
   <input type="text" name="admin_username" placeholder="Admin username" autocapitalize="none" autocorrect="off" required>
   <input type="password" name="admin_password" placeholder="Admin password" required>
+{label_field}
   <button type="submit" name="action" value="bypass">Let this device online without logging in</button>
   <button type="submit" name="action" value="ignore">Ignore this device (exclude it from filtering entirely)</button>
 {group_row}
 </form>
 </details>
 </body></html>
+"""
+
+# Rendered in BOTH forms above (same {label_field} placeholder, filled
+# with the same value each time `_render()` is called) only when the
+# device this request resolves to doesn't already have one -- see
+# `_render()`'s own `needs_label` param and the module docstring's
+# "Device name required" section for why every device-claiming action
+# here (kid login, bypass, ignore, assign_group) asks for this exactly
+# once, not on every future visit.
+_LABEL_FIELD_TEMPLATE = """\
+  <input type="text" name="label" placeholder="Name this device (e.g. Alex's phone)" value="{value}" required>\
 """
 
 # Only rendered when at least one group already exists (dashboard
@@ -280,7 +306,8 @@ def _fetch_groups(conn: sqlite3.Connection) -> list:
 
 
 def _render(
-    username_error: str | None = None, admin_error: str | None = None, groups: list | None = None
+    username_error: str | None = None, admin_error: str | None = None, groups: list | None = None,
+    *, needs_label: bool = False, label_value: str = "",
 ) -> bytes:
     error_html = f'<p class="error">{html.escape(username_error)}</p>' if username_error else ""
     admin_error_html = f'<p class="error">{html.escape(admin_error)}</p>' if admin_error else ""
@@ -291,8 +318,17 @@ def _render(
         group_row = _GROUP_ROW_TEMPLATE.format(options=options)
     else:
         group_row = ""
+    # needs_label (2026-09-14, RoadMap.md, project owner's explicit
+    # request): only rendered at all when the device this request
+    # resolves to has no label yet -- once one exists (set here, or
+    # directly on the dashboard's Devices page), neither form asks
+    # again. label_value re-populates what was already typed across a
+    # validation error (a wrong password, a missing/nonexistent group)
+    # so a multi-field mistake doesn't cost retyping the device's name
+    # too.
+    label_field = _LABEL_FIELD_TEMPLATE.format(value=html.escape(label_value)) if needs_label else ""
     return _PAGE_TEMPLATE.format(
-        error=error_html, admin_error=admin_error_html, group_row=group_row
+        error=error_html, admin_error=admin_error_html, group_row=group_row, label_field=label_field,
     ).encode("utf-8")
 
 
@@ -325,13 +361,22 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
         # trigger every major OS's captive-portal-detected UI. Groups
         # DO need a real DB read (unlike the rest of this response,
         # which is static) so the admin section's dropdown reflects
-        # whatever groups actually exist right now.
+        # whatever groups actually exist right now -- same reason this
+        # also resolves the requesting device, purely to decide up front
+        # whether either form needs to ask for a name (see _render()'s
+        # own `needs_label` comment); a device that can't be resolved
+        # yet (not the common case here -- do_GET runs on every plain
+        # page load, not just a genuine login attempt) simply doesn't
+        # ask, same as any other "we couldn't identify this device yet"
+        # path in this module.
         conn = db.get_conn()
         try:
             groups = _fetch_groups(conn)
+            device = resolve_device(conn, self.client_address[0])
+            needs_label = device is not None and not (device["label"] or "").strip()
         finally:
             conn.close()
-        self._send_html(200, _render(groups=groups))
+        self._send_html(200, _render(groups=groups, needs_label=needs_label))
 
     def do_HEAD(self) -> None:  # noqa: N802
         self.send_response(200)
@@ -355,11 +400,12 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
                 # section's own form actually targets.
                 username = (fields.get("username") or [""])[0].strip()
                 password = (fields.get("password") or [""])[0]
-                self._handle_login(conn, username, password)
+                label = (fields.get("label") or [""])[0].strip()
+                self._handle_login(conn, username, password, label)
         finally:
             conn.close()
 
-    def _handle_login(self, conn: sqlite3.Connection, username: str, password: str) -> None:
+    def _handle_login(self, conn: sqlite3.Connection, username: str, password: str, label: str) -> None:
         client_ip = self.client_address[0]
         if _LOGIN_LIMITER.is_limited(client_ip):
             log.warning("rate-limited login attempt from %s", client_ip)
@@ -387,6 +433,19 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             )
             return
 
+        # 2026-09-14, RoadMap.md, project owner's explicit request: every
+        # device-claiming action on this portal (this login, and
+        # bypass/ignore/assign_group in _handle_admin_action below) now
+        # requires a device name up front if the device doesn't already
+        # have one -- previously a device that arrived here only ever had
+        # a bare MAC address to show for itself on the Devices page,
+        # until an admin happened to notice and name it by hand later
+        # (sometimes never). Computed once here (not re-checked after
+        # this point) so a device that already had a name from an
+        # earlier login, or set directly on the Devices page, is never
+        # asked again.
+        needs_label = not (device["label"] or "").strip()
+
         if not username or not password:
             # No real login has an empty username or password (the form
             # fields are `required`, so a human can't submit this) -- it's
@@ -398,7 +457,7 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             # spending the shared rate-limit budget on a submission that
             # can never succeed risks locking out the device's real
             # attempt right after.
-            self._send_html(200, _render(groups=_fetch_groups(conn)))
+            self._send_html(200, _render(groups=_fetch_groups(conn), needs_label=needs_label, label_value=label))
             return
 
         # Case-insensitive on purpose (RoadMap.md, project owner's live-testing
@@ -416,7 +475,28 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             _LOGIN_LIMITER.record_failure(client_ip)
             log.info("failed login for username=%r from device %s", username, device["mac_address"])
             _log_failed_login(conn, "captive_portal_login", client_ip, username, mac_address=device["mac_address"])
-            self._send_html(200, _render("Incorrect username or password.", groups=_fetch_groups(conn)))
+            self._send_html(
+                200,
+                _render(
+                    "Incorrect username or password.", groups=_fetch_groups(conn),
+                    needs_label=needs_label, label_value=label,
+                ),
+            )
+            return
+
+        if needs_label and not label:
+            # Credentials are correct -- the only thing stopping this
+            # login is the missing name. Doesn't touch the rate limiter
+            # (this isn't a credential guess) or write a system_events
+            # row (not a failure, just an incomplete submission -- same
+            # reasoning as the blank-submission branch above).
+            self._send_html(
+                200,
+                _render(
+                    "Please also give this device a name (e.g. \"Alex's phone\") so it's easy to find later.",
+                    groups=_fetch_groups(conn), needs_label=True, label_value=label,
+                ),
+            )
             return
 
         # Deliberately NOT clearing _LOGIN_LIMITER here (fixed 2026-09-02,
@@ -436,10 +516,16 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
         # Phase 4's design sketch exactly (RoadMap.md). COALESCE so a
         # device an admin already assigned to a different user (or a
         # group) keeps that assignment; this login only fills in
-        # user_id when nothing has claimed the device yet.
+        # user_id when nothing has claimed the device yet. The label
+        # COALESCE is the same idea: `label` is only ever a non-empty
+        # string here when needs_label was True (the form only submits
+        # it when rendered, and the check above already refused an empty
+        # one in that case) -- when the device already had a name, this
+        # is a no-op that leaves it exactly as it was.
         conn.execute(
-            "UPDATE devices SET is_authenticated = 1, user_id = COALESCE(user_id, ?) WHERE id = ?",
-            (user["id"], device["id"]),
+            "UPDATE devices SET is_authenticated = 1, user_id = COALESCE(user_id, ?), "
+            "label = COALESCE(label, ?) WHERE id = ?",
+            (user["id"], label or None, device["id"]),
         )
         conn.commit()
         log.info("device %s authenticated as %s", device["mac_address"], username)
@@ -472,6 +558,7 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
         admin_username = (fields.get("admin_username") or [""])[0].strip()
         admin_password = (fields.get("admin_password") or [""])[0]
         action = (fields.get("action") or [""])[0]
+        label = (fields.get("label") or [""])[0].strip()
 
         # Shares the kid-login form's own rate limiter above rather
         # than a separate budget -- see this module's own docstring for
@@ -518,11 +605,35 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             )
             return
 
+        # Same requirement, same reasoning, as _handle_login()'s own
+        # `needs_label` comment above -- applies uniformly to all three
+        # actions below (including "ignore": the docstring's own
+        # motivating example, a work laptop running its own DNS-hijack
+        # detection, is exactly the kind of device an admin wants to
+        # recognize by name later, not just by MAC). Checked once here,
+        # before dispatching on `action`, rather than duplicated in each
+        # branch below.
+        needs_label = not (device["label"] or "").strip()
+        if needs_label and not label:
+            self._send_html(
+                200,
+                _render(
+                    admin_error="Please also give this device a name (e.g. \"Kitchen Echo\") so it's easy to find later.",
+                    groups=_fetch_groups(conn), needs_label=True, label_value=label,
+                ),
+            )
+            return
+
         if action == "bypass":
             # Identical effect to dashboard.py's own
             # /devices/bypass_login -- only ever touches this one
-            # column, same reasoning as that route's own docstring.
-            conn.execute("UPDATE devices SET bypass_login = 1 WHERE id = ?", (device["id"],))
+            # column, same reasoning as that route's own docstring. The
+            # label COALESCE is the same no-op-if-already-named idea as
+            # _handle_login()'s own UPDATE.
+            conn.execute(
+                "UPDATE devices SET bypass_login = 1, label = COALESCE(label, ?) WHERE id = ?",
+                (label or None, device["id"]),
+            )
             conn.commit()
             log.info("device %s bypassed via portal admin action", device["mac_address"])
             self._send_html(200, _render_admin_success("This device no longer needs to log in."))
@@ -547,8 +658,9 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             # both), so this clears any prior assignment too rather than
             # leaving a stale one behind a now-ignored device.
             conn.execute(
-                "UPDATE devices SET ignored = 1, user_id = NULL, group_id = NULL WHERE id = ?",
-                (device["id"],),
+                "UPDATE devices SET ignored = 1, user_id = NULL, group_id = NULL, label = COALESCE(label, ?) "
+                "WHERE id = ?",
+                (label or None, device["id"]),
             )
             conn.commit()
             log.info("device %s ignored via portal admin action", device["mac_address"])
@@ -562,7 +674,7 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
                 self._send_html(
                     200,
                     _render(admin_error="That group no longer exists -- refresh and try again.",
-                            groups=_fetch_groups(conn)),
+                            groups=_fetch_groups(conn), needs_label=needs_label, label_value=label),
                 )
                 return
             # group_id/user_id are mutually exclusive (devices' own
@@ -576,8 +688,9 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             # authenticated, and governed by this group" than as a
             # bypass side effect.
             conn.execute(
-                "UPDATE devices SET group_id = ?, user_id = NULL, is_authenticated = 1 WHERE id = ?",
-                (group["id"], device["id"]),
+                "UPDATE devices SET group_id = ?, user_id = NULL, is_authenticated = 1, "
+                "label = COALESCE(label, ?) WHERE id = ?",
+                (group["id"], label or None, device["id"]),
             )
             conn.commit()
             log.info(
@@ -586,7 +699,13 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             self._send_html(200, _render_admin_success(f"Assigned to the {group['name']} group."))
             return
 
-        self._send_html(200, _render(admin_error="Unknown action.", groups=_fetch_groups(conn)))
+        self._send_html(
+            200,
+            _render(
+                admin_error="Unknown action.", groups=_fetch_groups(conn),
+                needs_label=needs_label, label_value=label,
+            ),
+        )
 
 
 def start(host: str = "0.0.0.0", port: int = 3131) -> ThreadingHTTPServer:

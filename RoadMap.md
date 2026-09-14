@@ -10688,4 +10688,61 @@ presence, migration-without-data-loss, migration idempotency, seed-time
 backfill onto a pre-existing row, single- and bulk-delete refusal,
 Domains-page/search/CSV exclusion, Crunchyroll-page listing and its
 missing delete action, domain_detail's hint/back-link). Full suite: 1425
-passed, 35 skipped. Not yet deployed to production.
+passed, 35 skipped.
+
+**Deployed and verified same day**: `dashboard`/`proxy` rebuilt from
+`cd706cc`. Confirmed directly against the real production database: all
+27 expected domains (24 `GLOBAL_SPLICE_DOMAINS` + 2 `TRUSTED_DOMAINS` +
+`crunchyroll.com`) backfilled to `protected = 1` on the first startup
+after the upgrade, with the 3 genuine admin-added domains still showing
+`protected = 0` (visible on the Domains page, as expected). No errors in
+either container's logs.
+
+## Captive portal now requires a device name for every claiming action
+
+Owner's request: when a device is added via the captive portal -- kid
+login, or an admin's Bypass/Ignore/Assign-to-group -- require a device
+name too. Before this, a device that arrived on the portal only ever had
+a bare MAC address to show for itself on the dashboard's Devices page;
+an admin had to separately notice it and rename it by hand later
+(sometimes never).
+
+`captive_portal_server.py`'s `_render()` grows a `needs_label` flag: a
+"Name this device" field now appears in both the kid-login form and the
+admin form, but ONLY when the device this request resolves to
+(`resolve_device()`, keyed by the requester's own IP) doesn't already
+have one -- `do_GET` now resolves the device up front purely to decide
+this. Once a device has a name (set here, or directly on the dashboard's
+Devices page), neither form asks again, on this or any future visit.
+
+Enforced server-side, not just via the HTML `required` attribute:
+`_handle_login()` checks `needs_label` right after credentials verify
+(so a wrong-password retry doesn't also nag about the missing name), and
+`_handle_admin_action()` checks it once, before dispatching to
+bypass/ignore/assign_group, since all three need the same thing.
+Neither check spends the shared rate-limit budget or writes a
+`system_events` row -- same "not a credential guess, don't treat it like
+one" reasoning the existing blank-form-submission path already
+established. Every resulting `UPDATE devices SET ...` sets
+`label = COALESCE(label, ?)` alongside whatever else it already
+touched, so writing back a name a device didn't need (or resubmitting a
+stale value from a race) is always a safe no-op.
+
+**Scope decision**: `ignore` requires a name too, not just
+login/bypass/assign_group -- the module's own motivating example for
+`ignore` (a work laptop running its own DNS-hijack-detecting security
+software) is exactly the kind of device an admin wants to recognize by
+name later, not just by MAC, so excluding it from the requirement would
+have left the one action most likely to need a follow-up rename
+completely uncovered.
+
+16 new tests across `tests/test_captive_portal_server.py`: the GET
+page's conditional field (shown for an unnamed device, hidden once one
+is already named, hidden when no device resolves at all), the label
+requirement and successful storage for each of login/bypass/ignore/
+assign_group, that an existing name is never asked for again or
+overwritten, and that a missing-name resubmission doesn't spend the
+rate-limit budget. `_post()`/`_post_admin()`'s own test helpers grew a
+`label="My Device"` default so none of the other ~40 existing call
+sites needed touching. Full suite: 1441 passed, 35 skipped. Not yet
+deployed to production.
