@@ -156,14 +156,10 @@ func TestApplyGeneration_LeavingTargetGetsCorrective(t *testing.T) {
 	w.Shutdown()
 }
 
-// TestApplyGeneration_ReportsSendFailuresViaOnSendError guards against
-// the real bug found 2026-08-30 during this project's first live-
-// container verification pass: a sender that fails on every call
-// (confirmed live to be exactly what a misconfigured raw-socket setup
-// looks like) used to fail completely silently -- the controller still
-// reported "generation applied," nothing anywhere logged that not one
-// ARP packet was actually reaching the wire. Config.OnSendError exists
-// specifically so a caller (cmd/pp-arp-worker/main.go) can surface this.
+// TestApplyGeneration_ReportsSendFailuresViaOnSendError confirms that
+// when every ARPSender.Reply() call fails, Config.OnSendError is
+// called rather than the failure being silently swallowed -- it's the
+// mechanism a caller (cmd/pp-arp-worker/main.go) uses to surface this.
 func TestApplyGeneration_ReportsSendFailuresViaOnSendError(t *testing.T) {
 	fs := &fakeSender{replyErr: errors.New("simulated: operation not permitted")}
 	selfMAC := mustMAC("02:00:00:00:00:01")
@@ -197,8 +193,7 @@ func TestApplyGeneration_ReportsSendFailuresViaOnSendError(t *testing.T) {
 }
 
 // TestApplyGeneration_NilOnSendErrorIsSafe guards the zero-value case --
-// every existing caller before this field existed gets Config{} with
-// OnSendError left nil, which must not panic on a send failure.
+// Config{} with OnSendError left nil must not panic on a send failure.
 func TestApplyGeneration_NilOnSendErrorIsSafe(t *testing.T) {
 	fs := &fakeSender{replyErr: errors.New("simulated failure")}
 	selfMAC := mustMAC("02:00:00:00:00:01")
@@ -215,13 +210,11 @@ func TestApplyGeneration_NilOnSendErrorIsSafe(t *testing.T) {
 	w.Shutdown() // must not panic
 }
 
-// TestConsecutiveSendFailures_IncrementsOnFailure guards the fix for
-// the health-visibility gap confirmed live 2026-08-31 (a NIC-down test
-// against a properly-isolated veth harness): a sustained run of send
-// failures was completely invisible to the controller -- only ever a
-// local log line via OnSendError, nothing the heartbeat_ack could ever
-// carry. This is what the controller now reads to escalate a sustained
-// failure into a real fail_open report.
+// TestConsecutiveSendFailures_IncrementsOnFailure confirms
+// ConsecutiveSendFailures increments when sends fail, since it's what
+// heartbeat_ack reports to let the controller detect a sustained run
+// of failures (otherwise invisible past a local log line via
+// OnSendError).
 func TestConsecutiveSendFailures_IncrementsOnFailure(t *testing.T) {
 	fs := &fakeSender{replyErr: errors.New("simulated: network is down")}
 	selfMAC := mustMAC("02:00:00:00:00:01")

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Phase 8 AI-category seed data: a manual (not subscription-fetched) domain
+"""AI-category seed data: a manual (not subscription-fetched) domain
 snapshot for the "AI" category, sourced from Microsoft Purview's own
 published list of generative-AI sites --
 https://learn.microsoft.com/en-us/purview/ai-microsoft-purview-supported-sites
-(fetched live 2026-09-01; Microsoft's own doc notes a ~180-day update cycle
-and "you can expect this list to increase over time").
+(Microsoft's own doc notes a ~180-day update cycle and "you can expect
+this list to increase over time").
 
 This is a ONE-TIME SNAPSHOT, not a live subscription like the Block List
 Project categories in defaults/seed_defaults.py -- Microsoft doesn't publish

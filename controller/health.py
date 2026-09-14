@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Milestone 6: the controller's own health reporting into
-interception_runtime -- specifically the mode/last_healthy_at/
-fail_open_reason columns tracking the controller<->ARP-worker pipeline,
-deliberately separate from phase3/nftables-manager's own nft_mode/
-nft_last_healthy_at/nft_fail_reason columns (see common/db.py's schema
-comment) so the two subsystems never clobber each other's status in
-the shared singleton row.
+"""The controller's own health reporting into interception_runtime --
+specifically the mode/last_healthy_at/fail_open_reason columns tracking
+the controller<->ARP-worker pipeline, deliberately separate from
+phase3/nftables-manager's own nft_mode/nft_last_healthy_at/
+nft_fail_reason columns so the two subsystems never clobber each
+other's status in the shared singleton row.
 """
 from __future__ import annotations
 
@@ -22,23 +21,17 @@ def _safe_write(conn: sqlite3.Connection, label: str, sql: str, params: tuple) -
     (via stdlib `logging`, which never touches the DB) anything it
     raises instead of letting it propagate.
 
-    **Real production incident, 2026-09-11**: every report_*() function
-    below used to execute+commit directly. On a real box with several
-    containers touching the shared SQLite DB at once, that write can
-    itself raise `sqlite3.OperationalError: database is locked` --
-    and since these functions are most often called FROM an except
-    block already handling some other failure (controller/main.py's
-    run_cycle()), that second exception had nowhere to go: it escaped
-    uncaught, past the try/except that was already handling the
-    original problem, and crashed the entire caller (the main reconcile
-    loop itself, in the incident that motivated this fix -- confirmed
-    live: one "reconcile cycle failed" warning logged, then the whole
-    loop silently died with zero further output, while the container
-    kept reporting "Up" and healthy). A failure to WRITE a health
-    status is strictly less severe than whatever it was trying to
-    report, or than killing the loop that would have retried next
-    cycle -- so every function here now goes through this helper
-    instead of calling conn.execute()/commit() directly."""
+    On a real box with several containers touching the shared SQLite DB
+    at once, this write can itself raise `sqlite3.OperationalError:
+    database is locked` -- and since these functions are most often
+    called FROM an except block already handling some other failure
+    (controller/main.py's run_cycle()), an uncaught second exception
+    here would escape past that try/except and crash the entire caller.
+    A failure to WRITE a health status is strictly less severe than
+    whatever it was trying to report, or than killing the loop that
+    would have retried next cycle -- so every function here goes
+    through this helper instead of calling conn.execute()/commit()
+    directly."""
     try:
         conn.execute(sql, params)
         conn.commit()
@@ -75,15 +68,13 @@ def report_fail_open(
     last-known-good value stays meaningful and must not be silently
     reset.
 
-    Pass an explicit value (added 2026-08-31, for
-    controller/main.py's new sustained-ARP-send-failure report) when
-    the cycle otherwise succeeded -- generation_applied really did come
-    back from the worker -- and fail_open is being reported for an
-    orthogonal reason (the worker's actual packet transmission, not the
-    IPC round-trip, is what's failing). Leaving this at None in that
-    case would have let a fresh INSERT default applied_generation to 0,
-    understating a real, true value on the very first fail_open cycle
-    -- caught by this fix's own test suite, not by inspection."""
+    Pass an explicit value when the cycle otherwise succeeded --
+    generation_applied really did come back from the worker -- and
+    fail_open is being reported for an orthogonal reason (the worker's
+    actual packet transmission, not the IPC round-trip, is what's
+    failing). Leaving this at None in that case would let a fresh
+    INSERT default applied_generation to 0, understating a real, true
+    value on the very first fail_open cycle."""
     if applied_generation is None:
         _safe_write(
             conn,
@@ -114,15 +105,11 @@ def report_repair_only(conn: sqlite3.Connection, reason: str) -> None:
     corrective ARP-restoration round and stopped actively poisoning on
     its own -- a controlled, self-limiting state, genuinely different
     from an outright dead/unreachable worker (report_fail_open, above).
-
-    Added 2026-09-02, closing a real gap found by code review:
-    `interception_runtime.mode`'s dedicated 'repair_only' value (with
-    its own amber dashboard badge, distinct from fail_open's red one --
-    see dashboard/dashboard.py's HEALTH_MODE_BADGE_CLASS) previously had
-    no writer anywhere in the codebase; every WorkerError, including
-    this exact fault, collapsed into report_fail_open(), so an admin
-    could never tell "the worker process crashed" apart from "the
-    worker's lease merely expired and it already self-corrected."
+    `interception_runtime.mode`'s 'repair_only' value has its own amber
+    dashboard badge, distinct from fail_open's red one (see
+    dashboard/dashboard.py's HEALTH_MODE_BADGE_CLASS), so an admin can
+    tell "the worker process crashed" apart from "the worker's lease
+    merely expired and it already self-corrected."
 
     Kept as its own function (not a mode= parameter bolted onto
     report_fail_open) so a future third state is just as easy to add

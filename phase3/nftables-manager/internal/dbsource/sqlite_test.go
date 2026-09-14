@@ -48,15 +48,12 @@ func setupDB(t *testing.T, desiredPolicyJSON string) string {
 	return path
 }
 
-// Regression test for the bug found 2026-08-30 while preparing a
-// live-Squid verification pass: desiredPolicyWire never declared a
-// "bump" JSON field, so a real desired_policy_json blob written by
-// controller/policy_state.py -- which always includes a "bump" key,
-// see tests/test_controller_run_cycle.py's own expected dict -- had its
-// bump membership silently discarded on every read, meaning
-// pp-nftables-manager could never actually redirect any device to
-// Squid's intercept ports no matter how many devices had
-// bump_enabled set in the database.
+// Guards against desiredPolicyWire silently dropping the "bump" JSON
+// field: controller/policy_state.py always writes one (see
+// tests/test_controller_run_cycle.py's own expected dict), and a
+// missing field here would discard bump membership on every read,
+// leaving pp-nftables-manager unable to ever redirect a device to
+// Squid's intercept ports.
 func TestReadDesiredPolicy_PopulatesBumpField(t *testing.T) {
 	path := setupDB(t, `{
 		"authenticated": ["192.168.1.10"],
@@ -79,16 +76,12 @@ func TestReadDesiredPolicy_PopulatesBumpField(t *testing.T) {
 	}
 }
 
-// Regression test for a real gap found by code review 2026-09-11, fixed
-// 2026-09-12 per the project owner's explicit decision: this used to
-// return (DesiredPolicy{}, nil) for a missing row -- indistinguishable
-// from a REAL, controller-computed policy where every list is
-// legitimately empty (e.g. every device was deleted). Collapsing the
-// two meant reconcileOnce would diff "nothing computed yet" against
-// whatever the kernel currently enforces and wipe every nftables set,
-// with no error anywhere, the moment this row went missing while real
-// devices were still enforced. Must now return the distinguishable
-// ErrNoDesiredPolicy instead.
+// A missing row must return ErrNoDesiredPolicy, not (DesiredPolicy{},
+// nil) -- the latter is indistinguishable from a REAL,
+// controller-computed policy where every list is legitimately empty
+// (e.g. every device was deleted), and would let reconcileOnce diff
+// "nothing computed yet" against the kernel and wipe every nftables set
+// with no error.
 func TestReadDesiredPolicy_NoRowReturnsErrNoDesiredPolicy(t *testing.T) {
 	path := setupDB(t, "")
 
@@ -98,12 +91,12 @@ func TestReadDesiredPolicy_NoRowReturnsErrNoDesiredPolicy(t *testing.T) {
 	}
 }
 
-// Sibling case: a row DOES exist (e.g. a pre-Milestone-6/7 database
-// whose ALTER TABLE just added this column, or a future schema
-// migration doing the same) but desired_policy_json is NULL rather
-// than the row being entirely absent -- a different code path
-// (sql.NullString.Valid, not sql.ErrNoRows) that must return the same
-// ErrNoDesiredPolicy, not silently collapse into an empty policy.
+// Sibling case: a row DOES exist (e.g. an older database whose ALTER
+// TABLE just added this column, or a future schema migration doing the
+// same) but desired_policy_json is NULL rather than the row being
+// entirely absent -- a different code path (sql.NullString.Valid, not
+// sql.ErrNoRows) that must return the same ErrNoDesiredPolicy, not
+// silently collapse into an empty policy.
 func TestReadDesiredPolicy_NullColumnReturnsErrNoDesiredPolicy(t *testing.T) {
 	path := setupDB(t, "")
 	db, err := sql.Open("sqlite", path)
@@ -162,15 +155,14 @@ func readNftHealth(t *testing.T, path string) (mode string, healthyAt sql.NullSt
 	return mode, healthyAt, failReason
 }
 
-// Regression test for the bug found via code review 2026-08-30: WriteHealth
-// used to unconditionally refresh nft_last_healthy_at on every call,
-// including fail-open reports, unlike controller/health.py's
-// report_fail_open() (Python side) which deliberately leaves
-// last_healthy_at untouched on failure. A continuously fail-open-but-
-// still-polling nftables-manager kept refreshing its own "last healthy"
-// timestamp forever, which would have made dashboard.py's staleness
-// detection (_is_stale) wrongly treat it as fresh/healthy on any future
-// use that didn't also gate on nft_mode != "fail_open".
+// WriteHealth must not refresh nft_last_healthy_at on a fail-open
+// report, matching controller/health.py's report_fail_open() (Python
+// side) which deliberately leaves last_healthy_at untouched on
+// failure. Advancing it unconditionally would let a continuously
+// fail-open-but-still-polling nftables-manager keep refreshing its own
+// "last healthy" timestamp forever, defeating dashboard.py's staleness
+// detection (_is_stale) for any check that didn't also gate on
+// nft_mode != "fail_open".
 func TestWriteHealth_DoesNotAdvanceLastHealthyOnFailOpen(t *testing.T) {
 	path := setupDB(t, "")
 
@@ -221,19 +213,16 @@ func TestWriteHealth_FailOpenOnFirstWriteLeavesLastHealthyNull(t *testing.T) {
 	}
 }
 
-// Regression test for the real bug found live 2026-09-08, resuming the
-// soak test after the wipe-and-redeploy: WriteHealth (and
-// ReadDesiredPolicy) opened their modernc.org/sqlite connection with no
-// _busy_timeout DSN parameter at all, unlike common/db.py's own
-// `PRAGMA busy_timeout=5000` on the Python side -- so a real
-// SQLITE_BUSY here (all six containers touching the shared file within
-// the same second at startup) failed immediately instead of waiting a
-// realistic amount of time for whichever other process briefly held
-// the write lock. Holds a real write lock on the same file from a
-// separate connection for longer than SQLite's own default (zero)
-// busy_timeout would tolerate, but well inside the 5000ms this
-// package now sets, then releases it -- WriteHealth must wait it out
-// and succeed, not fail with "database is locked".
+// WriteHealth (and ReadDesiredPolicy) must open their modernc.org/
+// sqlite connection with a _busy_timeout DSN parameter, matching
+// common/db.py's own `PRAGMA busy_timeout=5000` on the Python side --
+// without it, a real SQLITE_BUSY fails immediately instead of waiting
+// for whichever other process briefly holds the write lock. This test
+// holds a real write lock on the same file from a separate connection
+// for longer than SQLite's own default (zero) busy_timeout would
+// tolerate, but well inside the 5000ms this package sets, then
+// releases it -- WriteHealth must wait it out and succeed, not fail
+// with "database is locked".
 func TestWriteHealth_WaitsOutABriefLockInsteadOfFailingImmediately(t *testing.T) {
 	path := setupDB(t, "")
 

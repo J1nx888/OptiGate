@@ -7,11 +7,9 @@ request per line, fields separated by a single space, reply ``OK`` or
 the field count and the decision function -- everything else lived
 duplicated in each ``main()`` before this module.
 
-A third helper, basic_auth_helper (``auth_param basic``, per-login
-Basic-Auth), was removed 2026-08-30 along with Squid's explicit-proxy
-model -- see RoadMap.md's Squid intercept-mode section. The ``unquote``/
-``keep_trailing_spaces`` parameters below predate that removal: both
-current callers always percent-encode (``external_acl_type``'s own
+The ``unquote``/``keep_trailing_spaces`` parameters below predate a
+removed third helper (basic_auth_helper) that needed different handling:
+both current callers always percent-encode (``external_acl_type``'s own
 protocol) and need no trailing-space handling, so both now always pass
 their defaults -- kept as parameters rather than inlined, since they're
 still real, independently testable protocol variations (see

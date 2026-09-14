@@ -1,33 +1,26 @@
 #!/usr/bin/env python3
 """Surfaces whether the host's primary network interface has Receive
 Packet Steering (RPS) enabled, plus its lifetime hardware-level packet
-loss counters -- for the dashboard's Health page (2026-09-12), so a
-future deployment on similarly cheap single-queue NIC hardware has
-something better than a silent, hard-to-diagnose sustained-upload
-failure to go on.
-
-Written after a real production incident (RoadMap.md, "Item 3
-revisited"): a Realtek RTL8168h/8111h NIC (driver r8169, single RX
-queue, no RSS) had every hardware interrupt landing on ONE CPU core,
-confirmed via `/proc/interrupts` + `/proc/net/softnet_stat` + a genuine
-nonzero `rx_missed` counter -- and RPS (which spreads packet
-*processing*, not the interrupt itself, across every core in software)
-was never enabled. `nic-tuning/optigate-nic-tuning.sh` fixes this at
-boot going forward; this module is the read side, so an admin can SEE
-whether it's actually in effect on their own box rather than trusting
-it silently.
+loss counters -- for the dashboard's Health page, so a deployment on a
+cheap single-queue NIC has something better than a silent,
+hard-to-diagnose sustained-upload failure to go on: a single-RX-queue
+NIC (no RSS) lands every hardware interrupt on ONE CPU core, and RPS
+(which spreads packet *processing*, not the interrupt itself, across
+every core in software) doesn't turn itself on.
+`nic-tuning/optigate-nic-tuning.sh` fixes this at boot; this module is
+the read side, so an admin can SEE whether it's actually in effect on
+their own box rather than trusting it silently.
 
 Deliberately reads plain sysfs files only (`/proc/net/route`,
 `/sys/class/net/<iface>/...`) rather than shelling out to `ip`/`ethtool`
 -- no new binary dependency for the dashboard image, and these
-particular files are all world-readable (confirmed live: `rps_cpus` is
-mode 644 owned by root, no elevated privilege needed just to read it),
-unlike the root-only *write* that turns RPS on in the first place.
+particular files are all world-readable (`rps_cpus` is mode 644 owned
+by root, no elevated privilege needed just to read it), unlike the
+root-only *write* that turns RPS on in the first place.
 `rx_missed_errors`/`rx_dropped` come from the exact same underlying
-kernel counters `ethtool -S <iface>` reports (confirmed identical
-live), exposed generically for every interface via
-`/sys/class/net/<iface>/statistics/`, so no ethtool-specific ioctl is
-needed either.
+kernel counters `ethtool -S <iface>` reports, exposed generically for
+every interface via `/sys/class/net/<iface>/statistics/`, so no
+ethtool-specific ioctl is needed either.
 """
 from __future__ import annotations
 
@@ -144,8 +137,8 @@ def nic_load_status(iface: str | None = None) -> dict:
 
 def with_baseline(status: dict, baseline: dict | None) -> dict:
     """Augments a `nic_load_status()` result with "since counters were
-    last reset" deltas, added 2026-09-12: `rx_missed_errors`/`rx_dropped`
-    are real kernel counters, tied to the NIC driver itself -- they only
+    last reset" deltas: `rx_missed_errors`/`rx_dropped` are real kernel
+    counters, tied to the NIC driver itself -- they only
     ever reset on an interface down/up cycle or a reboot, never on their
     own and never just because this dashboard restarted. That makes the
     raw lifetime totals nearly useless for "did today's test actually

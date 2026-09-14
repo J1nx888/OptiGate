@@ -1,14 +1,11 @@
 """common/device_identity.py: source-IP-based identity resolution for
-Squid's intercept mode and, since Phase 4 milestone 3, the captive-portal
-login server (resolve_device).
+Squid's intercept mode and the captive-portal login server
+(resolve_device).
 
-resolve_user() (removed 2026-08-31) used to resolve straight from
-client_ip to a `users` row in one query -- replaced by resolve_device()
-(unchanged) + resolve_user_for_device(), split apart specifically so a
+resolve_device() and resolve_user_for_device() are kept separate so a
 group- or device-only assignment (no `users` row at all) is never
 conflated with "no identity resolved at all" -- see
-common/matching.py's device_domain_reason() docstring for the bug this
-was part of.
+common/matching.py's device_domain_reason() docstring.
 """
 from __future__ import annotations
 
@@ -68,18 +65,14 @@ def test_resolve_device_ignores_an_inactive_binding(conn):
 
 
 # ============================================================
-# resolve_device: self-healing an orphaned binding (real gap found
-# live 2026-09-11, see this function's own dated docstring)
+# resolve_device: self-healing an orphaned binding
 # ============================================================
 
 def test_resolve_device_self_heals_an_orphaned_binding(conn):
     """Deleting a device leaves its device_bindings row orphaned
-    (device_id NULL, ON DELETE SET NULL) rather than deleted. Before
-    this fix, resolve_device() returned None for it forever -- exactly
-    the "we couldn't identify this device on the network yet" dead end
-    hit live on production: retrying never helped, since nothing ever
-    created the missing devices row. It must now auto-create a fresh
-    PREAUTH row and resolve successfully."""
+    (device_id NULL, ON DELETE SET NULL) rather than deleted.
+    resolve_device() must auto-create a fresh PREAUTH row for it and
+    resolve successfully, rather than returning None forever."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     old_device_id = conn.execute(
         "SELECT device_id FROM device_bindings WHERE ipv4_address = ?", (IP_1,)

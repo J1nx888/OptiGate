@@ -80,15 +80,12 @@ def test_successful_cycle_reports_healthy(conn):
 
 
 def test_lease_expired_fault_reports_repair_only_not_fail_open(conn):
-    """Fixed 2026-09-02: a lease_expired/entering_repair_only_mode fault
-    is the worker's own controlled, self-limiting self-correction (it
-    already restored real MACs and stopped poisoning on its own) --
-    genuinely different from a dead/unreachable worker, and the
-    dashboard has a dedicated amber badge for exactly this distinction
-    (see dashboard/dashboard.py's HEALTH_MODE_BADGE_CLASS). Previously
-    this collapsed into the same red fail_open badge as every other
-    WorkerError, making interception_runtime.mode's 'repair_only' value
-    unreachable dead code."""
+    """A lease_expired/entering_repair_only_mode fault is the worker's
+    own controlled, self-limiting self-correction (it already restored
+    real MACs and stopped poisoning on its own) -- genuinely different
+    from a dead/unreachable worker, and the dashboard has a dedicated
+    amber badge for exactly this distinction (see
+    dashboard/dashboard.py's HEALTH_MODE_BADGE_CLASS)."""
     client, worker_sock = _make_client()
     try:
         def fake_worker():
@@ -213,10 +210,9 @@ def test_sustained_arp_send_failures_report_fail_open_even_though_the_socket_is_
     """A reconcile cycle can succeed completely -- the controller<->worker
     socket is healthy, generation_applied comes back clean -- while the
     worker's actual ARP transmission is failing (the bound interface is
-    down). Closes the health-visibility gap a NIC-down test against a
-    real veth harness found 2026-08-31: interception_runtime stayed
-    "running" throughout a sustained real send-failure window because
-    nothing surfaced that distinction before this."""
+    down). interception_runtime must surface that distinction rather
+    than staying "running" throughout a sustained send-failure
+    window."""
     from main import ARP_SEND_FAILURE_THRESHOLD
 
     client, worker_sock = _make_client()

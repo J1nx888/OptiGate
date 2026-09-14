@@ -150,16 +150,12 @@ def test_build_rules_covers_every_non_bump_device(conn):
 
 
 def test_build_rules_still_denies_a_bump_enabled_device_that_is_not_yet_authenticated(conn):
-    """Regression test for a real gap found and fixed 2026-08-31 (same
-    class of bug as classify_device()/bypass_login -- see RoadMap.md):
-    build_rules() used to select on the raw bump_enabled column alone,
-    so a device with bump_enabled=1 but is_authenticated=0 (a genuinely
+    """A device with bump_enabled=1 but is_authenticated=0 (a genuinely
     new PREAUTH device, or one pre-configured for bump ahead of its
-    first login) was excluded from the hard-deny list -- while ALSO not
-    being nftables bump_v4-eligible (bump_eligible() requires
-    AUTHENTICATED too) -- a full, unfiltered bypass of the hard-deny
-    invariant this module exists to enforce. Must now be denied, same
-    as any other non-bump-eligible device, until it actually logs in."""
+    first login) is not nftables bump_v4-eligible either (bump_eligible()
+    requires AUTHENTICATED too) -- it must still be denied here, same as
+    any other non-bump-eligible device, or it gets a full, unfiltered
+    bypass of the hard-deny invariant this module exists to enforce."""
     _insert_domain(conn, "crunchyroll\\.com")
     _insert_device_with_binding(
         conn, "aa:bb:cc:dd:ee:04", "192.168.1.13", bump_enabled=True, is_authenticated=False
@@ -202,10 +198,10 @@ def test_build_rules_emits_one_rule_per_bump_domain(conn):
 
 
 def test_build_rules_denies_a_bump_eligible_device_from_an_unassigned_non_global_domain(conn):
-    """The core 2026-08-31 rework: a bump-eligible device used to get a
-    free DNS pass to ANY bump-mode domain -- now AdGuard also checks
-    whether this SPECIFIC domain is actually assigned to it, same as
-    Squid's own authz_helper.decide() does after decryption."""
+    """A bump-eligible device must not get a free DNS pass to ANY
+    bump-mode domain -- AdGuard must also check whether this SPECIFIC
+    domain is actually assigned to it, same as Squid's own
+    authz_helper.decide() does after decryption."""
     domain_id = _insert_domain(conn, "example\\.com", is_global=False)
     _insert_device_with_binding(
         conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=True, is_authenticated=True,
@@ -241,10 +237,8 @@ def test_build_rules_still_denies_a_non_bump_eligible_device_even_on_a_global_do
 
 
 def test_build_rules_excludes_an_ignored_device(conn):
-    """2026-08-31, project owner's explicit direction: "AdGuard should
-    apply a baseline of protection... unless the device/user/group is
-    set to bypass/ignore." An ignored device must never appear in a deny
-    rule, even one that would otherwise clearly be denied."""
+    """An ignored device must never appear in a deny rule, even one that
+    would otherwise clearly be denied."""
     _insert_domain(conn, "example\\.com", is_global=False)
     _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False, ignored=True)
 
@@ -252,10 +246,9 @@ def test_build_rules_excludes_an_ignored_device(conn):
 
 
 def test_build_rules_excludes_a_device_in_an_ignored_group(conn):
-    """Group-level ignore (added 2026-09-07, db.py's schema comment on
-    groups.ignored) must exclude a device from AdGuard's own deny rules
-    exactly like the device's own `ignored` bit does above, even though
-    the device's own column reads 0."""
+    """Group-level ignore must exclude a device from AdGuard's own deny
+    rules exactly like the device's own `ignored` bit does above, even
+    though the device's own column reads 0."""
     group_id = _insert_group(conn, "IoT", ignored=True)
     _insert_domain(conn, "example\\.com", is_global=False)
     _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False, group_id=group_id)
@@ -264,12 +257,10 @@ def test_build_rules_excludes_a_device_in_an_ignored_group(conn):
 
 
 # ============================================================
-# _ech_strip_rule / build_ech_strip_rules (added 2026-09-09, RoadMap.md
-# item 17 -- see build_ech_strip_rules()'s own docstring for the full,
-# live-verified story: ECH-carrying bump-mode domains defeat Squid's
-# own bump/splice decision, and the fix is withholding just the
-# HTTPS-type DNS record for the exact devices that need Squid to
-# actually inspect that domain.)
+# _ech_strip_rule / build_ech_strip_rules -- ECH-carrying bump-mode
+# domains defeat Squid's own bump/splice decision; the fix withholds
+# just the HTTPS-type DNS record for the exact devices that need Squid
+# to actually inspect that domain.
 # ============================================================
 
 def test_ech_strip_rule_shape():
@@ -387,7 +378,7 @@ def test_build_ech_strip_rules_accepts_a_shared_eligible_devices_list(conn):
 
 
 # ============================================================
-# build_splice_deny_rules (added 2026-08-31, see its own docstring / GH #9)
+# build_splice_deny_rules
 # ============================================================
 
 def test_build_splice_deny_rules_denies_a_device_with_no_assignment(conn):
@@ -472,8 +463,8 @@ def test_sync_once_pushes_both_bump_and_splice_rule_sets(conn, monkeypatch):
     count = adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
 
     # one bump hard-deny + one splice deny (same device denied both ways)
-    # + the always-on anti-DoH baseline (build_anti_doh_rules(), added
-    # 2026-09-02 -- see that function's own docstring).
+    # + the always-on anti-DoH baseline (build_anti_doh_rules(), see
+    # that function's own docstring).
     assert count == 2 + len(adguard_sync.build_anti_doh_rules())
     managed = pushed["rules"][1:-1]  # strip the begin/end markers
     assert any("crunchyroll" in r for r in managed)
@@ -504,14 +495,11 @@ def test_sync_once_includes_ech_strip_rules_for_a_bump_eligible_authorized_devic
 
 
 def test_sync_once_fetches_the_device_list_exactly_once(conn, monkeypatch):
-    """Regression test for a real efficiency gap (fixed 2026-09-02):
-    build_rules()/build_splice_deny_rules()/build_category_deny_rules()
-    each independently re-ran the identical devices JOIN device_bindings
-    query and re-classified every row, so one sync_once() cycle issued
-    that query 3 times instead of once. Confirms _fetch_eligible_devices()
-    -- the extracted, now-shared query -- is called exactly once per
-    cycle regardless of how many of the three builders end up needing
-    the result."""
+    """build_rules()/build_splice_deny_rules()/build_category_deny_rules()
+    must not each independently re-run the identical devices JOIN
+    device_bindings query -- confirms _fetch_eligible_devices() (the
+    extracted, shared query) is called exactly once per cycle regardless
+    of how many of the three builders end up needing the result."""
     _insert_domain(conn, "crunchyroll\\.com", mode="bump")
     _insert_domain(conn, "example\\.com", mode="splice", is_global=False)
     _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10", bump_enabled=False)
@@ -605,7 +593,7 @@ def test_sync_once_preserves_admin_rules_and_replaces_the_managed_block(conn, mo
 
     count = adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
 
-    # 1 bump hard-deny + the always-on anti-DoH baseline (2026-09-02).
+    # 1 bump hard-deny + the always-on anti-DoH baseline.
     assert count == 1 + len(adguard_sync.build_anti_doh_rules())
     assert pushed["rules"][0] == "! an admin's own rule"
     assert pushed["rules"][1] == adguard_sync._MARKER_BEGIN
@@ -618,10 +606,9 @@ def test_sync_once_with_nothing_to_deny_still_clears_a_stale_managed_block(conn,
     known yet) -- build_rules()/build_splice_deny_rules()/
     build_category_deny_rules() all return []. A previous cycle's now-
     stale managed block must still be cleared, not left in place
-    forever. build_anti_doh_rules() is unconditional (2026-09-02), so
-    the managed block itself is never fully empty anymore -- this test
-    now checks that ONLY the anti-DoH baseline survives, not that
-    nothing does."""
+    forever. build_anti_doh_rules() is unconditional, so the managed
+    block itself is never fully empty -- this test checks that ONLY the
+    anti-DoH baseline survives, not that nothing does."""
     existing = ["! kept", adguard_sync._MARKER_BEGIN, "/stale/$client=1.2.3.4", adguard_sync._MARKER_END]
     monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: list(existing))
     monkeypatch.setattr(adguard_sync.adguard_client, "get_safesearch_status", lambda *a, **k: {"enabled": False})
@@ -640,14 +627,12 @@ def test_sync_once_with_nothing_to_deny_still_clears_a_stale_managed_block(conn,
 
 
 # ============================================================
-# sync_once: skip the write when nothing actually changed (real gap
-# found live 2026-09-11 -- see this function's own dated docstring).
-# set_custom_rules() has no incremental API: every call is a full
-# tear-down-and-rebuild of AdGuard's rule engine, which needs a brief
-# moment to recompile -- calling it every 30s regardless of whether
-# anything changed created a small, constantly-recurring window where
-# two unrelated live tests (Crunchyroll, Webtoons) both showed a
-# correctly-denied device getting through anyway.
+# sync_once: skip the write when nothing actually changed. set_custom_rules()
+# has no incremental API: every call is a full tear-down-and-rebuild of
+# AdGuard's rule engine, which needs a brief moment to recompile --
+# calling it every cycle regardless of whether anything changed creates
+# a small, recurring window where a correctly-denied device could get
+# through anyway.
 # ============================================================
 
 def test_sync_once_skips_the_write_when_nothing_changed(conn, monkeypatch):
@@ -817,7 +802,7 @@ def test_run_loop_reports_sync_errors_via_on_error_without_dying(conn, monkeypat
 
 
 # ============================================================
-# Phase 8: build_category_deny_rules
+# build_category_deny_rules
 # ============================================================
 
 def test_build_category_deny_rules_global_category_produces_unscoped_rules(conn):
@@ -939,8 +924,8 @@ def test_build_category_deny_rules_no_applicable_devices_contributes_nothing(con
 
 
 # ============================================================
-# build_anti_doh_rules -- 2026-09-02, closing the DNS-over-HTTPS
-# bypass found during the brute-force/injection audit
+# build_anti_doh_rules -- closes the DNS-over-HTTPS bypass around the
+# other DNS-tier controls
 # ============================================================
 
 def test_build_anti_doh_rules_is_never_empty():
@@ -998,7 +983,7 @@ def test_sync_once_always_includes_the_anti_doh_baseline_even_with_nothing_else_
 
 
 # ============================================================
-# Phase 8: sync_category_subscriptions
+# sync_category_subscriptions
 # ============================================================
 
 class _FakeAdGuardClient:
@@ -1112,7 +1097,7 @@ def test_sync_category_subscriptions_never_removes_an_existing_filter(conn, monk
 
 
 # ============================================================
-# G3: sync_safesearch
+# sync_safesearch
 # ============================================================
 
 def test_sync_safesearch_enables_when_setting_on_and_adguard_currently_off(conn, monkeypatch):
@@ -1194,8 +1179,7 @@ def test_sync_safesearch_never_touches_per_service_booleans(conn, monkeypatch):
 
 
 # ============================================================
-# sync_optigate_rewrite (optigate.home memorable-URL feature, RoadMap.md's
-# dated 2026-09-07 entry)
+# sync_optigate_rewrite (optigate.home memorable-URL feature)
 # ============================================================
 
 def test_sync_optigate_rewrite_skipped_entirely_without_a_block_page_ip(conn, monkeypatch):

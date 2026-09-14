@@ -1,9 +1,10 @@
-"""common/db.py's _migrate(): adds device_bindings.hostname (2026-09-11,
-RoadMap.md -- controller/mdns_lookup.py's best-effort mDNS reverse-PTR
-result, feeding the "Devices awaiting login" card's Hostname column) to
-a database that predates the column, the same idempotent
+"""common/db.py's _migrate(): adds device_bindings.hostname to a
+database that predates the column, the same idempotent
 PRAGMA-table_info-then-ALTER-TABLE pattern _migrate() already uses for
 every other additive column (see e.g. devices.pending_dismissed_at).
+The column holds controller/mdns_lookup.py's best-effort mDNS
+reverse-PTR result, feeding the "Devices awaiting login" card's
+Hostname column.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import db
 
 
 def _drop_hostname_column(conn) -> None:
-    """Simulates a pre-2026-09-11 database: recreates device_bindings
+    """Simulates a pre-migration database: recreates device_bindings
     exactly as it looked before the hostname column existed, preserving
     any rows already inserted via the normal (post-migration) schema."""
     conn.execute("ALTER TABLE device_bindings RENAME TO device_bindings_new")

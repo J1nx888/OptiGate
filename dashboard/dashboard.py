@@ -94,11 +94,8 @@ def _no_store_html(resp):
     server -- this is an admin tool that shows a child's live allow/block
     state, and a browser serving a heuristically-cached copy is actively
     misleading (same reasoning as sw.js's comment, which enforces this
-    for /static/ but nothing enforced it for the HTML pages -- a stale
-    cached /report was the "the Report page has no Status column" report,
-    2026-09-10, when the column had in fact been there all along).
-    Scoped to text/html so CSS/JS/JSON/CSV/image responses keep their
-    own caching."""
+    for /static/ but nothing enforced it for the HTML pages). Scoped to
+    text/html so CSS/JS/JSON/CSV/image responses keep their own caching."""
     ctype = resp.headers.get("Content-Type", "")
     if ctype.startswith("text/html"):
         resp.headers["Cache-Control"] = "no-store, must-revalidate"
@@ -107,16 +104,10 @@ def _no_store_html(resp):
 
 
 def get_db():
-    # Fixed 2026-09-02, a real efficiency gap found by code review:
-    # this used to also call db.init_db(conn) here -- re-executing the
-    # entire 29-statement CREATE TABLE IF NOT EXISTS schema script plus
-    # _migrate()'s 3 PRAGMA table_info introspection queries on EVERY
-    # single request. The schema is a property of the database FILE,
-    # not of any one connection, so it only ever needs establishing
-    # once per process lifetime -- done explicitly at import time,
-    # right before bootstrap_admin() (see the bottom of this file),
-    # rather than as a side effect of every route handler's own call
-    # here.
+    # Schema init/migration happens once at import time (see
+    # bootstrap_admin() near the bottom of this file), not here -- the
+    # schema is a property of the database file, not of any one
+    # connection, so it doesn't need re-establishing on every request.
     return db.get_conn()
 
 
@@ -162,26 +153,21 @@ def bootstrap_admin() -> None:
         db.set_setting_if_absent(conn, "adguard_url", os.environ.get("ADGUARD_URL", ""))
         db.set_setting_if_absent(conn, "adguard_username", os.environ.get("ADGUARD_USERNAME", "admin"))
         db.set_setting_if_absent(conn, "adguard_password", os.environ.get("ADGUARD_PASSWORD", ""))
-        # Phase 8: default IANA time zone new schedules are created with --
-        # each schedule still stores its OWN time_zone once created (see
+        # Default IANA time zone new schedules are created with -- each
+        # schedule still stores its OWN time_zone once created (see
         # common/db.py's schedules table comment), so changing this later
         # never silently moves an existing schedule's meaning. Deliberately
-        # NOT seeded with a hardcoded "UTC" fallback here (fixed
-        # 2026-09-07, RoadMap.md's dated entry) -- this runs at container
-        # boot, with no browser/request in scope to detect a real time
-        # zone from, so hardcoding UTC here would always win over the
+        # NOT seeded with a hardcoded "UTC" fallback here -- this runs at
+        # container boot, with no browser/request in scope to detect a real
+        # time zone from, so hardcoding UTC would always win over the
         # Settings page's own browser-side auto-detect (SETTINGS_BODY's
-        # inline <script>, settings_page()) the FIRST time an admin loads
-        # it, defeating the whole point of "default to wherever the
-        # admin's own device is." Left genuinely absent unless
-        # HOUSEHOLD_TIME_ZONE is explicitly set in .env (an existing,
-        # still-supported override for anyone who already knows to use
-        # it) -- settings_page()'s own get_setting(..., "UTC") fallback
-        # still keeps new-schedule-creation safe in the narrow window
-        # before any admin has visited Settings at all.
+        # inline <script>, settings_page()) the first time an admin loads
+        # it. Left absent unless HOUSEHOLD_TIME_ZONE is explicitly set in
+        # .env; settings_page()'s own get_setting(..., "UTC") fallback
+        # keeps new-schedule-creation safe before any admin visits Settings.
         if os.environ.get("HOUSEHOLD_TIME_ZONE"):
             db.set_setting_if_absent(conn, "household_time_zone", os.environ["HOUSEHOLD_TIME_ZONE"])
-        # G3: SafeSearch/Restricted Mode defaults OFF -- an admin opts in
+        # SafeSearch/Restricted Mode defaults OFF -- an admin opts in
         # explicitly from Settings, since this changes real search-engine
         # behavior network-wide the moment it's turned on (see
         # controller/adguard_sync.py's sync_safesearch() docstring).
@@ -201,24 +187,20 @@ def _check_admin_auth(basic_auth) -> bool:
     finally:
         conn.close()
     # Shared with dashboard/captive_portal_server.py's own portal-side
-    # admin action (added 2026-08-31) -- see auth.verify_admin_credentials's
-    # own docstring for why this one check lives in common/auth.py rather
-    # than being duplicated.
+    # admin action -- see auth.verify_admin_credentials's own docstring
+    # for why this one check lives in common/auth.py rather than being
+    # duplicated.
     return auth.verify_admin_credentials(basic_auth.username, basic_auth.password, expected_user, expected_hash)
 
 
-# Brute-force protection, added 2026-09-02 after an audit (prompted by the
-# project owner, ahead of a planned full code-review) found this login had
-# NONE -- every one of this dashboard's ~80 routes sits behind
-# require_admin below, and an attacker with network access to the
-# dashboard port could attempt unlimited HTTP Basic credential guesses
-# (see docs/security/overview.md section 6, now corrected). Reuses
-# dashboard/captive_portal_server.py's own already-reasoned-about limiter
-# mechanism via common/rate_limit.py rather than a second implementation.
-# A SEPARATE instance from the portal's own limiter, deliberately -- these
-# are different network surfaces (this dashboard's own bind address/port
-# vs. the portal's :3131, reachable by different populations of devices),
-# so a flood against one should never exhaust the other's budget.
+# Rate-limits this admin login against brute-force credential guessing --
+# every one of this dashboard's ~80 routes sits behind require_admin below,
+# reachable by anyone with network access to the dashboard port. Reuses
+# common/rate_limit.py, but as a SEPARATE instance from
+# captive_portal_server.py's own limiter, deliberately: different network
+# surfaces (this dashboard's bind address/port vs. the portal's :3131,
+# reachable by different populations of devices), so a flood against one
+# should never exhaust the other's budget.
 _ADMIN_LOGIN_LIMITER = rate_limit.RateLimiter(max_attempts=5, window_seconds=60.0)
 
 # Caps how much of an attacker-controlled username this module will ever
@@ -320,23 +302,17 @@ def logout():
     there's no reliable, cross-browser way for a server to make it
     forget that.
 
-    **Rewritten 2026-09-09 after a real live lockout**: this used to
-    navigate here via a URL with a deliberately wrong credential embedded
-    in it (http://logout:logout@host/logout) to try to force a fresh
-    sign-in prompt -- a commonly-suggested Basic-Auth "logout" trick.
-    Confirmed live that it actively backfires: several browsers cache
-    "logout" as the *username* for this origin after that navigation,
-    then keep resubmitting it on every later login attempt regardless of
-    what password is typed, silently defeating every subsequent login
-    until the browser's saved credentials are cleared by hand anyway --
-    worse than doing nothing, since the admin has no way to tell their
-    own (correct) password apart from a UI bug without checking server
-    logs. Replaced with a plain page explaining the one real, manual step
-    (close the browser, or clear its saved password for this site) --
-    honest about the limitation instead of a trick that can lock someone
-    out. Deliberately NOT behind @require_admin: this page must stay
-    reachable even to someone who's currently unable to log in, and it
-    reveals nothing sensitive."""
+    Deliberately does NOT use the common Basic-Auth "logout" trick of
+    navigating to a URL with a wrong credential embedded
+    (http://logout:logout@host/logout) to force a fresh sign-in prompt:
+    several browsers cache "logout" as the *username* for this origin
+    afterward and keep resubmitting it on every later login attempt
+    regardless of password, silently defeating login until the saved
+    credentials are cleared by hand -- worse than doing nothing. Instead
+    this just explains the one real, manual step (close the browser, or
+    clear its saved password for this site). Deliberately NOT behind
+    @require_admin: this page must stay reachable even to someone who's
+    currently unable to log in, and it reveals nothing sensitive."""
     return render_template_string(_LOGOUT_BODY)
 
 
@@ -448,11 +424,11 @@ if ("serviceWorker" in navigator) {
 // Instant client-side search, no page reload -- hides non-matching <tr>s
 // (header rows, identified by containing a <th> since these tables don't
 // use <thead>, are never hidden). Used by the Users/Groups/Categories/
-// Schedules/Events list pages -- Domains and Devices moved to
-// server-side ?q= search instead (2026-09-08) once those two paginated,
-// since a client-side filter over one page of results would silently
-// miss matches sitting on a page not currently shown. Separate from and layered on top
-// of the server-side ?user_id= / ?group_id= / ?device_id= filters
+// Schedules/Events list pages -- Domains and Devices use server-side
+// ?q= search instead since those two are paginated, and a client-side
+// filter over one page of results would silently miss matches sitting
+// on a page not currently shown. Separate from and layered on top of
+// the server-side ?user_id= / ?group_id= / ?device_id= filters
 // elsewhere, which narrow what's sent down in the first place. The
 // combobox picker widgets below have their own, unrelated search box.
 document.addEventListener("input", function (event) {
@@ -501,9 +477,8 @@ document.addEventListener("input", function (event) {
   function sortStorageKey(table) { return "og_table_sort_" + table.id; }
 
   // Actually reorders the rows for one column/direction -- factored out
-  // of the click handler (2026-09-13, project owner's explicit request)
-  // so the same logic can also run once on page load to RESTORE a saved
-  // sort, not just respond to a live click.
+  // of the click handler so the same logic can also run once on page
+  // load to RESTORE a saved sort, not just respond to a live click.
   function applySort(table, th, idx, kind, asc) {
     var headerRow = th.parentNode;
     Array.prototype.forEach.call(headerRow.cells, function (c) {
@@ -542,14 +517,12 @@ document.addEventListener("input", function (event) {
     // Persist per browser via localStorage, keyed by the table's own id
     // and the column's plain label text (stable across a page reload,
     // unlike a raw column index which would break if columns are ever
-    // reordered) -- 2026-09-13, project owner's explicit request:
-    // sorting the pending-devices card, then taking a row action
-    // (Bypass/Dismiss/etc, a plain form POST that reloads the whole
-    // page) silently lost the sort every time, since this was purely an
-    // in-memory DOM reorder with nothing remembering it across a fresh
-    // page load. A display preference, not real data, so a per-browser
-    // client-side memory is the right place for it -- same reasoning
-    // the sidebar's own collapsed-group state already uses.
+    // reordered) -- a row action (Bypass/Dismiss/etc) is a plain form
+    // POST that reloads the whole page, so without this the sort (a
+    // purely in-memory DOM reorder) would be lost on every such action.
+    // A display preference, not real data, so a per-browser client-side
+    // memory is the right place for it -- same reasoning the sidebar's
+    // own collapsed-group state already uses.
     if (table.id) {
       try {
         localStorage.setItem(sortStorageKey(table), JSON.stringify({ label: th.dataset.sortLabel, kind: kind, asc: asc }));
@@ -660,14 +633,9 @@ document.addEventListener("input", function (event) {
         var hidden = root.querySelector("[data-combobox-hidden]");
         if (hidden) {
           hidden.value = item.id;
-          // selectItem() never fired any DOM event on this input before
-          // 2026-09-11 -- fine for every prior single-mode combobox,
-          // which only ever needed the value to ride along with a form
-          // submit, but the Categories page's new "Add from catalog"
-          // picker needs to react to a pick immediately (pre-filling
-          // two OTHER fields), not just on submit. A genuine 'change'
-          // event, not a custom one, so any future single-mode
-          // combobox can hook into a pick the normal way.
+          // Dispatches a genuine 'change' event (not a custom one) so a
+          // single-mode combobox can react to a pick immediately (e.g.
+          // pre-filling additional fields), not just when the form submits.
           hidden.dispatchEvent(new Event("change", { bubbles: true }));
         }
         renderCurrent();
@@ -685,16 +653,11 @@ document.addEventListener("input", function (event) {
       var pool = items.filter(function (item) { return !(mode === "multi" && selectedIds[item.id]); });
       var showAll = pool.length <= SHOW_ALL_THRESHOLD;
       results.innerHTML = "";
-      // 2026-09-13, project owner's explicit request: past
-      // SHOW_ALL_THRESHOLD entries, this used to render literally
-      // nothing until you typed -- fine for "search 200 domains," but
-      // for "assign to" (a household's own users/groups, rarely more
-      // than a couple dozen) it meant knowing an exact name in advance
-      // just to see any option at all. Now shows a capped alphabetical
+      // Past SHOW_ALL_THRESHOLD entries, shows a capped alphabetical
       // preview (same MAX_RESULTS cap a real search result gets) with a
-      // hint that there's more to find by typing, instead of an empty
-      // dropdown -- bounded rendering cost either way, just never zero
-      // options to look at.
+      // hint that there's more to find by typing, rather than rendering
+      // nothing until you type -- bounded rendering cost either way,
+      // just never zero options to look at.
       var preview = !query && !showAll ? pool.slice(0, MAX_RESULTS) : null;
       var found = query
         ? pool.filter(function (item) { return item.label.toLowerCase().indexOf(query) !== -1; }).slice(0, MAX_RESULTS)
@@ -878,11 +841,9 @@ def _ca_cert_info(path: Path) -> dict | None:
         return None
     info: dict[str, str] = {}
     for line in result.stdout.decode("utf-8", "replace").splitlines():
-        # Case-insensitive match on the "Fingerprint=" label -- live-
-        # verified 2026-09-06 that openssl 3.5 prints "sha256
-        # Fingerprint=" (lowercase algorithm name), not the "SHA256
-        # Fingerprint=" this originally assumed, which silently left the
-        # fingerprint blank on the Settings page with no error anywhere.
+        # Case-insensitive match on the "Fingerprint=" label -- openssl
+        # 3.5 prints "sha256 Fingerprint=" (lowercase algorithm name),
+        # not "SHA256 Fingerprint=".
         if line.startswith("subject="):
             info["subject"] = line[len("subject="):].strip()
         elif line.startswith("notAfter="):
@@ -1052,16 +1013,11 @@ _BACKUP_UPLOAD_MAX_BYTES = 50_000_000
 @app.route("/settings/backup/download")
 @require_admin
 def download_backup():
-    """Configuration export -- tracked as a deferred item in RoadMap.md
-    since before 2026-09-07 ("no way currently to export the whole
-    household's configuration... useful before a risky change, or when
-    moving to new hardware"), built 2026-09-08 as the actual mechanism
-    for wiping and redeploying the production box clean without losing
-    anything. Bundles common/backup.py's own JSON export together with
-    the CA certificate/private key (if generated yet) in one zip, so a
-    restore elsewhere doesn't need every device to re-trust a new CA --
-    see backup.py's own docstring for exactly what is and isn't
-    included and why."""
+    """Configuration export. Bundles common/backup.py's own JSON export
+    together with the CA certificate/private key (if generated yet) in
+    one zip, so a restore elsewhere doesn't need every device to
+    re-trust a new CA -- see backup.py's own docstring for exactly what
+    is and isn't included and why."""
     conn = get_db()
     data = backup.export_config(conn)
     buf = io.BytesIO()
@@ -1130,12 +1086,12 @@ def restore_backup():
             ca_note = f" CA certificate NOT restored ({error}) -- the rest of the configuration was."
         elif CA_CERT_PATH.exists() and CA_CERT_PATH.read_bytes() == cert_pem and \
                 CA_KEY_PATH.exists() and CA_KEY_PATH.read_bytes() == key_pem:
-            # Live-verified 2026-09-08: restoring the SAME backup a box's
-            # own CA cert came from (the common case -- e.g. reverting
-            # unrelated config on the same install) must NOT claim every
-            # device needs to re-trust a certificate that never actually
-            # changed. Also skips a no-op _replace_ca_cert_pair() call, so
-            # a repeated restore doesn't pile up identical .bak files.
+            # Restoring the SAME backup a box's own CA cert came from
+            # (the common case -- e.g. reverting unrelated config on the
+            # same install) must NOT claim every device needs to
+            # re-trust a certificate that never actually changed. Also
+            # skips a no-op _replace_ca_cert_pair() call, so a repeated
+            # restore doesn't pile up identical .bak files.
             ca_note = " CA certificate unchanged (already matched what's currently installed)."
         else:
             _replace_ca_cert_pair(cert_pem, key_pem)
@@ -1300,8 +1256,7 @@ USERS_BODY = """
   var countLabel = document.getElementById("userBulkCount");
   var toolbar = document.getElementById("userBulkToolbar");
 
-  // Same toolbar pattern as the Devices page (RoadMap.md's dated entry,
-  // referencing Microsoft Entra's admin console) -- extended here to
+  // Same toolbar pattern as the Devices page -- extended here to
   // Users/Categories/Schedules for consistency across every list page.
   function updateToolbarState() {
     if (!toolbar) return;
@@ -1375,11 +1330,11 @@ def users():
     for u in rows:
         # Matches what the "N assigned" link's ?user_id= filter on /domains
         # actually shows: explicit assignments plus every global domain --
-        # excluding protected=1 infrastructure domains (2026-09-13,
-        # RoadMap.md), same as that page's own query, since those no
-        # longer appear there at all (they're on the Crunchyroll
-        # integration page instead) and this count would otherwise promise
-        # more rows than clicking through actually shows.
+        # excluding protected=1 infrastructure domains, same as that
+        # page's own query, since those no longer appear there at all
+        # (they're on the Crunchyroll integration page instead) and this
+        # count would otherwise promise more rows than clicking through
+        # actually shows.
         domain_count = conn.execute(
             "SELECT COUNT(*) c FROM domains d "
             "LEFT JOIN user_domains ud ON ud.domain_id = d.id AND ud.user_id = ? "
@@ -1452,10 +1407,9 @@ def delete_user():
 @app.route("/users/bulk-delete", methods=["POST"])
 @require_admin
 def bulk_delete_users():
-    """Users list's toolbar "Delete" button (RoadMap.md's dated entry --
-    extending the Devices/Domains bulk-actions pattern to every list
-    page). Plain `DELETE ... WHERE id IN (...)`, same shape as
-    `bulk_delete_devices()`."""
+    """Users list's toolbar "Delete" button -- extends the Devices/Domains
+    bulk-actions pattern to every list page. Plain `DELETE ... WHERE id IN
+    (...)`, same shape as `bulk_delete_devices()`."""
     user_ids = {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}
     if not user_ids:
         return flash_redirect("users", "No users selected.", error=True)
@@ -1544,18 +1498,13 @@ def reset_password():
 
 
 # Shared by user_detail and group_detail's own "Assigned sites" card --
-# real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
-# creating a new user shows "27 assigned" on the Users list (the
-# is_global count, see users()'s own domain_count query), but that
-# user's own Manage page only ever queried user_domains directly, so it
-# showed nothing for a brand-new user beyond a vague "(still gets global
-# sites)" aside -- no way to see WHAT those 27 domains actually are
-# without separately knowing to visit the unfiltered Domains page and
-# spot the "Everyone" rows yourself. This card answers that in place,
-# using each domain's own `note` (defaults/seed_defaults.py already sets
-# one on every seeded global domain -- "Google", "Cookie consent", etc.)
-# -- no schema change needed, just surfacing data that already existed.
-# Needs global_domains in scope wherever it's used.
+# shows WHAT the "N assigned" global-domain count actually includes
+# (the Manage page otherwise only queries user_domains directly, so a
+# brand-new user shows nothing beyond a vague "(still gets global
+# sites)" aside). Uses each domain's own `note` (defaults/seed_defaults.py
+# sets one on every seeded global domain -- "Google", "Cookie consent",
+# etc.) -- no schema change needed, just surfacing data that already
+# existed. Needs global_domains in scope wherever it's used.
 GLOBAL_SITES_CARD = """
 <div class="card">
 <h2>Global sites (apply to everyone, {{ global_domains|length }})</h2>
@@ -1811,12 +1760,9 @@ def user_detail(user_id: int):
     u = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     if u is None:
         return flash_redirect("users", "That user no longer exists.", error=True)
-    # Paginated (added 2026-09-07, RoadMap.md's dated entry, project
-    # owner's explicit request, same "these can grow extensively with
-    # time" reasoning as Devices/Domains/Categories the same day) -- a
-    # heavily-assigned kid's own site list is exactly the kind of thing
-    # that only ever grows, one "Approve" click at a time, for as long as
-    # the household uses this.
+    # Paginated, same reasoning as Devices/Domains/Categories -- a
+    # heavily-assigned kid's own site list only ever grows, one
+    # "Approve" click at a time, for as long as the household uses this.
     domain_count = conn.execute(
         "SELECT COUNT(*) AS c FROM user_domains WHERE user_id = ?", (user_id,)
     ).fetchone()["c"]
@@ -1835,24 +1781,19 @@ def user_detail(user_id: int):
         "SELECT series_id, series_name FROM user_shows WHERE user_id = ? ORDER BY series_name",
         (user_id,),
     ).fetchall()
-    # G6: excludes ignored devices, same reasoning as pause_all_devices() --
+    # Excludes ignored devices, same reasoning as pause_all_devices() --
     # an ignored device can't actually be paused (BYPASS outranks
-    # QUARANTINE in classify_device()), so it shouldn't count toward "how
-    # many of this kid's devices are pausable" either.
+    # QUARANTINE in classify_device()), so it shouldn't count toward
+    # "how many of this kid's devices are pausable" either.
     user_devices = conn.execute(
         "SELECT id, quarantined_at FROM devices WHERE user_id = ? AND ignored = 0", (user_id,)
     ).fetchall()
     paused_device_count = sum(1 for row in user_devices if row["quarantined_at"])
-    # Added 2026-09-08, real live-testing feedback: this page had no way
-    # to see WHICH devices are assigned to this user at all -- an admin
-    # had to go to the Devices page and search/filter by name instead,
-    # the exact gap the Group-detail page's own "Devices in this group"
-    # card (added earlier) never had. Deliberately ALL devices with this
-    # user_id, including an ignored one if that combination somehow
-    # exists (unlike user_devices above, which excludes those for the
-    # pause-count's own different reasoning) -- this card's job is
-    # accurately answering "what's assigned here", not "what's
-    # pausable".
+    # Deliberately ALL devices with this user_id, including an ignored
+    # one if that combination somehow exists (unlike user_devices above,
+    # which excludes those for the pause-count's own different
+    # reasoning) -- this card's job is accurately answering "what's
+    # assigned here", not "what's pausable".
     assigned_devices = conn.execute(
         "SELECT mac_address, label, ignored, quarantined_at FROM devices "
         "WHERE user_id = ? ORDER BY label IS NULL, label, mac_address",
@@ -1861,18 +1802,15 @@ def user_detail(user_id: int):
     active_schedules = schedule_eval.active_schedules_for_target(
         conn, datetime.now(timezone.utc), user_id=user_id
     )
-    # Real live-testing feedback (RoadMap.md's dated entry): approving a
-    # show for a second kid meant re-pasting/re-resolving the exact same
-    # Crunchyroll URL a first kid had already been approved for. Every
-    # OTHER user's already-approved show (deduped by series_id, excluding
-    # this user's own -- no point offering to "re-approve" what's already
-    # here) becomes a pickable option, skipping the URL entirely; see
-    # add_show()'s own handling of the resulting existing_series_id field.
+    # Every OTHER user's already-approved show (deduped by series_id,
+    # excluding this user's own -- no point offering to "re-approve"
+    # what's already here) becomes a pickable option, skipping the URL
+    # entirely; see add_show()'s own handling of the resulting
+    # existing_series_id field.
     all_approved_shows = conn.execute(
         "SELECT DISTINCT series_id AS id, series_name FROM user_shows "
         "WHERE user_id != ? ORDER BY series_name", (user_id,)
     ).fetchall()
-    # RoadMap.md item 24 (2026-09-09, project owner's explicit request):
     # "Shift mode now" directly from this page, not just Schedules'. Only
     # offers a mode schedule that actually already targets THIS user
     # (globally, or explicitly) -- unlike the Schedules page's own picker
@@ -1913,12 +1851,10 @@ def user_detail(user_id: int):
 def add_show():
     """Two ways in: paste a Crunchyroll URL (parsed below, as always), or
     pick a show already approved for a DIFFERENT user (existing_series_id,
-    from user_detail()'s own all_approved_shows combobox -- real
-    live-testing feedback, RoadMap.md's dated entry, that approving the
-    same show for a second kid meant re-pasting/re-resolving the exact
-    same URL). The picked show wins if both are somehow submitted at
-    once -- an exact match on an already-known series_id needs no URL
-    parsing or title lookup at all."""
+    from user_detail()'s own all_approved_shows combobox). The picked
+    show wins if both are somehow submitted at once -- an exact match on
+    an already-known series_id needs no URL parsing or title lookup at
+    all."""
     user_id = request.form.get("user_id", "")
     conn = get_db()
     series_id, name, error = _resolve_series_from_form(conn, request.form)
@@ -2173,9 +2109,9 @@ def integrations_crunchyroll():
     ).fetchall()
     # protected=1: infrastructure this integration depends on (defaults/
     # seed_defaults.py's GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS/crunchyroll.com
-    # itself) -- read-only here, moved off the general Domains page entirely
-    # (2026-09-13, RoadMap.md, project owner's explicit request) so it isn't
-    # mistaken for a domain an admin added and can freely delete.
+    # itself) -- read-only here, moved off the general Domains page
+    # entirely so it isn't mistaken for a domain an admin added and can
+    # freely delete.
     required_domains = conn.execute(
         "SELECT * FROM domains WHERE protected = 1 ORDER BY pattern"
     ).fetchall()
@@ -2263,11 +2199,11 @@ def _global_domains(conn) -> list:
     """Every is_global=1, non-protected domain, for GLOBAL_SITES_CARD --
     shared by user_detail() and group_detail() (see that constant's own
     docstring for why this exists). Excludes protected=1 infrastructure
-    domains (2026-09-13, RoadMap.md) for the same reason users()'s own
-    "N assigned" count does: they're not on the Domains page this card's
-    hint text points admins toward, they're on the Crunchyroll integration
-    page instead, so counting them in here would make this card and that
-    count disagree with each other."""
+    domains for the same reason users()'s own "N assigned" count does:
+    they're not on the Domains page this card's hint text points admins
+    toward, they're on the Crunchyroll integration page instead, so
+    counting them in here would make this card and that count disagree
+    with each other."""
     return conn.execute(
         "SELECT pattern, mode, note FROM domains WHERE is_global = 1 AND protected = 0 ORDER BY pattern"
     ).fetchall()
@@ -2326,8 +2262,8 @@ ACCESS_SELECTS = """
   <p class="hint" style="margin-top:.5rem;">Type to search, then click a result to add it as a tag -- click a tag's &times; to remove it.</p>
 """
 
-# Phase 8: same widget/field shape as ACCESS_SELECTS above (is_global +
-# three multi comboboxes, posting user_ids/group_ids/device_ids) -- but
+# Same widget/field shape as ACCESS_SELECTS above (is_global + three
+# multi comboboxes, posting user_ids/group_ids/device_ids) -- but
 # categories/schedules are a BLOCK-list, the opposite polarity from
 # domains' allow-list, so the copy says "Block for" / "Blocked for"
 # instead of "Everyone" / the allow-oriented hint text, to avoid this
@@ -2493,10 +2429,10 @@ DOMAINS_BODY = """
   var manageToggle = document.getElementById("domainBulkManageToggle");
   var managePanel = document.getElementById("domainBulkManagePanel");
 
-  // Same Entra-style toolbar pattern as Devices/Users/Categories/Schedules
-  // (RoadMap.md's dated entry) -- replaces this page's old <details>
-  // bulk-assign disclosure with the same "buttons above the table,
-  // disabled until something's checked" toolbar used everywhere else.
+  // Same toolbar pattern as Devices/Users/Categories/Schedules --
+  // replaces this page's old <details> bulk-assign disclosure with the
+  // same "buttons above the table, disabled until something's checked"
+  // toolbar used everywhere else.
   function updateToolbarState() {
     if (!toolbar) return;
     var n = document.querySelectorAll(".bulk-domain-check:checked").length;
@@ -2653,14 +2589,13 @@ def _report_filter_combo(all_users, all_groups, all_devices) -> list[dict]:
 
 def _get_report_filter(conn, args):
     """Resolves the Report page's filter to at most one of (filtered_user,
-    filtered_group, filtered_device) -- added 2026-08-31 alongside
-    access_log.device_id (RoadMap.md's dated entry, GH #9) so a row with
-    no user_id at all (a group- or device-only identity) can still be
-    filtered/acted on. ?target= (the same combined combobox encoding the
-    Domains page already uses -- 'user:5'/'group:2'/'device:7', decoded by
-    _parse_filter_target) takes priority over the legacy ?user=<username>
-    param, kept working for any existing bookmarks/links that still point
-    at it."""
+    filtered_group, filtered_device) -- so a row with no user_id at all
+    (a group- or device-only identity) can still be filtered/acted on.
+    ?target= (the same combined combobox encoding the Domains page
+    already uses -- 'user:5'/'group:2'/'device:7', decoded by
+    _parse_filter_target) takes priority over the legacy
+    ?user=<username> param, kept working for any existing bookmarks/
+    links that still point at it."""
     target = args.get("target", "")
     if target:
         decoded = _parse_filter_target(target)
@@ -2708,11 +2643,9 @@ def _get_filtered_target(conn, args_or_form):
 @app.route("/domains")
 @require_admin
 def domains():
-    """Added 2026-09-07 (RoadMap.md's dated entry, project owner's
-    explicit request, same "these can grow extensively with time"
-    reasoning as Devices/Categories the same day): paginated (page-size
-    picker + Prev/Next). Sliced in Python, not a SQL LIMIT/OFFSET --
-    unlike Devices, the filtered branch below already has to evaluate
+    """Paginated (page-size picker + Prev/Next). Sliced in Python, not a
+    SQL LIMIT/OFFSET -- unlike Devices, the filtered branch below already
+    has to evaluate
     matching.*_has_domain() per row in Python (there's no SQL-level way
     to express "does this domain resolve for this specific user/group/
     device" without reimplementing that logic as a second copy), so the
@@ -2730,13 +2663,13 @@ def domains():
         # Same rule the proxy itself uses at request time (matching.py),
         # reused here rather than reimplemented as a second copy of the
         # "is this domain visible to this user/group/device" logic.
-        # protected = 0: infrastructure the Crunchyroll integration depends
-        # on (2026-09-13, RoadMap.md) doesn't belong on this page at all --
-        # it's not something an admin assigned or can delete, so it lives
-        # on the Crunchyroll integration page's own "Required domains" card
+        # protected = 0: infrastructure the Crunchyroll integration
+        # depends on doesn't belong on this page at all -- it's not
+        # something an admin assigned or can delete, so it lives on the
+        # Crunchyroll integration page's own "Required domains" card
         # instead. Still fully enforced either way (matching.py doesn't
-        # care where a row is displayed) -- this only affects what shows up
-        # here to browse/search/delete.
+        # care where a row is displayed) -- this only affects what shows
+        # up here to browse/search/delete.
         all_rows = conn.execute(
             "SELECT * FROM domains WHERE protected = 0 ORDER BY is_global DESC, pattern"
         ).fetchall()
@@ -2751,16 +2684,14 @@ def domains():
             "SELECT * FROM domains WHERE protected = 0 ORDER BY is_global DESC, pattern"
         ).fetchall()
 
-    # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
-    # 2026-09-07 pagination work, project owner's explicit request): now
-    # that this list only renders one page at a time, the old
-    # client-side search box would have silently only searched whatever
-    # page happened to be on screen -- so search moved server-side.
-    # Applied here in plain Python rather than SQL: the target-filter
-    # branch above already has to materialize the full row list before
-    # pagination gets a say (see this function's docstring), so this is
-    # just one more filter pass over that same list, not a second,
-    # SQL-level implementation of the same logic.
+    # Server-side search: since this list only renders one page at a
+    # time, a client-side search box would silently only search whatever
+    # page happened to be on screen. Applied here in plain Python rather
+    # than SQL: the target-filter branch above already has to
+    # materialize the full row list before pagination gets a say (see
+    # this function's docstring), so this is just one more filter pass
+    # over that same list, not a second, SQL-level implementation of the
+    # same logic.
     search = (request.args.get("q") or "").strip()
     if search:
         needle = search.lower()
@@ -2879,8 +2810,8 @@ def add_domain():
 @app.route("/domains/add-url", methods=["POST"])
 @require_admin
 def add_domain_from_url():
-    """GH #6: approve one specific page without the three separate steps
-    (add domain, flip to bump, add a path pattern from a different page).
+    """Approve one specific page without the three separate steps (add
+    domain, flip to bump, add a path pattern from a different page).
     Only usable from a user's filtered Domains view (?user_id=), since
     approving a page always means approving it *for someone* -- there's no
     "everyone gets this one page" equivalent the way whole-domain
@@ -2961,13 +2892,13 @@ def delete_domain():
             "(edit its mode/paths from Manage instead).",
             error=True, **redirect_kwargs,
         )
-    # 2026-09-13, RoadMap.md, project owner's explicit request: infrastructure
-    # the Crunchyroll integration depends on (defaults/seed_defaults.py's
-    # GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS) -- same "can't be deleted from
-    # here" protection the built-in Crunchyroll domain above already had,
-    # extended to the domains its own playback actually depends on. Managed
-    # (viewed, mode/note edited) from the Crunchyroll integration page's own
-    # "Required domains" card instead, not this generic Domains page.
+    # Infrastructure the Crunchyroll integration depends on (defaults/
+    # seed_defaults.py's GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS) -- same
+    # "can't be deleted from here" protection the built-in Crunchyroll
+    # domain above already had, extended to the domains its own playback
+    # actually depends on. Managed (viewed, mode/note edited) from the
+    # Crunchyroll integration page's own "Required domains" card
+    # instead, not this generic Domains page.
     if row and row["protected"]:
         return flash_redirect(
             "domains",
@@ -3158,11 +3089,8 @@ def update_domain_access():
 @app.route("/domains/bulk-access", methods=["POST"])
 @require_admin
 def bulk_update_domain_access():
-    """Domains list's "bulk categorize" action -- real live-testing
-    feedback (RoadMap.md's dated entry): with dozens of domains in one
-    flat table (27 seeded global ones alone), setting access one at a
-    time via each domain's own Manage page doesn't scale. Checks
-    multiple domain rows on the list (collected client-side into
+    """Domains list's "bulk categorize" action. Checks multiple domain
+    rows on the list (collected client-side into
     domain_ids -- see the bulk-assign form's own inline <script>, since
     the checkboxes live in the table, not inside this form, to avoid
     nesting <form> elements around the per-row Delete forms) and applies
@@ -3198,12 +3126,10 @@ def bulk_update_domain_access():
 @app.route("/domains/export", methods=["GET"])
 @require_admin
 def export_domains_csv():
-    """Domains list's toolbar "Download domains" button (added 2026-09-07,
-    RoadMap.md's dated entry -- same Entra-style toolbar redesign already
-    applied to Devices/Users/Categories/Schedules, extended here to close
-    the last gap). A plain CSV of every domain, not gated by checkbox
-    selection, same "always available regardless of selection" role every
-    other page's own Download button plays."""
+    """Domains list's toolbar "Download domains" button. A plain CSV of
+    every domain, not gated by checkbox selection, same "always
+    available regardless of selection" role every other page's own
+    Download button plays."""
     conn = get_db()
     # protected domains are excluded here too -- see domains()'s own comment;
     # they're not something an admin added or can act on from this page.
@@ -3231,9 +3157,9 @@ def bulk_delete_domains():
     """Domains list's toolbar "Delete" button. Same built-in-Crunchyroll
     protection as the single-domain delete_domain() route above (that
     domain is load-bearing for the show-approval feature), plus the same
-    protection for the infrastructure domains it depends on (protected=1,
-    2026-09-13, RoadMap.md) -- either kind is silently skipped (not
-    deleted) even if checked, rather than erroring out the whole batch.
+    protection for the infrastructure domains it depends on
+    (protected=1) -- either kind is silently skipped (not deleted) even
+    if checked, rather than erroring out the whole batch.
     These no longer even appear on this page's own list to be checked in
     the first place (see domains()), but this guard stays regardless --
     never trust the UI alone to be the only thing enforcing this."""
@@ -3265,11 +3191,10 @@ def bulk_delete_domains():
 def _extract_path(raw: str) -> str:
     """Accepts either a bare path (`/comics/foo`) or a full URL
     (`https://example.com/comics/foo`, scheme optional) and returns just
-    the path part, always leading-slash. Added 2026-09-07 (RoadMap.md's
-    dated entry, project owner's explicit direction) so add_path() below
-    can accept a plain pasted URL/path instead of requiring hand-written
-    regex -- same `urlparse(...).path` extraction add_domain_from_url()
-    already uses for its own "paste a URL" shortcut."""
+    the path part, always leading-slash. Lets add_path() below accept a
+    plain pasted URL/path instead of requiring hand-written regex --
+    same `urlparse(...).path` extraction add_domain_from_url() already
+    uses for its own "paste a URL" shortcut."""
     raw = raw.strip()
     if "://" not in raw and not raw.startswith("/"):
         # A bare host-and-path with no scheme (e.g. "example.com/x") would
@@ -3305,9 +3230,7 @@ def _extract_domain(raw: str) -> str | None:
 @app.route("/domains/paths/add", methods=["POST"])
 @require_admin
 def add_path():
-    """Takes a plain pasted path or URL, not hand-written regex --
-    changed 2026-09-07 (RoadMap.md's dated entry): "the admin can just
-    paste the URL and everything after what is pasted is allowed."
+    """Takes a plain pasted path or URL, not hand-written regex.
     Converts it the exact same way the auto-suggested-from-a-blocked-
     request flow already did (`path_to_pattern()`: anchored, fully
     `re.escape()`d, no trailing anchor so it also matches anything
@@ -3338,16 +3261,13 @@ def delete_path():
     conn = get_db()
     row = conn.execute("SELECT domain_id FROM domain_paths WHERE id = ?", (path_id,)).fetchone()
     if row is None:
-        # Fixed 2026-09-02, a real bug found by code review: this used
-        # to fall through to flash_redirect("domain_detail", ...,
-        # domain_id=None) below, and domain_detail's route requires an
-        # <int:domain_id> -- url_for() raises an unhandled
-        # werkzeug.routing.BuildError for a None value there (confirmed
-        # by reproducing it directly), turning a harmless double-click
-        # or stale-page click into an unhandled 500. Every sibling
-        # delete route (delete_category_domain, delete_category_override)
-        # already redirects to the LIST page with a "no longer exists"
-        # flash for the identical situation -- matching that here.
+        # domain_id is unknown here (the path row is already gone), and
+        # domain_detail's route requires an <int:domain_id> -- url_for()
+        # would raise an unhandled werkzeug.routing.BuildError for a
+        # None value. Every sibling delete route (delete_category_domain,
+        # delete_category_override) already redirects to the LIST page
+        # with a "no longer exists" flash for the identical situation --
+        # matching that here.
         return flash_redirect("domains", "That path no longer exists.", error=True)
     conn.execute("DELETE FROM domain_paths WHERE id = ?", (path_id,))
     conn.commit()
@@ -3355,10 +3275,10 @@ def delete_path():
 
 
 # ==========================================================
-# DEVICES (v2 roadmap groundwork -- see common/db.py's `devices` table
-# comment. Nothing in the proxy/dashboard enforcement path reads these
-# flags yet; this page just lets an admin start tracking devices and
-# curating the future SSL-Bump list ahead of the interception-layer work.)
+# DEVICES -- see common/db.py's `devices` table comment. Nothing in the
+# proxy/dashboard enforcement path reads these flags yet; this page just
+# lets an admin start tracking devices and curating the future SSL-Bump
+# list ahead of the interception-layer work.
 # ==========================================================
 
 MAC_ADDRESS_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
@@ -3746,11 +3666,9 @@ DEVICES_BODY = """
   var countLabel = document.getElementById("deviceBulkCount");
   var toolbar = document.getElementById("deviceBulkToolbar");
 
-  // Real live-testing feedback (RoadMap.md's dated entry, referencing
-  // Microsoft Entra's own admin console as the model): moved the bulk
-  // actions here, above the table, from a separate card below it --
-  // and the action buttons now start disabled, enabling only once
-  // something's actually checked, same "greyed out until a selection
+  // Bulk actions live above the table (not a separate card below it),
+  // and the action buttons start disabled, enabling only once
+  // something's actually checked -- same "greyed out until a selection
   // exists" pattern Entra's own device/user lists use.
   var manageToggle = document.getElementById("deviceBulkManageToggle");
   var managePanel = document.getElementById("deviceBulkManagePanel");
@@ -3836,7 +3754,7 @@ DEVICES_BODY = """
 
 
 # ==========================================================
-# CATEGORIES (Phase 8)
+# CATEGORIES
 # ==========================================================
 
 CATEGORIES_BODY = """
@@ -3993,9 +3911,7 @@ CATEGORIES_BODY = """
   // Placed AFTER the form above, deliberately -- a <script> tag runs
   // synchronously the moment the parser reaches it, and
   // categoryNameInput/categorySubscriptionUrlInput don't exist in the
-  // DOM yet if this ran any earlier (confirmed live: an earlier
-  // placement before the form left this whole IIFE silently
-  // returning on its own !nameInput guard, every single time).
+  // DOM yet if this ran any earlier.
   var picker = document.getElementById("categoryCatalogPicker");
   var nameInput = document.getElementById("categoryNameInput");
   var urlInput = document.getElementById("categorySubscriptionUrlInput");
@@ -4138,15 +4054,12 @@ def _validate_subscription_url(raw: str) -> tuple[str | None, str | None]:
     ever stored. Returns (normalized_url, None) on success, or
     (None, error_message) on failure.
 
-    Added 2026-09-02, a real gap found by code review: this field used
-    to be stored with ZERO validation, unlike the sibling
-    add_domain_from_url()'s URL-accepting flow (which strictly checks
-    hostname syntax), despite being fetched server-side later by
+    Guards against SSRF: this URL is fetched server-side later by
     controller/category_fetch.py's own background sync job with no
-    restriction applied at the point of entry -- an SSRF-adjacent risk
-    if this field is ever pointed at an internal/link-local address
-    (this box's own AdGuard admin API, a router's admin page, a cloud
-    metadata endpoint).
+    restriction applied at the point of entry, so pointing it at an
+    internal/link-local address (this box's own AdGuard admin API, a
+    router's admin page, a cloud metadata endpoint) would otherwise go
+    unchecked.
 
     Mirrors add_domain_from_url()'s scheme/hostname-syntax checks, then
     goes further: an IP-literal hostname is resolved via the stdlib
@@ -4208,23 +4121,18 @@ def add_category():
         raise
     if not subscription_url:
         return flash_redirect("categories", f"Added {name}.")
-    # Real UX gap, RoadMap.md 2026-09-14, project owner's explicit
-    # request: a newly-added subscription category used to sit empty
-    # (blocking nothing) until the admin separately clicked "Sync now"
-    # on its own page -- easy to miss, and not obvious that a freshly-
-    # added category needs a second manual step at all. Syncs
-    # synchronously right here, the exact same call sync_category_now()
-    # already makes and already tolerates taking a while for a large
-    # source (DEFAULT_TIMEOUT=20s) -- "Add" alone is now enough.
+    # Syncs synchronously right here, the exact same call
+    # sync_category_now() already makes and already tolerates taking a
+    # while for a large source (DEFAULT_TIMEOUT=20s) -- so a freshly
+    # added category doesn't sit empty until a separate "Sync now" click.
     #
     # Deliberately does NOT promise an automatic retry on failure/
     # timeout: controller/main.py's own background category-fetch loop
     # defaults to once every 24h AND only runs at all while the
     # interception profile is up, which this household leaves off most
-    # of the time (RoadMap.md's standing interception-confirmation
-    # rule) -- there is no dependable "it'll just appear in a few
-    # minutes" to honestly promise here, so a failure says exactly
-    # that and points at the one thing that actually works on demand.
+    # of the time -- there is no dependable "it'll just appear in a few
+    # minutes" to honestly promise here, so a failure says exactly that
+    # and points at the one thing that actually works on demand.
     category = conn.execute("SELECT * FROM categories WHERE name = ?", (name,)).fetchone()
     try:
         count = category_fetch.fetch_and_sync_category(conn, category)
@@ -4251,11 +4159,11 @@ def delete_category():
     conn = get_db()
     row = conn.execute("SELECT name FROM categories WHERE id = ?", (category_id,)).fetchone()
     conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
-    # Real bug, RoadMap.md 2026-09-13: without this, a deleted starter
-    # category (defaults/seed_defaults.py's DEFAULT_CATEGORIES, e.g.
-    # "Weapons") silently came back on the very next proxy container
-    # start/restart -- seed()'s own INSERT OR IGNORE has no way to tell
-    # "never created" apart from "an admin removed this on purpose".
+    # Without this, a deleted starter category (defaults/seed_defaults.py's
+    # DEFAULT_CATEGORIES, e.g. "Weapons") would silently come back on
+    # the very next proxy container start/restart -- seed()'s own
+    # INSERT OR IGNORE has no way to tell "never created" apart from "an
+    # admin removed this on purpose".
     if row is not None:
         db.add_deleted_category_name(conn, row["name"])
     conn.commit()
@@ -4265,11 +4173,11 @@ def delete_category():
 @app.route("/categories/bulk-delete", methods=["POST"])
 @require_admin
 def bulk_delete_categories():
-    """Categories list's toolbar "Delete" button (RoadMap.md's dated
-    entry -- extending the Devices/Domains/Users bulk-actions pattern to
-    every list page). No Enable/Disable here -- a category's `is_global`
-    flag is a real per-target assignment, not a simple on/off toggle the
-    way a device's pause state is, so there's no clean equivalent."""
+    """Categories list's toolbar "Delete" button -- extends the
+    Devices/Domains/Users bulk-actions pattern to every list page. No
+    Enable/Disable here -- a category's `is_global` flag is a real
+    per-target assignment, not a simple on/off toggle the way a
+    device's pause state is, so there's no clean equivalent."""
     category_ids = {int(x) for x in request.form.getlist("category_ids") if x.isdigit()}
     if not category_ids:
         return flash_redirect("categories", "No categories selected.", error=True)
@@ -4477,21 +4385,12 @@ CATEGORY_DETAIL_BODY = """
 """
 
 
-# Added 2026-09-07, project owner's explicit request: clicking "Manage"
-# on a large category (a real subscription list can run past 900,000
-# rows -- see idx_category_domains_pattern's own comment in db.py) used
-# to render every single domain into the page at once, which is slow to
-# generate, slow for the browser to lay out, made scrolling janky, and
-# buried the "Allow-exceptions" card at the bottom of a huge table no
-# one could practically scroll past. Paginated like a modern list/detail
-# view instead (https://design.infor.com/patterns/page-layouts/list-and-details/
-# was the reference the project owner pointed at): a page-size picker
-# plus Prev/Next, entirely server-side (LIMIT/OFFSET), so the page never
-# renders more than one page's worth of rows regardless of how large the
-# category actually is. **Generalized the same day** to Devices, Domains,
-# and a user's own Assigned sites list -- same "these lists all grow
-# without bound over time" reasoning, same shared (page, per_page)
-# parsing and options list, so every paginated list on this site behaves
+# A real subscription list can run past 900,000 rows (see
+# idx_category_domains_pattern's own comment in db.py), so a category's
+# domain list is paginated server-side (LIMIT/OFFSET) rather than
+# rendering every domain at once. Shared (page, per_page) parsing and
+# options list used by every paginated list on this site (Devices,
+# Domains, Categories, a user's own Assigned sites) so they all behave
 # identically rather than each page inventing its own page-size choices.
 LIST_PAGE_SIZE_OPTIONS = [25, 50, 100, 250]
 DEFAULT_LIST_PAGE_SIZE = 50
@@ -4537,13 +4436,12 @@ def category_detail(category_id: int):
     domain_count = conn.execute(
         "SELECT COUNT(*) AS c FROM category_domains WHERE category_id = ?", (category_id,)
     ).fetchone()["c"]
-    # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
-    # 2026-09-07 pagination work): a category's own domain list is the
-    # one paginated list on this site that can genuinely reach the
-    # hundreds of thousands of rows (a real subscription source), so
-    # finding one specific domain by paging through by hand doesn't
-    # scale at all. `?q=` searches `pattern` via SQL `LIKE` before the
-    # `LIMIT`/`OFFSET`. Honest tradeoff, unlike Devices/Domains' search:
+    # A category's own domain list is the one paginated list on this
+    # site that can genuinely reach the hundreds of thousands of rows (a
+    # real subscription source), so finding one specific domain by
+    # paging through by hand doesn't scale. `?q=` searches `pattern` via
+    # SQL `LIKE` before the `LIMIT`/`OFFSET`. Honest tradeoff, unlike
+    # Devices/Domains' search:
     # a leading-wildcard LIKE can't use the `UNIQUE(category_id,
     # pattern)` index the unfiltered path is built to exploit, so an
     # active search on a 900K-row category does a real sequential scan
@@ -4670,9 +4568,7 @@ def update_category_access():
 @app.route("/categories/bulk-access", methods=["POST"])
 @require_admin
 def bulk_update_category_access():
-    """Categories list's "Manage access" bulk action -- added 2026-09-07,
-    project owner's explicit request: "Add the ability for me to bulk
-    assign categories to users, groups, or everyone." Same shape as
+    """Categories list's "Manage access" bulk action. Same shape as
     bulk_update_domain_access(): checkboxes on the list (collected
     client-side, since the checkboxes live in the table, not inside this
     form, to avoid nesting <form> elements around each row's own Delete
@@ -4728,10 +4624,9 @@ def bulk_update_category_access():
 @app.route("/categories/bulk-sync", methods=["POST"])
 @require_admin
 def bulk_sync_categories():
-    """Categories list's "Sync" bulk action -- added 2026-09-07, project
-    owner's explicit request: "Add the ability for me to bulk sync
-    categories." Distinct from the pre-existing "Sync all subscriptions
-    now" card (sync_all_categories_now(), which always syncs literally
+    """Categories list's "Sync" bulk action. Distinct from the
+    pre-existing "Sync all subscriptions now" card
+    (sync_all_categories_now(), which always syncs literally
     every subscription-backed category) -- this one respects the
     checkbox selection, same as every other bulk route on this page. A
     manual-only category (no subscription_url) has nothing to sync and
@@ -4796,12 +4691,9 @@ def add_category_domain():
 @app.route("/categories/domains/bulk-add", methods=["POST"])
 @require_admin
 def bulk_add_category_domains():
-    """Category detail page's "Add many domains at once" panel -- added
-    2026-09-07 (RoadMap.md's dated entry, project owner's explicit
-    request: import every site from an aggregator page as one category
-    in a single paste, rather than one add_category_domain() call per
-    domain). Accepts one bare domain, domain+path, or full URL per
-    line -- same "paste whatever you've got" extraction _extract_path()
+    """Category detail page's "Add many domains at once" panel. Accepts
+    one bare domain, domain+path, or full URL per line -- same "paste
+    whatever you've got" extraction _extract_path()
     already uses for bump-mode paths -- de-dupes, strips a leading
     'www.', and stores each as an escaped literal (re.escape()), the
     same regex-pattern shape add_category_domain() stores, just derived
@@ -4889,14 +4781,12 @@ def sync_category_now(category_id: int):
     except category_fetch.CategoryFetchError as exc:
         return flash_redirect("category_detail", f"Sync failed: {exc}", error=True, category_id=category_id)
     if count == 0:
-        # Real gap found 2026-09-06: the fetch itself can succeed
-        # against a URL that isn't actually a supported blocklist format
-        # (a webpage, a documentation page) -- parse_hostlist() then
-        # legitimately finds zero recognizable lines, which used to read
-        # as an unexplained "Synced 0 domains." with no hint anything
-        # was wrong. Almost every real subscription source has domains,
-        # so 0 is worth flagging as likely-wrong-format rather than
-        # treated the same as a normal non-zero refresh.
+        # The fetch itself can succeed against a URL that isn't actually
+        # a supported blocklist format (a webpage, a documentation page)
+        # -- parse_hostlist() then legitimately finds zero recognizable
+        # lines. Almost every real subscription source has domains, so
+        # 0 is worth flagging as likely-wrong-format rather than treated
+        # the same as a normal non-zero refresh.
         return flash_redirect(
             "category_detail",
             "Fetched successfully but found 0 recognizable domains -- this almost always means the URL "
@@ -4909,13 +4799,11 @@ def sync_category_now(category_id: int):
 @app.route("/categories/<int:category_id>/subscription", methods=["POST"])
 @require_admin
 def update_category_subscription(category_id: int):
-    """Real gap fixed 2026-09-08: previously the only way to change a
-    category's subscription_url once set was to delete and recreate the
-    whole category (losing its access assignments, manual domains, and
-    overrides in the process) -- add_category() could set it, but
-    nothing could ever edit it. Also covers going the other direction
-    (manual-only -> subscribed) or clearing it entirely (subscribed ->
-    manual-only), from the same one field."""
+    """Changes a category's subscription_url without deleting and
+    recreating the whole category (which would lose its access
+    assignments, manual domains, and overrides). Also covers going the
+    other direction (manual-only -> subscribed) or clearing it entirely
+    (subscribed -> manual-only), from the same one field."""
     raw_url = request.form.get("subscription_url", "").strip()
     conn = get_db()
     category = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
@@ -4974,7 +4862,7 @@ def sync_all_categories_now():
 
 
 # ==========================================================
-# SCHEDULES (Phase 8)
+# SCHEDULES
 # ==========================================================
 
 _DAY_CODES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -5367,11 +5255,11 @@ def delete_schedule():
 @app.route("/schedules/bulk-delete", methods=["POST"])
 @require_admin
 def bulk_delete_schedules():
-    """Schedules list's toolbar "Delete" button (RoadMap.md's dated
-    entry -- extending the Devices/Domains/Users/Categories bulk-actions
-    pattern to every list page). No Enable/Disable here either -- a
-    schedule's own time window already governs when it's active; there's
-    no separate on/off flag to toggle in bulk."""
+    """Schedules list's toolbar "Delete" button -- extends the
+    Devices/Domains/Users/Categories bulk-actions pattern to every list
+    page. No Enable/Disable here either -- a schedule's own time window
+    already governs when it's active; there's no separate on/off flag
+    to toggle in bulk."""
     schedule_ids = {int(x) for x in request.form.getlist("schedule_ids") if x.isdigit()}
     if not schedule_ids:
         return flash_redirect("schedules", "No schedules selected.", error=True)
@@ -5554,9 +5442,7 @@ def _replace_schedule_access(conn, schedule_id, is_global: int, user_ids: set[in
 @app.route("/schedules/bulk-access", methods=["POST"])
 @require_admin
 def bulk_update_schedule_access():
-    """Schedules list's "Manage access" bulk action -- 2026-09-11, project
-    owner's explicit request: "I need the ability to bulk assign
-    schedules to users, devices, or groups." Same shape as
+    """Schedules list's "Manage access" bulk action. Same shape as
     bulk_update_category_access(): checkboxes on the list (collected
     client-side, since the checkboxes live in the table, not inside this
     form, to avoid nesting <form> elements around each row's own Delete
@@ -5607,17 +5493,14 @@ def bulk_update_schedule_access():
 @app.route("/schedules/update", methods=["POST"])
 @require_admin
 def update_schedule():
-    """Single merged Save for the Schedule detail page (RoadMap.md item
-    3, "one Save button per settings-shaped page, not several"). Used
-    to be three independent forms/routes -- this one for the time
-    window, a separate update_schedule_access() for who it applies to,
-    a separate update_schedule_categories() for which categories it
-    blocks -- saved one at a time. Merged into one atomic save: a bad
-    value anywhere (an invalid time zone, say) leaves the WHOLE
-    schedule unchanged, never partially saved. All three areas describe
-    one schedule, unlike Settings' many genuinely-unrelated topics (see
-    SETTINGS_BODY's own comment on why those stayed separate) -- no
-    "isolate the blast radius" argument applies here.
+    """Single merged Save for the Schedule detail page: the time window,
+    who it applies to, and which categories it blocks are all saved in
+    one atomic write, rather than three separate forms/routes saved one
+    at a time -- a bad value anywhere (an invalid time zone, say) leaves
+    the WHOLE schedule unchanged, never partially saved. All three areas
+    describe one schedule, unlike Settings' many genuinely-unrelated
+    topics (see SETTINGS_BODY's own comment on why those stayed
+    separate) -- no "isolate the blast radius" argument applies here.
 
     categories_section_present distinguishes "the categories checkbox
     list was on the page and got submitted with nothing checked" from
@@ -5668,24 +5551,21 @@ def update_schedule():
 @app.route("/schedules/override", methods=["POST"])
 @require_admin
 def add_schedule_override():
-    """Phase 12: 'Shift mode now' -- a one-off, time-boxed action that
-    forces a specific is_mode schedule active for a single target
-    (user/group/device) for a chosen duration, superseding every other
-    is_mode schedule that would otherwise apply to that same target for
-    the window. See common/schedule_eval.py's schedule_is_active_for_device()
+    """'Shift mode now' -- a one-off, time-boxed action that forces a
+    specific is_mode schedule active for a single target (user/group/
+    device) for a chosen duration, superseding every other is_mode
+    schedule that would otherwise apply to that same target for the
+    window. See common/schedule_eval.py's schedule_is_active_for_device()
     for the enforcement side; this route only ever writes one row to
-    schedule_overrides. Deliberately not a saved/reusable preset -- see
-    RoadMap.md's design discussion.
+    schedule_overrides. Deliberately not a saved/reusable preset.
 
-    RoadMap.md item 24 (2026-09-09, project owner's explicit request:
-    "I need the ability to do a shift schedule from the user page (not
-    just the schedule page)"): also reachable from a User's own detail
-    page now, which already knows its target (no combobox needed there,
-    just a hidden `target=user:<id>`) -- `redirect_to`/`user_id` (a
-    SEPARATE field from the target's own encoded user id, present even
-    when target parsing fails validation below) send the flash back to
-    that page instead of the Schedules page, same `redirect_to`
-    convention `pause_device()`/`resume_device()` already use."""
+    Also reachable from a User's own detail page, which already knows
+    its target (no combobox needed there, just a hidden
+    `target=user:<id>`) -- `redirect_to`/`user_id` (a SEPARATE field
+    from the target's own encoded user id, present even when target
+    parsing fails validation below) send the flash back to that page
+    instead of the Schedules page, same `redirect_to` convention
+    `pause_device()`/`resume_device()` already use."""
     schedule_id = request.form.get("schedule_id", "")
     target = request.form.get("target", "")
     redirect_to = request.form.get("redirect_to", "schedules")
@@ -5754,9 +5634,8 @@ def _failed_login_attempts(conn, mac_address: str) -> dict | None:
     """How many times this MAC has failed the captive-portal kid login,
     and when most recently -- lets the pending-devices card distinguish
     "never tried" from "tried and got denied because nobody's assigned
-    this device yet" (added 2026-09-07, real gap found by live user
-    testing). Correlates via `system_events.detail`, which
-    `captive_portal_server.py`'s `_log_failed_login()` now stores the
+    this device yet". Correlates via `system_events.detail`, which
+    `captive_portal_server.py`'s `_log_failed_login()` stores the
     attempting device's MAC into for the `captive_portal_login` source
     specifically (not the separate portal admin-bypass action -- a
     different kind of attempt). Returns None (not a zero count) when
@@ -5777,9 +5656,9 @@ def _out_of_lan_device_ids(conn) -> set:
     `local_network` (e.g. a 172.17.x Docker-bridge address the
     controller's discovery loop picked up off the docker0 interface).
     These are hidden from the Devices page as a stopgap -- the real fix
-    is discovery rejecting non-LAN IPs at record time, controller-side
-    (RoadMap.md's 2026-09-10 findings, #3). A device with no bindings at
-    all, or with at least one in-LAN binding, is never in this set.
+    is discovery rejecting non-LAN IPs at record time, controller-side.
+    A device with no bindings at all, or with at least one in-LAN
+    binding, is never in this set.
     Returns an empty set when `local_network` is unset (LAN check
     disabled), so nothing is hidden in that case."""
     import ipaddress
@@ -5808,14 +5687,12 @@ def _out_of_lan_device_ids(conn) -> set:
 
 _DEVICE_LIST_SELECT = (
     "SELECT d.*, u.display_name, g.name AS group_name, COALESCE(g.ignored, 0) AS group_ignored, "
-    # Fixed 2026-09-08 (real bug found live, RoadMap.md's dated entry):
-    # this used to only check d.ignored, not the device's GROUP being in
-    # Ignore mode -- a device made effectively-ignored only via group
-    # membership (see the `effective_ignored` Jinja variable elsewhere on
-    # this page, which already accounts for both) still read `pending`
-    # here, so it kept showing up in "Devices awaiting login" and kept
-    # its "Awaiting login" badge in the main table even though it was,
-    # in every other respect, already treated as ignored.
+    # Checks both d.ignored AND the device's GROUP being in Ignore mode --
+    # a device made effectively-ignored only via group membership (see
+    # the `effective_ignored` Jinja variable elsewhere on this page,
+    # which already accounts for both) would otherwise still read
+    # `pending` here, showing up in "Devices awaiting login" despite
+    # being treated as ignored everywhere else.
     "(d.ignored = 0 AND COALESCE(g.ignored, 0) = 0 "
     " AND d.bypass_login = 0 AND d.is_authenticated = 0) AS pending, "
     # devices.last_seen_at is never actually populated by anything
@@ -5832,8 +5709,8 @@ _DEVICE_LIST_SELECT = (
     "(SELECT source FROM device_bindings WHERE mac_address = d.mac_address "
     " ORDER BY last_seen_at DESC LIMIT 1) AS binding_source, "
     # Best-effort mDNS reverse-PTR result for the same "current" binding
-    # row (controller/mdns_lookup.py, 2026-09-11) -- NULL until/unless
-    # that device actually answers an mDNS query. Display only, see
+    # row (controller/mdns_lookup.py) -- NULL until/unless that device
+    # actually answers an mDNS query. Display only, see
     # common/db.py's device_bindings.hostname schema comment.
     "(SELECT hostname FROM device_bindings WHERE mac_address = d.mac_address "
     " ORDER BY last_seen_at DESC LIMIT 1) AS current_hostname "
@@ -5846,27 +5723,24 @@ _DEVICE_LIST_SELECT = (
 @app.route("/devices")
 @require_admin
 def devices():
-    """Added 2026-09-07 (RoadMap.md's dated entry, project owner's
-    explicit request, same reasoning as the Categories domain-list
-    pagination the same day: "these can grow extensively with time"):
-    the main device roster is paginated (page-size picker + Prev/Next),
-    but the "Devices awaiting login" card above it deliberately is NOT --
-    it needs every currently-pending device regardless of which page of
-    the full roster is showing, so it's a genuinely separate,
-    independent query rather than a Python filter over the (now only
-    partial) paginated list the way it used to be."""
+    """The main device roster is paginated (page-size picker +
+    Prev/Next), but the "Devices awaiting login" card above it
+    deliberately is NOT -- it needs every currently-pending device
+    regardless of which page of the full roster is showing, so it's a
+    genuinely separate, independent query rather than a Python filter
+    over the paginated list."""
     conn = get_db()
-    # RoadMap 2026-09-10 finding #3: hide devices whose only bindings are
-    # off-LAN (Docker-bridge 172.17.x etc. the discovery loop shouldn't
-    # have recorded). Stopgap until the controller-side fix lands.
+    # Hides devices whose only bindings are off-LAN (Docker-bridge
+    # 172.17.x etc. the discovery loop shouldn't have recorded).
+    # Stopgap until the controller-side fix lands.
     hidden_ids = _out_of_lan_device_ids(conn)
     hidden_clause = ""
     hidden_params: list = []
     if hidden_ids:
         hidden_clause = "d.id NOT IN (%s)" % ",".join("?" * len(hidden_ids))
         hidden_params = list(hidden_ids)
-    # "Dismiss" (2026-09-08): pending_dismissed_at hides a device from
-    # this card ONLY until something genuinely newer happens to it -- a
+    # "Dismiss": pending_dismissed_at hides a device from this card ONLY
+    # until something genuinely newer happens to it -- a
     # fresh network sighting, or a new captive-portal login attempt --
     # at which point it reappears on its own. Nothing ever resets the
     # column to NULL; this comparison is what makes a dismissal
@@ -5885,13 +5759,11 @@ def devices():
         "ORDER BY d.created_at DESC"
     )
     pending_devices = conn.execute(pending_sql, hidden_params).fetchall()
-    # Added 2026-09-08 (RoadMap.md's dated entry, follow-up to the
-    # 2026-09-07 pagination work, project owner's explicit request): now
-    # that the main roster only renders one page at a time, the old
-    # client-side search box would have silently only searched whatever
-    # page happened to be on screen -- so search moved server-side, as a
-    # SQL WHERE applied before the LIMIT/OFFSET (this page already
-    # queries via SQL, unlike Domains' Python-list-slicing). Deliberately
+    # Server-side search: since the main roster only renders one page at
+    # a time, a client-side search box would silently only search
+    # whatever page happened to be on screen. Applied as a SQL WHERE
+    # before the LIMIT/OFFSET (this page already queries via SQL, unlike
+    # Domains' Python-list-slicing). Deliberately
     # does NOT filter pending_devices above -- that card is intentionally
     # every pending device regardless of what's searched for below.
     search = (request.args.get("q") or "").strip()
@@ -5927,8 +5799,8 @@ def devices():
         row["mac_address"]: _failed_login_attempts(conn, row["mac_address"])
         for row in pending_devices
     }
-    # Manufacturer (common/oui_lookup.py, 2026-09-11) is a pure function
-    # of the MAC address itself -- no DB storage needed, computed fresh
+    # Manufacturer (common/oui_lookup.py) is a pure function of the MAC
+    # address itself -- no DB storage needed, computed fresh
     # here same as pending_login_attempts above. current_hostname (the
     # other half of "let me see the device type") already comes back on
     # each row via _DEVICE_LIST_SELECT's own subquery.
@@ -5936,13 +5808,10 @@ def devices():
         row["mac_address"]: oui_lookup.vendor_for_mac(row["mac_address"])
         for row in pending_devices
     }
-    # Same lookup, for the main paginated roster below the pending-devices
-    # card (2026-09-13, project owner's explicit request: Manufacturer and
-    # Hostname were only ever shown on the pending card, not here, despite
-    # _DEVICE_LIST_SELECT already returning current_hostname on every row
-    # regardless of which query used it). Bounded to just this page's rows
-    # (per_page, not the whole roster), same as pending_manufacturers is
-    # bounded to however many devices are actually pending.
+    # Same lookup, for the main paginated roster below the
+    # pending-devices card. Bounded to just this page's rows (per_page,
+    # not the whole roster), same as pending_manufacturers is bounded to
+    # however many devices are actually pending.
     device_manufacturers = {
         row["mac_address"]: oui_lookup.vendor_for_mac(row["mac_address"])
         for row in rows
@@ -5973,8 +5842,7 @@ def add_device():
     # the devices table's own schema default of 1 (fully authenticated,
     # zero captive-portal gate), unlike common/identity.py's
     # _create_pending_device() which explicitly sets 0 for an
-    # auto-discovered MAC. This is NOT the same bug that path was fixed
-    # for -- verified live 2026-09-02 and confirmed intentional: an
+    # auto-discovered MAC. This is intentional, not a bug to match: an
     # admin manually typing in a MAC IS the vouching act (the same way
     # "never seen this MAC before" is treated as NOT vouched-for and
     # gated), and it's the only way a browser-less device (a smart
@@ -6009,11 +5877,11 @@ def add_device():
 @app.route("/devices/import", methods=["POST"])
 @require_admin
 def import_devices():
-    """G7 follow-on (2026-09-01): a fresh setup starts with zero devices
-    (the project owner's own decision -- see docs/deployment/setup.md),
-    so this exists purely as a setup-time convenience for entering many
-    already-known devices (e.g. exported from the router's client list)
-    faster than one at a time, not to solve any gating/migration problem.
+    """A fresh setup starts with zero devices (see
+    docs/deployment/setup.md), so this exists purely as a setup-time
+    convenience for entering many already-known devices (e.g. exported
+    from the router's client list) faster than one at a time, not to
+    solve any gating/migration problem.
 
     Every imported row lands as a plain Unassigned device, same shape as
     add_device() above (no user/group/ignored) -- the actual "select the
@@ -6022,10 +5890,10 @@ def import_devices():
     parallel assignment UI duplicating what's already there.
 
     Also same as add_device() above: is_authenticated is never set here
-    either, so it falls through to the schema default of 1 -- verified
-    live 2026-09-02 that a bulk-imported device lands fully authenticated
-    with zero captive-portal gate, and confirmed intentional, not a gap.
-    This is the actual point of bulk import for a real household: a
+    either, so it falls through to the schema default of 1 -- a
+    bulk-imported device lands fully authenticated with zero
+    captive-portal gate, and that's intentional, not a gap. This is the
+    actual point of bulk import for a real household: a
     browser-less IoT device (a smart plug, a thermostat) can never
     render the captive portal's login page, so admin-imported = known/
     trusted = immediate access is the only way such a device can ever
@@ -6102,16 +5970,15 @@ def import_devices():
 @app.route("/devices/bypass_login", methods=["POST"])
 @require_admin
 def bypass_login_device():
-    """Quick-action from the devices list for a device awaiting login
-    (Phase 4's admin-facing quick-add path, RoadMap.md): sets
-    bypass_login=1 without touching label/bump_enabled -- unlike
+    """Quick-action from the devices list for a device awaiting login:
+    sets bypass_login=1 without touching label/bump_enabled -- unlike
     update_device()'s wholesale form submit, this only ever changes a
     couple fields, so it's safe to fire from a single button in the list
     row without re-submitting the device's other settings.
 
-    **Also defaults `ignored=1` (2026-08-31, project owner's explicit
-    direction)**: a device that will never log in (this button's whole
-    purpose) commonly has no real user/group assignment either -- a smart
+    Also defaults `ignored=1`: a device that will never log in (this
+    button's whole purpose) commonly has no real user/group assignment
+    either -- a smart
     TV, a thermostat -- so defaulting it straight to `ignored` (AdGuard's
     baseline-protection exemption, see common/policy_class.py's
     classify_device()) saves a second manual step. Deliberately only a
@@ -6136,10 +6003,7 @@ def bypass_login_device():
 @app.route("/devices/dismiss_pending", methods=["POST"])
 @require_admin
 def dismiss_pending_device():
-    """"Dismiss" on the "Devices awaiting login" card (2026-09-08,
-    RoadMap.md's dated entry, project owner's explicit request):
-    "I don't want it to do anything but clear the device showing as
-    awaiting logon until it attempts to logon again." Deliberately NOT
+    """"Dismiss" on the "Devices awaiting login" card. Deliberately NOT
     the same as Bypass above -- this is purely a display suppression
     (see the pending_devices query's own comment in devices() for
     exactly how the self-expiring comparison works), never touches
@@ -6155,18 +6019,17 @@ def dismiss_pending_device():
     return flash_redirect("devices", "Dismissed -- it'll reappear here on its own if it's active again.")
 
 
-# G6: ad-hoc "pause the internet" -- Bark Home has one-tap pause per
+# Ad-hoc "pause the internet" -- Bark Home has one-tap pause per
 # device/kid/whole-house; `devices.quarantined_at` + the QUARANTINE
-# nftables set already existed for exactly this (Phase 3) with no
-# dashboard control wired to it until now. All three variants below are
-# plain writes to that one column -- `common/policy_class.py`'s
+# nftables set already existed for exactly this, with no dashboard
+# control wired to it until now. All three variants below are plain
+# writes to that one column -- `common/policy_class.py`'s
 # `classify_device()` already treats a non-NULL `quarantined_at` as
 # QUARANTINE (second-highest precedence, below only BYPASS/`ignored`),
 # and `controller/policy_state.py` already computes it into the real
-# nftables `quarantine_v4` set every cycle, live-verified 2026-09-01
-# (RoadMap.md's Phase 8 entry) with real packet loss and real recovery.
-# No new enforcement code needed anywhere -- this is purely wiring an
-# admin control onto plumbing that was already real.
+# nftables `quarantine_v4` set every cycle. No new enforcement code
+# needed anywhere -- this is purely wiring an admin control onto
+# plumbing that was already real.
 #
 # There is deliberately no separate "why was this paused" column: manual
 # pause and a schedule-driven lockout both express through the exact
@@ -6182,10 +6045,9 @@ def dismiss_pending_device():
 # `ignored` devices from a bulk pause for this reason; the single-device
 # route doesn't need to (the UI simply doesn't offer the button for one).
 #
-# Added 2026-09-07 alongside `groups.ignored` (db.py's own schema
-# comment): a device sitting in an ignored GROUP is exactly as much of a
-# pause no-op as one directly marked `ignored` itself, even though its
-# own `devices.ignored` column may read 0 -- same BYPASS-outranks-
+# A device sitting in an ignored GROUP is exactly as much of a pause
+# no-op as one directly marked `ignored` itself, even though its own
+# `devices.ignored` column may read 0 -- same BYPASS-outranks-
 # QUARANTINE reasoning, just via the group axis instead of the device
 # one. Every route below that spans more than one specific
 # already-known group (pause_all_devices, bulk_pause_devices; NOT
@@ -6266,16 +6128,12 @@ def resume_user():
 @app.route("/groups/pause", methods=["POST"])
 @require_admin
 def pause_group():
-    """Same shape as pause_user() above -- added 2026-09-06, closing a
-    real gap: per-device and per-user pause both already existed, but a
-    group had no pause control at all (no group_detail page even
-    existed to put one on).
+    """Same shape as pause_user() above.
 
-    Added 2026-09-07: if THIS group itself is in Ignore mode
-    (`groups.ignored`), pausing it is a guaranteed no-op for every
-    member device (BYPASS outranks QUARANTINE) -- skip the write
-    entirely and say so, rather than reporting devices "paused" that
-    are actually still unfiltered."""
+    If THIS group itself is in Ignore mode (`groups.ignored`), pausing
+    it is a guaranteed no-op for every member device (BYPASS outranks
+    QUARANTINE) -- skip the write entirely and say so, rather than
+    reporting devices "paused" that are actually still unfiltered."""
     group_id = request.form.get("group_id", "")
     conn = get_db()
     group = conn.execute("SELECT ignored FROM groups WHERE id = ?", (group_id,)).fetchone()
@@ -6376,10 +6234,7 @@ def device_detail(device_id: int):
     # Same correlated-subquery pattern as devices()'s own list query --
     # devices.last_seen_at is never actually populated by anything (see
     # common/db.py's own schema comment), so IP/last-seen/discovery
-    # source all come from device_bindings instead. Fixed 2026-09-07:
-    # this page used to show only the bare MAC address, forcing anyone
-    # troubleshooting a specific device back to the list page (Ctrl+F on
-    # 50+ rows) just to find its current IP.
+    # source all come from device_bindings instead.
     d = conn.execute(
         "SELECT d.*, "
         "(SELECT ipv4_address FROM device_bindings WHERE mac_address = d.mac_address "
@@ -6414,12 +6269,12 @@ def update_device():
     bypass_login = 1 if request.form.get("bypass_login") else 0
     conn = get_db()
 
-    # Defaults bypass_login -> ignored (2026-08-31, project owner's
-    # explicit direction) -- same reasoning as bypass_login_device()'s own
-    # comment: a device that will never log in commonly has no meaningful
-    # assignment either, so default it to `ignored` the moment bypass_login
-    # is newly turned on. Deliberately narrow, so it only ever nudges a
-    # genuine default rather than fighting an admin's explicit choice:
+    # Defaults bypass_login -> ignored, same reasoning as
+    # bypass_login_device()'s own comment: a device that will never log
+    # in commonly has no meaningful assignment either, so default it to
+    # `ignored` the moment bypass_login is newly turned on. Deliberately
+    # narrow, so it only ever nudges a genuine default rather than
+    # fighting an admin's explicit choice:
     #   - only fires on the actual 0->1 transition (checked against the
     #     row's CURRENT value, not just "is the checkbox ticked this
     #     time") -- once set, saving the form again with bypass_login
@@ -6438,16 +6293,12 @@ def update_device():
         "bump_enabled = ?, bypass_login = ? WHERE id = ?",
         (label, user_id, group_id, ignored, bump_enabled, bypass_login, device_id),
     )
-    # 2026-09-11, project owner's explicit request: assigning a device to
-    # a user or group from this page is the same "vouching act" as
-    # add_device()'s own manually-typed-MAC case (see that route's
-    # docstring) -- an admin picking a specific kid or group for a
-    # PREAUTH device IS them recognizing it, no less than typing in its
-    # MAC by hand. Previously only dashboard/captive_portal_server.py's
-    # own separate "assign_group" admin action authenticated on
-    # assignment (and only for groups, never users) -- this closes that
-    # inconsistency here on the page an admin actually uses day to day.
-    # Deliberately does NOT fire for `ignored` or "Unassigned" (both
+    # Assigning a device to a user or group from this page is the same
+    # "vouching act" as add_device()'s own manually-typed-MAC case (see
+    # that route's docstring) -- an admin picking a specific kid or
+    # group for a PREAUTH device IS them recognizing it, no less than
+    # typing in its MAC by hand. Deliberately does NOT fire for
+    # `ignored` or "Unassigned" (both
     # leave user_id and group_id None) -- neither is a vouching act, and
     # this must never flip an already-authenticated device back to
     # PREAUTH either, so it only ever sets 1, never clears it.
@@ -6499,10 +6350,8 @@ def delete_group():
 @app.route("/groups/ignored", methods=["POST"])
 @require_admin
 def update_group_ignored():
-    """Group detail page's "Ignore mode" toggle -- added 2026-09-07,
-    project owner's explicit request: "For Device groups, I need to be
-    able to enable 'ignore mode' for specific device groups." Additive
-    with each member device's own `ignored` bit, not a replacement for
+    """Group detail page's "Ignore mode" toggle. Additive with each
+    member device's own `ignored` bit, not a replacement for
     it (see db.py's schema comment on `groups.ignored`) -- a device
     keeps whatever its own flag says; this only adds a second way for
     the whole group to count as BYPASS at once, everywhere
@@ -6682,10 +6531,9 @@ def group_detail(group_id: int):
     g = conn.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
     if g is None:
         return flash_redirect("devices", "That group no longer exists.", error=True)
-    # Paginated (added 2026-09-08, RoadMap.md's dated entry, natural
-    # follow-up to user_detail()'s identical "Assigned sites" pagination
-    # the day before -- same shape, same reasoning: a heavily-assigned
-    # group's own site list only ever grows).
+    # Paginated, same shape and reasoning as user_detail()'s "Assigned
+    # sites" pagination -- a heavily-assigned group's own site list only
+    # ever grows.
     domain_count = conn.execute(
         "SELECT COUNT(*) AS c FROM group_domains WHERE group_id = ?", (group_id,)
     ).fetchone()["c"]
@@ -6741,11 +6589,11 @@ def _batch_assign_devices_to_group(conn, device_ids: set[int], group_id) -> None
     single-device form already does. Label/bump_enabled/bypass_login
     deliberately untouched -- this only ever changes the assignment,
     nothing else about a device already set up. Also sets
-    is_authenticated = 1 unconditionally (2026-09-11, same reasoning as
+    is_authenticated = 1 unconditionally, same reasoning as
     update_device()'s own comment on this -- unlike that route this
     function is only ever called with a real group_id, never to
     unassign, so there's no "should this fire" branch to worry about
-    here). One explicit transaction for the whole batch (conn opens with
+    here. One explicit transaction for the whole batch (conn opens with
     isolation_level=None -- see common/db.py -- so an un-wrapped
     executemany here would autocommit per row, the same bug class
     common/category_fetch.py's own fix closed at a much larger scale),
@@ -6786,19 +6634,12 @@ def bulk_add_to_group():
 @app.route("/devices/bulk-assign-group", methods=["POST"])
 @require_admin
 def bulk_assign_devices_to_group():
-    """Devices list's own bulk-actions panel -- real live-testing
-    feedback (RoadMap.md's dated entry): the devices table was "getting
-    really clunky" and needed real bulk actions (assign several devices
-    to a group, or delete several at once) instead of one-row-at-a-time.
-    Same _batch_assign_devices_to_group() as bulk_add_to_group() above,
-    just redirecting back to `devices` (not `group_detail`) -- picked
-    from the full device list, not a specific group's own page, so
-    staying there to keep working the list makes more sense than being
-    bounced to whichever group was just picked. Supersedes the previous
-    per-row quick-add-to-group select (2026-09-07 same day) -- that
-    row-level form added exactly the clutter this was meant to fix; the
-    bulk bar below the table handles both the one-device and many-device
-    case with a single control."""
+    """Devices list's own bulk-actions panel. Same
+    _batch_assign_devices_to_group() as bulk_add_to_group() above, just
+    redirecting back to `devices` (not `group_detail`) -- picked from
+    the full device list, not a specific group's own page, so staying
+    there to keep working the list makes more sense than being bounced
+    to whichever group was just picked."""
     group_id = request.form.get("group_id", "")
     device_ids = {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}
     if not group_id:
@@ -6818,10 +6659,7 @@ def bulk_assign_devices_to_group():
 @app.route("/devices/bulk-ignore", methods=["POST"])
 @require_admin
 def bulk_set_ignored_devices():
-    """Devices list's "Set to Ignore" / "Remove Ignore" bulk actions --
-    added 2026-09-07, project owner's explicit request: "I need a bulk
-    action that allows me to assign ignore to a selection of devices...
-    The bulk add to group exists, but the bulk add to ignore does not."
+    """Devices list's "Set to Ignore" / "Remove Ignore" bulk actions.
     Same semantics as the single-device assignment combo
     (_parse_device_assignment("ignored")) and _batch_assign_devices_to_group()
     above (its mirror image): setting ignored=1 clears user_id/group_id
@@ -6852,9 +6690,8 @@ def bulk_set_ignored_devices():
 @app.route("/devices/bulk-pause", methods=["POST"])
 @require_admin
 def bulk_pause_devices():
-    """Devices list's toolbar "Disable" button (RoadMap.md's dated
-    entry, referencing Microsoft Entra's own admin console) -- pauses
-    exactly the checked devices' internet access, same `_set_quarantine()`
+    """Devices list's toolbar "Disable" button -- pauses exactly the
+    checked devices' internet access, same `_set_quarantine()`
     mechanism as the whole-house/per-user/per-group pause buttons
     elsewhere, just scoped to an explicit `IN (...)` id list. Excludes
     `ignored` devices from the count/effect, same reasoning as every
@@ -6888,12 +6725,11 @@ def bulk_resume_devices():
 @app.route("/devices/export", methods=["GET"])
 @require_admin
 def export_devices_csv():
-    """Devices list's toolbar "Download devices" button (same live-
-    testing feedback as the bulk actions above) -- a plain CSV of every
-    device, not gated by checkbox selection (this is a whole-list export,
-    same "always available regardless of selection" role Microsoft
-    Entra's own reference screenshot shows for its equivalent button,
-    unlike Enable/Disable/Delete/Manage which need something checked).
+    """Devices list's toolbar "Download devices" button -- a plain CSV
+    of every device, not gated by checkbox selection (this is a
+    whole-list export, same "always available regardless of selection"
+    role every other page's own Download button plays, unlike
+    Enable/Disable/Delete/Manage which need something checked).
     Richer than bulk-import's own `mac_address,label` format (that one's
     designed to be re-imported elsewhere; this one's for an admin's own
     record-keeping/audit, so it includes assignment/status/flags too)."""
@@ -7225,17 +7061,13 @@ def _report_redirect_kwargs(source) -> dict:
     return kwargs
 
 
-# Fixed 2026-09-08, real gap found live (RoadMap.md's dated entry,
-# project owner's own example: "speedtest.net was blocked on Matthews
-# device but I need to know WHY"): access_log.reason was already
-# populated with a specific, real value for essentially every ALLOW
-# and DENY decision this project makes (authz_helper.py's decide() and
-# _decide_crunchyroll(), block_page_server.py's DNS-tier denial log,
-# common/matching.py's device_domain_reason()) -- the gap was never
-# missing data, it was that the Report page's Activity table only ever
-# rendered a bare "allowed"/"blocked" badge and never looked at
-# row.reason at all. This is every reason code that actually gets
-# logged anywhere in the codebase (grepped for `reason="` and
+# access_log.reason is populated with a specific, real value for
+# essentially every ALLOW and DENY decision this project makes
+# (authz_helper.py's decide() and _decide_crunchyroll(),
+# block_page_server.py's DNS-tier denial log,
+# common/matching.py's device_domain_reason()). This is every reason
+# code that actually gets logged anywhere in the codebase (grepped for
+# `reason="` and
 # `reason=reason`/ternaries across proxy/, dashboard/, common/) --
 # keep this in sync if a new one is ever added; an unrecognized code
 # falls back to showing the raw value verbatim (REPORT_BODY's own
@@ -7247,20 +7079,19 @@ _ACCESS_LOG_REASON_LABELS = {
     "group_domain": "assigned to this device's group",
     "device_domain": "assigned directly to this device",
     "show_approved": "this show is approved",
-    # Added 2026-09-08 alongside the SSL-Bump default-allow fix
-    # (proxy/authz_helper.py, proxy/sni_helper.py): a domain with no
-    # `domains` row at all is allowed by default, same as the DNS tier
-    # already does for every other device -- not something a user/group
-    # explicitly granted, so it gets its own label rather than reusing
-    # one of the assignment-based ones above.
+    # A domain with no `domains` row at all is allowed by default, same
+    # as the DNS tier already does for every other device (see
+    # proxy/authz_helper.py, proxy/sni_helper.py) -- not something a
+    # user/group explicitly granted, so it gets its own label rather
+    # than reusing one of the assignment-based ones above.
     "unconfigured_domain": "not configured anywhere -- allowed by default (not on any blocklist)",
     # Blocked
     "outside_lan": "request didn't come from the configured LAN range",
-    # unknown_domain/not_bump_mode: kept for OLD rows logged before the
-    # 2026-09-08 fix above -- neither is written anymore (an
-    # unconfigured or splice-mode domain is now allowed by default
-    # instead, see "unconfigured_domain"/"global_domain"/etc.), but
-    # historical entries still carry these values.
+    # unknown_domain/not_bump_mode: kept for OLD rows only -- neither is
+    # written anymore (an unconfigured or splice-mode domain is now
+    # allowed by default instead, see "unconfigured_domain"/
+    # "global_domain"/etc.), but historical entries still carry these
+    # values.
     "unknown_domain": "not a domain configured anywhere in this system (pre-2026-09-08 entry)",
     "not_bump_mode": "domain wasn't in bump mode (pre-2026-09-08 entry)",
     "domain_not_assigned": "domain exists, but isn't assigned to this user/group/device",
@@ -7270,9 +7101,6 @@ _ACCESS_LOG_REASON_LABELS = {
     "resolution_failed": "couldn't resolve show/episode metadata to check it",
     "show_not_approved": "this specific show hasn't been approved for this user",
     "dns_tier_denied": "blocked at the DNS/category layer (AdGuard) before reaching the proxy",
-    # Added 2026-09-10 alongside finding #9's allowed-traffic back-fill
-    # and its own missing label (dns_hard_deny existed since finding #25
-    # but was never added here -- both fixed together).
     "dns_hard_deny": "blocked at the DNS/category layer (AdGuard) -- HTTPS, so the block page itself never loaded",
     "dns_tier_allowed": "routine DNS-tier activity, sampled -- not reviewed or assigned, just visibility",
 }
@@ -7379,10 +7207,10 @@ def report():
     filtered_user, filtered_group, filtered_device = _get_report_filter(conn, request.args)
     filter_status = request.args.get("status", "")
     days = _parse_report_days(request.args.get("days"))
-    # Finding #9: routine DNS-tier "allowed" rows (adguard_report_sync.py)
-    # are expected to vastly outnumber every other reason code -- hidden
-    # by default so the Report page stays focused on blocks and
-    # proxy-tier traffic, revealed with this one checkbox.
+    # Routine DNS-tier "allowed" rows (adguard_report_sync.py) are
+    # expected to vastly outnumber every other reason code -- hidden by
+    # default so the Report page stays focused on blocks and proxy-tier
+    # traffic, revealed with this one checkbox.
     show_routine = bool(request.args.get("show_routine"))
     report_target = (
         f"user:{filtered_user['id']}" if filtered_user else
@@ -7415,11 +7243,11 @@ def report():
     if not show_routine:
         where_sql += " AND reason IS NOT 'dns_tier_allowed'"
 
-    # Real live-testing feedback (RoadMap.md's dated entry): a blocked row
-    # for an unauthenticated device shows "(unauthenticated)" as its
-    # "User" -- true, but useless for tracking down WHICH physical device
-    # is having trouble without separately cross-referencing device_id
-    # against the Devices page. access_log already carries device_id for
+    # A blocked row for an unauthenticated device shows
+    # "(unauthenticated)" as its "User" -- true, but useless for
+    # tracking down WHICH physical device is having trouble without
+    # separately cross-referencing device_id against the Devices page.
+    # access_log already carries device_id for
     # exactly this (see log_identity_fields()'s own docstring); this just
     # surfaces it. LEFT JOIN (not INNER) -- a device later deleted must
     # still show its historical rows, just without the MAC/label alongside.
@@ -7505,8 +7333,8 @@ def approve_from_report():
     log_id = request.form.get("log_id", "")
     # "user" = the person who hit this (the default, and what the plain
     # Recent-activity table's inline button offers for a user-identified
-    # row). "device"/"group" (added 2026-08-31, GH #9): the same button
-    # for a device- or group-only row (no user_id at all -- see
+    # row). "device"/"group": the same button for a device- or
+    # group-only row (no user_id at all -- see
     # common/matching.py's device_domain_reason()). "global" = approve for
     # everyone -- only offered from the pending-requests card, since
     # that's the one place a per-request choice makes sense to surface.
@@ -7568,7 +7396,7 @@ def approve_from_report():
         # The domain is already assigned to this user -- that's *why* the
         # request reached the path check at all -- so INSERT OR IGNORE into
         # user_domains below would be a silent no-op and the identical
-        # request would be denied again immediately (GH #6). A path pattern
+        # request would be denied again immediately. A path pattern
         # governs future access, not a one-time yes/no, so send the admin
         # to review a derived starting pattern rather than auto-saving one.
         # Path rules are already domain-wide (see domain_paths' schema
@@ -7779,11 +7607,9 @@ def _subsystem_stale(mode: str, last_healthy_at: str | None) -> bool:
     crash-looping process can't write its own fail_open row: the
     reporting call lives in the same process that died, so `mode`/
     `nft_mode` stay frozen at whatever they were the moment it went
-    down, with an ever-more-outdated last_healthy_at -- confirmed live
-    2026-08-30 via a sustained OOM-kill test, see RoadMap.md's
-    fault-campaign notes. Only wall-clock staleness on last_healthy_at
-    itself can catch that; the mode column alone cannot, by
-    construction."""
+    down, with an ever-more-outdated last_healthy_at. Only wall-clock
+    staleness on last_healthy_at itself can catch that; the mode column
+    alone cannot, by construction."""
     return mode != "fail_open" and _is_stale(last_healthy_at)
 
 
@@ -7792,18 +7618,17 @@ def _subsystem_unhealthy(mode: str, last_healthy_at: str | None) -> bool:
     -- the one predicate both the sidebar alarm badge (render(), below)
     and the health page itself (health_page()) need, expressed once
     instead of independently in two different shapes that could drift
-    apart (found via code review 2026-08-30)."""
+    apart."""
     return mode == "fail_open" or _subsystem_stale(mode, last_healthy_at)
 
 
 def _subsystem_is_up(mode: str, stale: bool) -> bool:
     """Whether this subsystem's own container is (probably) actually
-    running right now -- added 2026-09-07 for the Health page's "run
-    this command" toggle (project owner's explicit request, in place of
-    a riskier dashboard-driven start/stop control: granting the
-    dashboard container Docker socket access to actually flip these
-    containers itself was explicitly declined the same day -- see
-    RoadMap.md's dated entry). `running`/`fail_open`/`repair_only` all
+    running right now -- used for the Health page's "run this command"
+    toggle in place of a riskier dashboard-driven start/stop control:
+    granting the dashboard container Docker socket access to actually
+    flip these containers itself was explicitly declined.
+    `running`/`fail_open`/`repair_only` all
     mean the process is actively self-reporting, even if degraded --
     only an explicitly `stopped` mode (the schema default, never
     actually written by any real code path today, but a legitimate
@@ -7819,8 +7644,7 @@ def _get_runtime_row(conn):
     render() (which only needs a subset, for the sidebar alarm badge)
     and health_page() (which needs all of it), so the row is only ever
     queried once per request instead of twice against the same
-    `singleton_id = 1` primary-key lookup (found via code review
-    2026-08-30)."""
+    `singleton_id = 1` primary-key lookup."""
     return conn.execute(
         "SELECT mode, last_healthy_at, fail_open_reason, applied_generation, "
         "nft_mode, nft_last_healthy_at, nft_fail_reason "
@@ -8254,22 +8078,16 @@ SETTINGS_BODY = """
 {% if household_time_zone_unset %}
 <script>
 (function () {
-  // Real live-testing feedback (RoadMap.md's dated entry): this never
-  // had any real default before -- every fresh install silently started
-  // at UTC until an admin happened to visit this page and pick their
-  // own zone by hand out of a ~400-entry list. Runs only while
-  // household_time_zone has never been explicitly saved (server-side
-  // flag, household_time_zone_unset): detects the browser's own IANA
-  // zone and, if it's one of the options this <select> actually offers,
-  // both shows it selected AND saves it as the real default immediately
-  // (a plain background POST to the same route the Save button uses,
-  // including the hostname prefix's current value unchanged so this
-  // background save doesn't touch that field) -- "default to wherever
-  // the admin's own device is" only means something if it happens
-  // before they'd otherwise have to pick UTC by hand first. Never fires
-  // again once a real value is on record, including whatever this save
-  // itself just set -- the admin's own later choice from the dropdown
-  // always wins from here on.
+  // Runs only while household_time_zone has never been explicitly
+  // saved (server-side flag, household_time_zone_unset): detects the
+  // browser's own IANA zone and, if it's one of the options this
+  // <select> actually offers, both shows it selected AND saves it as
+  // the real default immediately (a plain background POST to the same
+  // route the Save button uses, including the hostname prefix's
+  // current value unchanged so this background save doesn't touch that
+  // field). Never fires again once a real value is on record, including
+  // whatever this save itself just set -- the admin's own later choice
+  // from the dropdown always wins from here on.
   var detected;
   try { detected = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return; }
   var select = document.getElementById("householdTimeZoneSelect");
@@ -8440,10 +8258,9 @@ SETTINGS_BODY = """
 def _adguard_ui_url(adguard_url: str) -> str | None:
     """Best-effort link to AdGuard Home's OWN admin UI (a separate
     login, separate application from this dashboard) for the Settings
-    page's "Open AdGuard's dashboard" link -- added 2026-09-07 at the
-    project owner's request for a quick click-through to AdGuard's own
-    stats/query-log view (real stats integration *into* this dashboard
-    was explicitly deferred to a future phase, not built here).
+    page's "Open AdGuard's dashboard" link -- a quick click-through to
+    AdGuard's own stats/query-log view (real stats integration *into*
+    this dashboard is deferred to a future phase, not built here).
 
     Deliberately does NOT reuse the stored `adguard_url` setting's host
     as-is: that's the dashboard-container-to-AdGuard API address, always
@@ -8483,10 +8300,7 @@ def _optigate_rewrite_status(conn, adguard_url: str, adguard_username: str, adgu
     (AdGuard reset externally, DASHBOARD_URL changed without re-saving
     this form, etc.) is visible on the page itself rather than silently
     invisible until someone notices the address just doesn't work and
-    has no way to tell why -- the exact failure mode that prompted this
-    whole feature (RoadMap.md's dated entry, 2026-09-08: a real
-    production wipe left this silently broken, with the page still
-    showing "optigate.home" as if nothing were wrong)."""
+    has no way to tell why."""
     block_page_ip = optigate_rewrite.parse_block_page_ip(os.environ.get("DASHBOARD_URL"))
     if not block_page_ip:
         return "not active -- DASHBOARD_URL isn't set to a plain IP address"
@@ -8496,16 +8310,13 @@ def _optigate_rewrite_status(conn, adguard_url: str, adguard_username: str, adgu
     try:
         current = adguard_client.get_rewrites(adguard_url, adguard_username, adguard_password)
     except adguard_client.AdGuardError as exc:
-        # Fixed 2026-09-08, real gap found investigating an "AdGuard
-        # username/password not synced" report: a 401 here (AdGuard is
-        # up, but rejects the credentials stored in this project's own
-        # DB -- exactly what happens after an admin password change via
-        # update_admin() until someone restarts the adguard container,
-        # since AdGuard only reads its config at startup) used to show
-        # the exact same message as AdGuard being genuinely offline,
-        # sending whoever's troubleshooting down the wrong path
-        # entirely (checking the container/network instead of just
-        # restarting adguard).
+        # A 401 here means AdGuard is up but rejects the credentials
+        # stored in this project's own DB -- exactly what happens after
+        # an admin password change via update_admin() until someone
+        # restarts the adguard container, since AdGuard only reads its
+        # config at startup. Distinguished from AdGuard being genuinely
+        # offline so troubleshooting points at the right fix (restart
+        # adguard) instead of checking the container/network.
         if exc.status_code == 401:
             return (
                 "couldn't check -- AdGuard rejected this login. If you changed the admin "
@@ -8533,14 +8344,8 @@ def _interception_controller_is_up(conn) -> bool:
     process's health -- irrelevant here, since network_sweep.py runs
     inside `controller` itself, not nftables-manager.
 
-    Added 2026-09-09, real gap found live: the project owner clicked
-    "Run now" while `controller` wasn't running at all (interception
-    off for the night) and the request just silently queued with a
-    generic "will run within about 30 seconds" message -- true only if
-    something is actually alive to run it. Their own words: "we can't
-    just let it go off into nothingness." A missing runtime_row (a
-    brand-new install where controller has genuinely never run even
-    once) counts as down, same as a stale one."""
+    A missing runtime_row (a brand-new install where controller has
+    genuinely never run even once) counts as down, same as a stale one."""
     row = _get_runtime_row(conn)
     if row is None:
         return False
@@ -8615,9 +8420,9 @@ def settings_page():
     device_stale_days = db.get_setting(conn, "device_stale_days", "")
     stale_devices = _stale_devices(conn, int(device_stale_days)) if device_stale_days else []
     adguard_url = db.get_setting(conn, "adguard_url", "")
-    # adguard_username is no longer read here -- since 2026-09-07 it's
-    # always identical to admin_username above (see update_admin()),
-    # nothing on this page needs it independently anymore.
+    # adguard_username is no longer read here -- it's always identical
+    # to admin_username above (see update_admin()), nothing on this
+    # page needs it independently anymore.
     adguard_password = db.get_setting(conn, "adguard_password", "")
     # "" (genuinely never saved) vs "UTC" (explicitly saved as UTC) are
     # deliberately distinguished here -- see bootstrap_admin()'s own
@@ -8659,9 +8464,9 @@ def settings_page():
 # A DNS label: letters/digits/hyphens, 1-63 chars, never starting or
 # ending with a hyphen -- standard hostname-label rules, since this
 # becomes the first part of a real DNS name (db.optigate_hostname()
-# appends the fixed ".home" suffix). No dots allowed, deliberately: the
-# project owner's own words were "force the use of .home so the
-# administrator can only change the first part of the URL."
+# appends the fixed ".home" suffix). No dots allowed, deliberately: this
+# forces the .home suffix so an admin can only ever change the first
+# part of the address.
 _OPTIGATE_PREFIX_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -8697,13 +8502,11 @@ def _sync_optigate_rewrite_now(conn) -> str | None:
 @app.route("/settings/household", methods=["POST"])
 @require_admin
 def update_household_settings():
-    """Merged Save for the "Household" section (RoadMap.md item 3, "one
-    Save button per settings-shaped page, not several"). The default
-    time zone and the memorable troubleshooting hostname used to be two
-    independent forms/routes (update_household_time_zone(),
-    update_optigate_hostname()) -- merged into one atomic save: a bad
-    time zone no longer saves the hostname alone, or vice versa. The
-    time-zone auto-detect script (SETTINGS_BODY) posts here too,
+    """Merged Save for the "Household" section: the default time zone
+    and the memorable troubleshooting hostname are saved together in
+    one atomic write -- a bad time zone no longer saves the hostname
+    alone, or vice versa. The time-zone auto-detect script
+    (SETTINGS_BODY) posts here too,
     reading the hostname field's own live value at post time so its
     background save never clobbers an unsaved edit sitting in that
     field."""
@@ -8737,18 +8540,16 @@ def update_household_settings():
 @app.route("/settings/filtering", methods=["POST"])
 @require_admin
 def update_filtering_settings():
-    """Merged Save for the "Filtering & AdGuard" section (RoadMap.md
-    item 3): AdGuard's connection address, SafeSearch/Restricted Mode,
-    and the blocked-site experience used to be three independent
-    forms/routes (update_adguard_settings(), update_safesearch(),
-    update_block_page_mode()) -- merged into one atomic save. Only the
-    connection ADDRESS is set here for AdGuard -- since 2026-09-07
-    (RoadMap.md's dated entry), the username/password half moved
-    entirely to update_admin() (the dashboard's own admin-login form),
-    which keeps AdGuard's real credential in sync automatically instead
-    of letting the two drift independently the way this used to allow.
-    G3's SafeSearch/Restricted-Mode setting: only writes the setting --
-    controller/adguard_sync.py's sync_safesearch() picks it up and
+    """Merged Save for the "Filtering & AdGuard" section: AdGuard's
+    connection address, SafeSearch/Restricted Mode, and the
+    blocked-site experience are saved together in one atomic write.
+    Only the connection ADDRESS is set here for AdGuard -- the
+    username/password half lives entirely in update_admin() (the
+    dashboard's own admin-login form), which keeps AdGuard's real
+    credential in sync automatically instead of letting the two drift
+    independently. SafeSearch/Restricted-Mode setting: only writes the
+    setting -- controller/adguard_sync.py's sync_safesearch() picks it
+    up and
     reconciles AdGuard's real config on its own next cycle, same
     "dashboard writes intent, controller applies it" pattern as every
     other AdGuard-facing setting on this page. Deliberately does NOT
@@ -8762,8 +8563,7 @@ def update_filtering_settings():
     # that haven't installed the certificate yet"). A missing/malformed
     # POST (stale cached form, future UI change) must fail safe, not
     # silently flip every splice-mode block to the certificate-requiring
-    # mode (found by code review 2026-09-11 -- this used to default the
-    # other way).
+    # mode.
     block_page_mode = request.form.get("block_page_mode", "terminate")
     if block_page_mode not in ("redirect", "terminate"):
         return flash_redirect("settings_page", "Invalid blocked-site experience option.", error=True)
@@ -8790,10 +8590,9 @@ def refresh_adguard_filters():
         return flash_redirect("settings_page", f"Couldn't reach AdGuard: {exc}", error=True)
     # Piggybacks the optigate.home rewrite push onto this same button --
     # a manual "fix it now" path (beyond re-saving the hostname form, or
-    # restarting the whole dashboard container) for exactly the gap
-    # RoadMap.md's 2026-09-08 entry describes: AdGuard reset or
-    # reconfigured independently of this dashboard, with nothing else
-    # prompting a re-push.
+    # restarting the whole dashboard container) for AdGuard having been
+    # reset or reconfigured independently of this dashboard, with
+    # nothing else prompting a re-push.
     rewrite_problem = _sync_optigate_rewrite_now(conn)
     rewrite_note = "" if rewrite_problem is None else f" (optigate.home not active: {rewrite_problem})"
     if updated:
@@ -8857,10 +8656,7 @@ def cleanup_stale_devices():
     """Deletes exactly what the Settings page's own review table just
     showed -- same _stale_devices() query, so what an admin reviewed
     before clicking "Clean up" is exactly what gets removed, never a
-    silently different set. Fixed 2026-09-07 (RoadMap.md's dated entry):
-    this used to filter on devices.last_seen_at, a column nothing ever
-    writes to -- meaning this button had never actually deleted anything,
-    in any configuration, the entire time it existed."""
+    silently different set."""
     conn = get_db()
     days = db.get_setting(conn, "device_stale_days", "")
     if not days:
@@ -8877,12 +8673,11 @@ def cleanup_stale_devices():
 @app.route("/settings/network", methods=["POST"])
 @require_admin
 def update_network_settings():
-    """Merged Save for the "Network" section (RoadMap.md item 3): the
-    local-network CIDR and the discovery-sweep enable/interval used to
-    be two independent forms/routes (update_local_network(),
-    update_network_sweep()) -- merged into one atomic save: a bad
-    interval no longer blocks saving the CIDR change alongside it, or
-    vice versa -- either both save or neither does. Controls
+    """Merged Save for the "Network" section: the local-network CIDR
+    and the discovery-sweep enable/interval are saved together in one
+    atomic write -- a bad interval no longer blocks saving the CIDR
+    change alongside it, or vice versa -- either both save or neither
+    does. Controls
     controller/network_sweep.py's own background sweep -- see that
     module's docstring for the feature itself. The controller process
     re-reads both sweep settings fresh on every check tick (see that
@@ -8937,15 +8732,11 @@ def run_network_sweep_now():
     schedule (network_sweep_enabled) is off, matching every other
     one-off "check/refresh now" button on this page.
 
-    Fixed 2026-09-09, real gap found live: this used to say "will run
-    within about 30 seconds" unconditionally, even when `controller`
-    (the only thing that would ever act on this) wasn't running at
-    all -- the project owner's own words: "we can't just let it go off
-    into nothingness." Now checks _interception_controller_is_up()
-    FIRST and says so plainly if it's down, rather than implying success
-    it can't back up. The request is still queued either way (harmless,
-    and correct if the profile gets started moments later) -- only the
-    MESSAGE changes, matching what will actually happen."""
+    Checks _interception_controller_is_up() FIRST and says so plainly
+    if it's down, rather than implying success it can't back up. The
+    request is still queued either way (harmless, and correct if the
+    profile gets started moments later) -- only the MESSAGE changes,
+    matching what will actually happen."""
     conn = get_db()
     db.set_setting(conn, "network_sweep_run_now_requested_at", db.now_iso())
     conn.commit()
@@ -8966,13 +8757,11 @@ def run_network_sweep_now():
 @app.route("/settings/admin", methods=["POST"])
 @require_admin
 def update_admin():
-    """The dashboard's own admin login -- and, since 2026-09-07
-    (RoadMap.md's dated entry), the SAME action that keeps AdGuard's
-    real login in sync, replacing the earlier "just show the plaintext
-    AdGuard password on screen" approach the project owner correctly
-    flagged as insecure. There is deliberately no separate way to set a
-    different AdGuard username/password anymore -- one admin identity
-    governs both, so they can never drift apart the way they did before.
+    """The dashboard's own admin login -- and the SAME action that
+    keeps AdGuard's real login in sync, rather than showing the
+    plaintext AdGuard password on screen. There is deliberately no
+    separate way to set a different AdGuard username/password anymore
+    -- one admin identity governs both, so they can never drift apart.
 
     Only touches AdGuard when a NEW password is actually submitted (same
     "blank means keep current" convention this form already had) --
@@ -9026,17 +8815,12 @@ _boot_conn.close()
 
 
 def main() -> None:
-    # Found 2026-09-02 while auditing brute-force protection: this
-    # container never called logging.basicConfig() anywhere (unlike
-    # controller/main.py, which does), so every log.info()/log.warning()
-    # call in this file AND in captive_portal_server.py/
-    # block_page_server.py -- including the pre-existing failed-login
-    # log.info() calls in captive_portal_server.py -- silently never
-    # reached `docker compose logs dashboard` at all for INFO-level
-    # calls; only WARNING+ ones surfaced, via Python's own bare
-    # last-resort handler. In main() (not at module import time) so
-    # importing this module for tests never installs a handler on the
-    # root logger.
+    # Ensures INFO-level log.info()/log.warning() calls in this file
+    # AND in captive_portal_server.py/block_page_server.py actually
+    # reach `docker compose logs dashboard` -- without this, only
+    # WARNING+ surfaced via Python's own bare last-resort handler. In
+    # main() (not at module import time) so importing this module for
+    # tests never installs a handler on the root logger.
     logging.basicConfig(level=logging.INFO)
 
     host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
@@ -9056,14 +8840,8 @@ def main() -> None:
         block_page_server.start(host="0.0.0.0", port=80)
         print("block page server listening on http://0.0.0.0:80", file=sys.stderr, flush=True)
 
-        # Real gap found live 2026-09-08: this used to be pushed ONLY by
-        # controller's periodic cycle (the interception profile, off by
-        # default for most installs), so a fresh AdGuard instance --
-        # including one that just came from a wipe/redeploy, not just a
-        # brand-new install -- silently never got this rewrite at all,
-        # with the Settings page still showing "optigate.home" as if
-        # nothing were wrong. One best-effort attempt at every dashboard
-        # start (not a retry loop -- AdGuard might not be up yet on a
+        # One best-effort attempt at every dashboard start (not a retry
+        # loop -- AdGuard might not be up yet on a
         # cold multi-container boot; the Settings page's own live status
         # check, and simply re-saving the hostname form, both retry this
         # on demand) means a fresh install self-heals without anyone
@@ -9094,9 +8872,8 @@ def main() -> None:
         adguard_report_sync.start()
         print("adguard report back-fill poller started", file=sys.stderr, flush=True)
 
-    # Phase 4 milestone 3: the captive-portal login server nftables'
-    # own baseline rules have redirected unauthenticated_v4's plain-HTTP
-    # traffic to since Phase 3 was designed (see
+    # The captive-portal login server nftables' own baseline rules
+    # redirect unauthenticated_v4's plain-HTTP traffic to (see
     # captive_portal_server.py's own module docstring for the full
     # design). Unlike block_page_server above, this isn't gated behind
     # DASHBOARD_URL -- it's part of the interception feature itself, not

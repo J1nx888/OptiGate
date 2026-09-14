@@ -1,9 +1,5 @@
-"""common/backup.py: configuration export/import (backup/restore).
-
-Added 2026-09-08 -- tracked as a deferred item in RoadMap.md since
-before 2026-09-07, revisited by the project owner as the actual
-mechanism for wiping and redeploying the production box clean (e.g. once
-the OptiGate rebrand's Phase C infrastructure rename happens) without
+"""common/backup.py: configuration export/import (backup/restore) -- the
+mechanism for wiping and redeploying the production box clean without
 losing anything.
 """
 from __future__ import annotations

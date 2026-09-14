@@ -7,11 +7,9 @@
 // decisions) instead of a new controller<->nftables-manager IPC
 // protocol.
 //
-// Uses modernc.org/sqlite (pure Go, no cgo) specifically because this
-// project's sandboxed test accounts have no C compiler available
-// (confirmed while verifying phase3/arp-worker -- `which gcc` found
-// nothing on the smoke-test VM), and the real production deployment
-// target shouldn't need one installed either.
+// Uses modernc.org/sqlite (pure Go, no cgo) since this project's
+// sandboxed test accounts have no C compiler available, and the real
+// production deployment target shouldn't need one installed either.
 package dbsource
 
 import (
@@ -33,17 +31,15 @@ import (
 // desired_policy_json column is NULL -- deliberately distinguished
 // from a REAL, controller-computed policy that happens to have every
 // list empty (e.g. every device was deleted, a legitimate desired
-// state). Collapsing the two used to mean this process would treat a
-// missing row/column exactly like "the policy is: nobody is
-// authenticated, bypassed, or quarantined," diff that against whatever
-// the kernel currently enforces, and wipe every nftables set -- with no
-// error anywhere -- the moment this row/column went missing while real
-// devices were still enforced (e.g. a mishandled DB restore/reset).
-// Real gap found by code review 2026-09-11, fixed 2026-09-12 per the
-// project owner's explicit decision: callers (reconcileOnce in
-// cmd/pp-nftables-manager/main.go) must treat this error specially --
-// hold current kernel state and retry next cycle, rather than applying
-// an empty diff.
+// state). Collapsing the two would mean this process treats a missing
+// row/column exactly like "the policy is: nobody is authenticated,
+// bypassed, or quarantined," diffs that against whatever the kernel
+// currently enforces, and wipes every nftables set -- with no error
+// anywhere -- the moment this row/column goes missing while real
+// devices are still enforced (e.g. a mishandled DB restore/reset).
+// Callers (reconcileOnce in cmd/pp-nftables-manager/main.go) must treat
+// this error specially -- hold current kernel state and retry next
+// cycle, rather than applying an empty diff.
 var ErrNoDesiredPolicy = errors.New("no desired policy computed yet (interception_runtime row or desired_policy_json column is missing)")
 
 type desiredPolicyWire struct {
@@ -52,16 +48,13 @@ type desiredPolicyWire struct {
 	Bypass          []string `json:"bypass"`
 	Quarantine      []string `json:"quarantine"`
 
-	// Bump: added 2026-08-30 alongside policy.DesiredPolicy.Bump /
-	// policy.SetBump for the "two independent axes" architecture. This
-	// struct's fields are what actually gets populated from the JSON --
-	// missing this one meant ReadDesiredPolicy silently returned an
-	// empty Bump list on every cycle regardless of what
-	// controller/policy_state.py had written, so pp-nftables-manager
-	// would never actually redirect any device to Squid no matter how
-	// many devices had bump_enabled set. Found by inspection while
-	// preparing a live-Squid verification pass, before that pass ever
-	// ran -- see RoadMap.md.
+	// Bump must stay present and correctly tagged: this struct's fields
+	// are what actually get populated from the JSON, and a missing or
+	// mistagged field here means ReadDesiredPolicy silently returns an
+	// empty Bump list every cycle regardless of what
+	// controller/policy_state.py wrote, so pp-nftables-manager would
+	// never redirect any device to Squid no matter how many devices had
+	// bump_enabled set.
 	Bump []string `json:"bump"`
 }
 
@@ -71,18 +64,13 @@ type desiredPolicyWire struct {
 // or column doesn't exist/isn't set yet -- callers must NOT treat that
 // the same as a real, controller-computed empty policy.
 func ReadDesiredPolicy(dbPath string) (policy.DesiredPolicy, error) {
-	// _busy_timeout=5000 matches common/db.py's own PRAGMA busy_timeout=5000
-	// on the Python side (confirmed live 2026-09-08: this driver
-	// (modernc.org/sqlite) accepts a bare _busy_timeout DSN query param,
-	// applied as `pragma busy_timeout = <ms>` -- see sqlite.go's own
-	// dsnPick("_busy_timeout", "_timeout") handling). Without this, a
-	// SQLITE_BUSY here failed immediately instead of waiting a
-	// realistic amount of time for whichever other process (dashboard,
-	// proxy, controller's own Python connection, which already sets
-	// this) briefly held the write lock -- found live resuming the
-	// soak test after the wipe-and-redeploy: WriteHealth() below hit
-	// this within the first few seconds of all six containers starting
-	// and touching the shared file at once.
+	// _busy_timeout=5000 matches common/db.py's own PRAGMA
+	// busy_timeout=5000 on the Python side (this driver, modernc.org/
+	// sqlite, accepts a bare _busy_timeout DSN query param, applied as
+	// `pragma busy_timeout = <ms>`). Without this, a SQLITE_BUSY here
+	// fails immediately instead of waiting for whichever other process
+	// (dashboard, proxy, controller's own Python connection, which
+	// already sets this) briefly holds the write lock.
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_busy_timeout=5000")
 	if err != nil {
 		return policy.DesiredPolicy{}, fmt.Errorf("open %s: %w", dbPath, err)
@@ -118,15 +106,10 @@ func ReadDesiredPolicy(dbPath string) (policy.DesiredPolicy, error) {
 }
 
 // validIPv4s drops any entry that isn't a well-formed IPv4 address,
-// logging each one dropped. Fixed 2026-09-11, found by code review:
-// unlike arp-worker's own HandleReplaceTargets (which parses and drops
-// unparseable IPs as explicit per-target failures), this previously
-// passed whatever strings controller/policy_state.py wrote straight
-// through to policy.Reconcile and into ApplyDiffs's single atomic
-// knftables transaction -- one malformed entry (a Python-side bug,
-// encoding issue, or a future non-IPv4 device record) would fail that
-// whole transaction, blocking every OTHER legitimate change computed
-// that cycle, not just the bad one.
+// logging each one dropped, so a single malformed entry (a Python-side
+// bug, encoding issue, or a future non-IPv4 device record) can't fail
+// policy.Reconcile's downstream atomic knftables transaction and block
+// every OTHER legitimate change computed that cycle.
 func validIPv4s(setName string, ips []string) []string {
 	out := make([]string, 0, len(ips))
 	for _, ip := range ips {
@@ -147,20 +130,17 @@ func validIPv4s(setName string, ips []string) []string {
 // the shared singleton row. Pass a nil failReason to report success.
 //
 // nft_last_healthy_at is only ever advanced on a successful ("running")
-// report -- deliberately mirroring controller/health.py's own
+// report -- mirroring controller/health.py's own
 // report_healthy()/report_fail_open() split, where report_fail_open()
-// doesn't mention last_healthy_at at all and so leaves it untouched. An
-// earlier version of this function unconditionally set it to "now" on
-// every call, including fail-open ones, which meant a continuously
-// failing-but-still-polling nftables-manager kept refreshing its own
-// "last healthy" timestamp forever -- caught by code review 2026-08-30,
-// before the dashboard's staleness view (see dashboard/dashboard.py's
-// _is_stale) grew a reason to compare this column directly.
+// leaves it untouched. Advancing it unconditionally (including on
+// fail-open reports) would let a continuously failing-but-still-polling
+// nftables-manager keep refreshing its own "last healthy" timestamp
+// forever, defeating the dashboard's staleness check
+// (dashboard/dashboard.py's _is_stale).
 func WriteHealth(dbPath, mode string, failReason error) error {
 	// _busy_timeout=5000: see ReadDesiredPolicy's own comment above --
-	// this write path is the one that actually hit SQLITE_BUSY live,
-	// since it's a real write racing dashboard/proxy/controller's own
-	// writes to the same file, not just a read.
+	// this write path races dashboard/proxy/controller's own writes to
+	// the same file, so it needs the same wait-for-the-lock behavior.
 	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dbPath, err)

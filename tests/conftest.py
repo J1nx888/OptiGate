@@ -10,11 +10,11 @@ unmodified, this conftest puts each source directory directly on
 sys.path (flat, no package layer) instead of using a src-layout/PYTHONPATH
 trick that would require touching the modules under test.
 
-``controller/`` (the Phase 3 interception-controller, see RoadMap.md
-Milestone 3) has no Dockerfile yet -- it isn't deployed anywhere yet --
-but follows the same flat-import convention (``from ipc_client import
-Target``, not ``from controller import ipc_client``) so it's included
-here on the same basis, ready for whenever it does get containerized.
+``controller/`` (the Phase 3 interception controller) has no Dockerfile
+yet -- it isn't deployed anywhere yet -- but follows the same
+flat-import convention (``from ipc_client import Target``, not ``from
+controller import ipc_client``) so it's included here on the same
+basis, ready for whenever it does get containerized.
 
 No Docker, no network, no external services -- see the autouse
 ``block_network`` fixture below.

@@ -39,8 +39,7 @@ def test_different_series_id_is_not_deduped(conn):
 
 
 def test_ip_address_is_stored_when_given(conn):
-    """Added 2026-09-07 (RoadMap.md's dated entry): real live-testing
-    feedback that a row for a never-recognized device gave nothing to
+    """ip_address gives a row for a never-recognized device something to
     track it down by. Optional -- defaults to None, so it's descriptive
     metadata on the row, not a new dedupe dimension (same treatment as
     device_id)."""
@@ -78,7 +77,7 @@ def test_different_allowed_value_is_not_deduped(conn):
 
 
 def test_different_path_is_not_deduped(conn):
-    """GH #5: path is part of the dedupe key -- browsing multiple different
+    """path is part of the dedupe key -- browsing multiple different
     pages on the same bump-mode domain within the window must each get
     their own Report row, not collapse into just the first one visited."""
     base = dict(user_id=1, username="kid1", domain="asurascans.example", allowed=True, reason="user_domain")
@@ -90,8 +89,8 @@ def test_different_path_is_not_deduped(conn):
 
 
 def test_path_differing_only_by_query_string_is_deduped(conn):
-    """GH #5: the dedupe key normalizes path by stripping the query string,
-    so cache-busting/session/tracking params don't create a new Report row
+    """The dedupe key normalizes path by stripping the query string, so
+    cache-busting/session/tracking params don't create a new Report row
     for what's functionally the same page."""
     base = dict(user_id=1, username="kid1", domain="asurascans.example", allowed=True, reason="user_domain")
     logging_util.log_access(conn, path="/comics/series-a?t=1111", **base)
@@ -103,7 +102,7 @@ def test_path_bearing_call_is_not_suppressed_by_a_prior_path_less_entry(conn):
     """A path-less entry (e.g. sni_helper.py's SNI-layer log, which never
     has a path since nothing is decrypted there) and a later, richer
     path-bearing entry for what's otherwise the same event are different
-    dedupe keys under GH #5's path-aware key, so the richer one is never
+    dedupe keys under the path-aware key, so the richer one is never
     hidden behind the earlier, less informative one for the rest of the
     window."""
     base = dict(user_id=1, username="kid1", domain="unknown-site.example", allowed=False, reason="unknown_domain")

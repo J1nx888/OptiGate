@@ -1,32 +1,27 @@
 #!/usr/bin/env python3
-"""Milestone 6's remaining gap: block controller startup on its real
-dependencies actually answering, not just on their containers having
-started. docker-compose.yml's own comment on the controller service
-already flags this precisely: "depends_on only waits for these
-containers to *start*, not to be actually ready (arp-worker's socket
-file, AdGuard's API)."
+"""Blocks controller startup on its real dependencies actually
+answering, not just on their containers having started (`depends_on`
+only guarantees the latter).
 
 Two dependencies, two different failure philosophies, matching how the
 rest of this codebase already treats each:
 
 - The ARP worker's Unix socket is REQUIRED -- main.py's run() cannot do
   anything without it. wait_for_worker() below retries for a bounded
-  time and then re-raises, same as an unbounded first attempt would
-  have, so a genuinely-broken worker still surfaces as a process exit
-  (and Docker's `restart: unless-stopped` still catches that, same
-  fallback as before this module existed) -- it just turns the ordinary
-  "arp-worker hasn't created its socket file yet" startup race into a
-  fast in-process retry instead of a full container restart cycle.
+  time and then re-raises, so a genuinely-broken worker still surfaces
+  as a process exit (Docker's `restart: unless-stopped` catches that)
+  -- it just turns the ordinary "arp-worker hasn't created its socket
+  file yet" startup race into a fast in-process retry instead of a full
+  container restart cycle.
 
 - AdGuard is NOT required for the rest of run() to function --
   adguard_sync.py's own periodic run_loop() already retries forever on
   its own schedule and fails soft (logs via on_error, previous rules
   stay in effect). wait_for_adguard() below is a bounded, best-effort
   gate purely so main.py's sdnotify.ready() call means something closer
-  to "confirmed reachable" when it can, without contradicting this
-  project's own fail-open philosophy (RoadMap.md's "Fail-open
-  engineering" section) by blocking startup indefinitely -- or crashing
-  it -- over a slow-to-start AdGuard instance.
+  to "confirmed reachable" when it can, without blocking startup
+  indefinitely -- or crashing it -- over a slow-to-start AdGuard
+  instance.
 """
 from __future__ import annotations
 

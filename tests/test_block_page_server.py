@@ -5,13 +5,13 @@ pure logic worth unit-testing in isolation (it's a handful of lines of
 stdlib http.server wiring; the actual "does the request produce the
 right page" behavior is what matters).
 
-Since 2026-08-31 this server also writes to access_log (see its own
-module docstring) -- tests exercising that need the `conn` fixture
-(tests/conftest.py) so db.DB_PATH points at an isolated test DB; the
-page-rendering tests above that predate this don't need it at all
-(the DB write is wrapped in its own try/except specifically so a
-missing/broken DB can never break the actual page response -- see
-`test_page_still_renders_even_if_logging_is_unreachable` below).
+This server also writes to access_log (see its own module docstring) --
+tests exercising that need the `conn` fixture (tests/conftest.py) so
+db.DB_PATH points at an isolated test DB; the page-rendering tests above
+don't need it at all (the DB write is wrapped in its own try/except
+specifically so a missing/broken DB can never break the actual page
+response -- see `test_page_still_renders_even_if_logging_is_unreachable`
+below).
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def test_any_path_gets_the_same_page(server):
 
 
 # ============================================================
-# access_log writes (added 2026-08-31 -- see module docstring / GH #9)
+# access_log writes (see module docstring)
 # ============================================================
 
 def test_writes_access_log_row_for_a_known_device(server, conn):
@@ -114,10 +114,9 @@ def test_writes_access_log_row_for_a_known_device(server, conn):
 
 
 def test_writes_the_raw_source_ip_alongside_the_placeholder_row(server, conn):
-    """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
-    the Report page's Device column was empty for a never-recognized
-    device with nothing to track it down by -- this is the write side of
-    that fix."""
+    """The Report page's Device column would otherwise be empty for a
+    never-recognized device with nothing to track it down by -- this is
+    the write side of that fix."""
     _get(server, host_header="crunchyroll.com")
     row = conn.execute("SELECT * FROM access_log ORDER BY id DESC LIMIT 1").fetchone()
     assert row["ip_address"] == "127.0.0.1"  # the test server binds localhost
@@ -151,8 +150,7 @@ def test_page_still_renders_even_if_logging_is_unreachable(server, monkeypatch):
 
 
 # ============================================================
-# optigate.home memorable-URL device-info page (RoadMap.md's dated
-# 2026-09-07 entry)
+# optigate.home memorable-URL device-info page
 # ============================================================
 
 def test_optigate_hostname_shows_a_known_devices_info(server, conn):

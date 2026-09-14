@@ -7,17 +7,15 @@ doesn't produce dozens of near-identical rows (repeated TLS connections,
 page assets, polling requests, etc). The reporting page stays readable, and
 "who accessed what and when" still reflects genuinely new activity.
 
-`path` is compared with its query string stripped (GH #5): two requests to
+`path` is compared with its query string stripped: two requests to
 the same page that only differ by a cache-busting or session query
 parameter count as the same dedupe entry, but two genuinely different
-pages on the same domain each get their own row -- previously `path` was
-not part of the key at all, so a bump-mode domain visited normally (many
-pages within the window, the common case) only ever showed its first page
-in the Report. This also means a path-less entry (e.g. the SNI layer,
-which never has a path since nothing is decrypted there) and a later
-path-bearing entry for what's otherwise the same event are different keys
-too, so a richer entry is never hidden behind an earlier, less
-informative one for the same window.
+pages on the same domain each get their own row. This also means a
+path-less entry (e.g. the SNI layer, which never has a path since
+nothing is decrypted there) and a later path-bearing entry for what's
+otherwise the same event are different keys too, so a richer entry is
+never hidden behind an earlier, less informative one for the same
+window.
 """
 from __future__ import annotations
 
@@ -42,10 +40,9 @@ def log_access(
     device_id: int | None = None,
     ip_address: str | None = None,
 ) -> None:
-    """device_id (added 2026-08-31, see RoadMap.md's dated entry): which
-    `devices` row made this request, when known -- lets the Report page
-    filter/act on a row by device or group even when it has no user_id at
-    all (a group- or device-assigned identity, see
+    """device_id: which `devices` row made this request, when known --
+    lets the Report page filter/act on a row by device or group even when
+    it has no user_id at all (a group- or device-assigned identity, see
     common/matching.py's device_domain_reason()). Deliberately NOT part of
     the dedupe key below -- two devices sharing one username (not possible
     today, but kept simple) or a device's IP moving between requests within
@@ -53,17 +50,13 @@ def log_access(
     device_id is purely a stored column on whichever row wins the dedupe
     check, not a new dimension of "is this a new event".
 
-    ip_address (added 2026-09-07, RoadMap.md's dated entry): the raw
-    source IP, independent of whether device_id resolved to anything --
-    real live-testing feedback was that a row for a genuinely never-seen
-    device gave an admin nothing to track it down by. Optional and
-    defaults to None so every existing caller keeps working unchanged.
-    As of 2026-09-10 every writer passes it: dashboard/block_page_server.py,
-    dashboard/adguard_report_sync.py, and (RoadMap follow-up, this date)
-    all of proxy/authz_helper.py's and proxy/sni_helper.py's call sites.
-    Same "descriptive metadata on the row, not a new dedupe dimension"
-    treatment as device_id -- a device's IP moving between requests within
-    the dedupe window still collapses the same way it always has.
+    ip_address: the raw source IP, independent of whether device_id
+    resolved to anything -- gives an admin something to track down a
+    genuinely never-seen device by. Optional and defaults to None so
+    callers that don't have it keep working unchanged. Same "descriptive
+    metadata on the row, not a new dedupe dimension" treatment as
+    device_id -- a device's IP moving between requests within the dedupe
+    window still collapses the same way it always has.
     """
     cutoff_iso = iso_secs_ago(DEDUPE_WINDOW_SECONDS)
     # series_id is part of the dedupe key (SQLite's `IS` is null-safe, so two

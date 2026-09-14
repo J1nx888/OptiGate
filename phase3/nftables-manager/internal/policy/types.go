@@ -1,6 +1,6 @@
-// Package policy implements the pure logic for Milestone 5's four
-// nftables policy classes (docs/design/phase3-technical-design.md
-// section 5): computing what a desired policy should look like and
+// Package policy implements the pure logic for the four nftables
+// policy classes (docs/design/phase3-technical-design.md section 5):
+// computing what a desired policy should look like and
 // diffing it against actual nftables set membership. No nftables
 // dependency at all -- the knftables-backed adapter that actually
 // reads/writes the kernel's ruleset lives in the sibling ../nft
@@ -18,14 +18,13 @@ const (
 	SetBypass          SetName = "bypass_v4"
 	SetQuarantine      SetName = "quarantine_v4"
 
-	// SetBump is the fifth set, added for the "two independent axes"
-	// architecture correction locked in RoadMap.md 2026-08-30:
-	// devices.bump_enabled is a separate, admin-only, per-device opt-in
-	// for Squid/SSL-bump refinement, layered ON TOP of an already
-	// authenticated device -- not a fifth mutually-exclusive policy
-	// class. An IP can (correctly) be a member of both SetAuthenticated
-	// and SetBump at once. Deliberately excluded from AllSetNames below
-	// for exactly that reason -- see its doc comment.
+	// SetBump is the fifth set: devices.bump_enabled is a separate,
+	// admin-only, per-device opt-in for Squid/SSL-bump refinement,
+	// layered ON TOP of an already authenticated device -- not a fifth
+	// mutually-exclusive policy class. An IP can (correctly) be a member
+	// of both SetAuthenticated and SetBump at once. Deliberately
+	// excluded from AllSetNames below for exactly that reason -- see its
+	// doc comment.
 	SetBump SetName = "bump_v4"
 )
 

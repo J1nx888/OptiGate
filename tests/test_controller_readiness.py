@@ -1,10 +1,9 @@
-"""controller/readiness.py: Milestone 6's startup-readiness gates.
+"""controller/readiness.py: startup-readiness gates.
 
 wait_for_worker() is tested against a real listening AF_UNIX socket
-(not a socketpair) since it calls WorkerClient.connect(path) itself --
-same reasoning as test_controller_run_integration.py. wait_for_adguard()
-fakes adguard_client, same as test_controller_adguard_sync.py, since it
-has no AF_UNIX dependency and should run on every platform.
+(not a socketpair) since it calls WorkerClient.connect(path) itself.
+wait_for_adguard() fakes adguard_client, since it has no AF_UNIX
+dependency and should run on every platform.
 
 Every test that needs fake timing passes `sleep=`/`now=` EXPLICITLY to
 wait_for_worker()/wait_for_adguard() rather than monkeypatching
@@ -12,15 +11,7 @@ readiness.time.sleep/readiness.time.monotonic -- those two functions'
 own `sleep=time.sleep, now=time.monotonic` defaults are bound to the
 real functions at module-IMPORT time (ordinary Python default-argument
 binding), so patching the `time` module's attributes afterward has no
-effect on a default that already captured the original function
-object. Found the hard way: an earlier version of this file did exactly
-that monkeypatch, which silently made three "fast" tests run on real
-wall-clock sleeps instead (masked because their assertions didn't
-depend on speed, just eventual outcome) and made a fourth
-(test_wait_for_worker_retries_until_the_socket_appears) genuinely fail
-on Linux, once real AF_UNIX sockets made the test collectable there --
-its side effect (creating the socket file) was wired to the fake
-sleep(), which was never actually being called.
+effect on a default that already captured the original function object.
 """
 from __future__ import annotations
 

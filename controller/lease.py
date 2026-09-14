@@ -20,10 +20,9 @@ class HeartbeatPacer(PeriodicTask):
     via reconcile(), not just a fresh heartbeat, so that's the caller's
     job (main.py), reported here via `on_error`.
 
-    A thin, same-interface subclass of periodic.PeriodicTask -- see that
-    module's docstring for why the two were unified rather than
-    controller/discovery.py's loop duplicating this thread-lifecycle
-    logic a second time.
+    A thin, same-interface subclass of periodic.PeriodicTask, so
+    controller/discovery.py's loop doesn't need its own copy of this
+    thread-lifecycle logic.
     """
 
     def __init__(

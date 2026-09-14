@@ -25,18 +25,15 @@ argument), each backing one ssl_bump rule, evaluated in this order:
 
 Protocol (external_acl_type, format `%>a %ssl::>sni %DATA`): one line per
 request, three percent-encoded fields, respond "OK" or "ERR". The trailing
-%DATA field is always "-" (no `acl ... external ...` line below passes a
-static argument) and is otherwise unused -- it must still be declared and
-consumed, because Squid always appends %DATA to an external_acl_type FORMAT
-that doesn't already include it (see squid.conf.template's comment).
+%DATA field is always "-" and otherwise unused -- it must still be declared
+and consumed, because Squid always appends %DATA to an external_acl_type
+FORMAT that doesn't already include it (see squid.conf.template's comment).
 
-Updated 2026-08-30 for Squid's intercept mode (RoadMap.md's "Squid:
-explicit-proxy-with-login -> transparent intercept" section): %LOGIN is
-gone -- an intercepted connection has no CONNECT handshake for Squid to
-challenge with a 407, so there is no per-request login at all anymore.
-Identity is now resolved from `%>a` (the client's source IP) via
-common/device_identity.py's device_bindings-based lookup, the same
-identity data the DNS tier already relies on.
+Identity is resolved from `%>a` (the client's source IP) via
+common/device_identity.py's device_bindings-based lookup -- the same
+identity data the DNS tier relies on. There is no per-request login at
+this layer (an intercepted connection has no CONNECT handshake to
+challenge).
 
 'splice' mode logs every decision at this stage -- spliced connections are
 never decrypted, so this is the only point that traffic is ever observed at
@@ -44,9 +41,7 @@ all. 'bump' mode and the 'block_page' bump-for-denial path both log richly
 at the HTTP layer instead (authz_helper.py, once decrypted). 'block_page'
 also logs a domain-only entry itself, but *only* for a genuinely
 unconfigured domain when not in 'redirect' mode -- otherwise that case
-would never be recorded anywhere, since nothing downstream ever runs to
-log it either (GH #1). 'trusted' mode is deliberately never logged (see
-project README).
+would never be recorded anywhere. 'trusted' mode is never logged.
 """
 from __future__ import annotations
 
@@ -99,12 +94,11 @@ def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
 
     # Network-tier check first: a request whose source IP is not on the
     # configured LAN is refused regardless of whether it maps to a known
-    # device. Deliberately BEFORE identity resolution (2026-09-10): since
-    # common/identity.record_binding() now rejects off-LAN IPs at
-    # discovery time, an off-LAN client no longer has a device_bindings
-    # row to resolve -- but it must still be denied and logged here as
-    # `outside_lan`, exactly as before, so this check can't depend on a
-    # resolved identity.
+    # device. Deliberately before identity resolution: since
+    # common/identity.record_binding() rejects off-LAN IPs at discovery
+    # time, an off-LAN client has no device_bindings row to resolve, but
+    # must still be denied and logged as `outside_lan` -- so this check
+    # can't depend on a resolved identity.
     if not matching.ip_in_configured_lan(conn, client_ip):
         _log_denial(conn, sni, "outside_lan", client_ip=client_ip)
         return False
@@ -120,26 +114,14 @@ def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
     user_id, username, device_id = device_identity.log_identity_fields(device, user)
 
     if domain is None:
-        # Fixed 2026-09-08, real gap found live: a domain with no
-        # `domains` row at all used to be denied here unconditionally,
-        # even though controller/adguard_sync.py's own
-        # _build_domain_deny_rules() docstring is explicit that an
-        # unconfigured domain is "deliberately still default-allow at
-        # the DNS tier." Since a non-bump device's HTTPS traffic never
-        # reaches Squid at all (see knftables_adapter.go's baseline
-        # rules -- only bump_v4 members' port 443 is redirected here),
-        # this mismatch meant turning on SSL-Bump for one device
-        # silently switched its ENTIRE traffic from "default-allow,
-        # blocked only by category" to "default-deny, allow-list only"
-        # -- a real, surprising, unintended side effect (confirmed
-        # live: Netflix, never configured anywhere, was blocked
-        # specifically because bump was on for the visiting device, not
-        # because of anything Netflix-specific). Splicing it through
-        # now makes a bump-enabled device's unconfigured-domain
-        # experience match a non-bump device's exactly -- Squid becomes
-        # a refinement layer for domains that actually need path/show
-        # level rules, not a stricter gate than the DNS tier's own
-        # already-decided policy.
+        # Unconfigured domains are default-allow at the DNS tier
+        # (controller/adguard_sync.py's own docstring) -- splice here
+        # too, rather than deny, so enabling bump for a device doesn't
+        # silently switch its entire traffic from "default-allow,
+        # blocked only by category" to "default-deny, allow-list only".
+        # Squid stays a refinement layer for domains that need
+        # path/show-level rules, not a stricter gate than the DNS
+        # tier's own policy.
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=sni, path=None,
             allowed=True, reason="unconfigured_domain", device_id=device_id, ip_address=client_ip,
@@ -156,28 +138,14 @@ def handle_splice(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
 
 
 def handle_block_page(conn, client_ip: str, sni: str, _data: str = "-") -> bool:
-    # Reached only for connections none of the other three rules matched.
-    # Fixed 2026-09-08, alongside handle_splice()'s own fix: an
-    # unconfigured domain (no `domains` row at all) is now caught and
-    # spliced by handle_splice() itself, matching the DNS tier's own
-    # "default-allow for unconfigured" policy -- so this handler can no
-    # longer be reached by one. The ONLY thing that still falls through
-    # to here is a domain that DOES have a `domains` row (mode='splice')
-    # but this device/user isn't authorized for it -- already logged by
+    # Reached only for connections none of the other three rules matched:
+    # a domain that DOES have a `domains` row (mode='splice') but this
+    # device/user isn't authorized for it -- already logged by
     # handle_splice() before this rule is ever reached. The only
     # question left is whether we bump it to explain that via a real
     # page, or terminate outright. (No identity/LAN check needed here:
     # authz_helper.py will independently deny this once decrypted
     # regardless.)
-    #
-    # This used to ALSO be the only place that could ever log a
-    # genuinely unconfigured domain (GH #1's fix, so a kid trying a
-    # brand-new site wasn't completely invisible on the Report page) --
-    # that's no longer needed here since handle_splice() logs an
-    # ALLOWED "unconfigured_domain" entry for exactly that case now,
-    # which is strictly better visibility (every attempt is logged, not
-    # just denied ones, and only when block_page_mode happened to be
-    # 'terminate').
     mode = db.get_setting(conn, "block_page_mode", "terminate")
     return mode == "redirect"
 

@@ -12,14 +12,14 @@ import (
 	"github.com/J1nx888/parental_proxy/phase3/nftables-manager/internal/policy"
 )
 
-// Milestone 9 (fault campaign) coverage for the "partial nftables
-// failure" scenario: knftables' own Run() is documented as atomic
-// (all-or-nothing), so a failure can never leave the KERNEL in a
-// partial state -- the real risk is this PROCESS erroring between
-// ReadActual and ApplyDiffs, which the tests below confirm is
-// propagated rather than panicking or silently swallowed, so the
-// caller's reconciliation loop (cmd/pp-nftables-manager) can log it
-// and simply retry next cycle against freshly-read actual state.
+// Fault-injection coverage for the "partial nftables failure" scenario:
+// knftables' own Run() is documented as atomic (all-or-nothing), so a
+// failure can never leave the KERNEL in a partial state -- the real
+// risk is this PROCESS erroring between ReadActual and ApplyDiffs,
+// which the tests below confirm is propagated rather than panicking or
+// silently swallowed, so the caller's reconciliation loop
+// (cmd/pp-nftables-manager) can log it and simply retry next cycle
+// against freshly-read actual state.
 
 // listOnlyFake is a minimal Interface fake for ListElements-only error
 // injection. It deliberately does NOT support a working
@@ -180,9 +180,7 @@ func TestEnsureBaselineThenApplyDiffs_AgainstFake(t *testing.T) {
 		t.Fatalf("expected 192.168.1.21 in bump_v4 too (composes with authenticated_v4), got %v", got)
 	}
 
-	// Re-reconcile against unchanged desired state -- must be a no-op,
-	// same idempotency property verified live against real nftables
-	// earlier.
+	// Re-reconcile against unchanged desired state -- must be a no-op.
 	if diffs2 := policy.Reconcile(resolved, actual2); len(diffs2) != 0 {
 		t.Fatalf("expected no diffs on unchanged desired state, got %+v", diffs2)
 	}
@@ -226,13 +224,11 @@ func TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls(t *testing.T) {
 	}
 }
 
-// TestTeardown_RemovesTheTableEnsureBaselineCreated is a regression
-// test for the real gap found live 2026-09-08 shutting down a
-// soak-test window: SIGTERM used to just log and return, leaving the
-// optigate table (and every baseline redirect rule in it) active in
-// the kernel with the managing process gone. Confirms Teardown
-// actually removes what EnsureBaseline created, at the same
-// Fake-interface level TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls
+// TestTeardown_RemovesTheTableEnsureBaselineCreated confirms Teardown
+// actually removes what EnsureBaseline created -- without it, SIGTERM
+// would leave the optigate table (and every baseline redirect rule in
+// it) active in the kernel with the managing process gone. Checks at
+// the same Fake-interface level TestEnsureBaseline_IsIdempotentAcrossRepeatedCalls
 // already verifies creation at.
 func TestTeardown_RemovesTheTableEnsureBaselineCreated(t *testing.T) {
 	fake := knftables.NewFake(knftables.InetFamily, "optigate")
@@ -270,14 +266,14 @@ func TestTeardown_ToleratesATableThatWasNeverCreated(t *testing.T) {
 	}
 }
 
-// TestBaselineRules_RedirectsDNSOverTLS is a regression test for a real
-// DNS-tier bypass found by code review (2026-09-02): before this fix,
-// baselineRules only ever touched port 53, so a device with
-// DNS-over-TLS enabled (e.g. Android's one-tap Settings > Private DNS)
-// resolved every domain over an encrypted TCP/853 session this project
-// never saw at all, bypassing every domain/category/schedule/SafeSearch
-// rule. Confirms the fix at the same Go-slice level a future accidental
-// removal of these two lines would be caught at.
+// TestBaselineRules_RedirectsDNSOverTLS guards against a DNS-tier
+// bypass: without a port-853 rule, baselineRules only touches port 53,
+// so a device with DNS-over-TLS enabled (e.g. Android's one-tap
+// Settings > Private DNS) resolves every domain over an encrypted
+// TCP/853 session this project never sees at all, bypassing every
+// domain/category/schedule/SafeSearch rule. Checks at the Go-slice
+// level so a future accidental removal of these two lines is caught
+// here.
 func TestBaselineRules_RedirectsDNSOverTLS(t *testing.T) {
 	want := []string{
 		fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 853 redirect to :%d", DefaultDNSRedirectPort),
@@ -302,14 +298,14 @@ func TestBaselineRules_RedirectsDNSOverTLS(t *testing.T) {
 // EnsureBaseline actually installs both port-853 rules into the real
 // prerouting chain (via knftables' own in-memory Fake), not just that
 // the Go source slice happens to contain the right strings.
-// TestBaselineRules_MarkForwardableTraffic is a regression test for the
-// real bug found live 2026-09-07 (documented in full on
-// ensureDockerUserException's own doc comment): before this fix,
-// bypass_v4 and authenticated_v4 devices' ordinary (non-redirected)
-// traffic had no way to signal "this connection is allowed to actually
-// leave the box" to the separate DOCKER-USER exception rule, so it was
-// silently dropped by Docker's own FORWARD chain policy even though
-// nftables-manager's own table never intended to block it.
+// TestBaselineRules_MarkForwardableTraffic guards the ct-mark rules
+// documented in full on ensureDockerUserException's own doc comment:
+// without them, bypass_v4 and authenticated_v4 devices' ordinary
+// (non-redirected) traffic has no way to signal "this connection is
+// allowed to actually leave the box" to the separate DOCKER-USER
+// exception rule, so it gets silently dropped by Docker's own FORWARD
+// chain policy even though nftables-manager's own table never intended
+// to block it.
 func TestBaselineRules_MarkForwardableTraffic(t *testing.T) {
 	want := []string{
 		"ip saddr @bypass_v4 ct mark set 0x1 return",
@@ -329,13 +325,12 @@ func TestBaselineRules_MarkForwardableTraffic(t *testing.T) {
 	}
 }
 
-// TestEnsureBaseline_PrunesLegacyRenamedTable covers the cleanup for
-// the bug found live 2026-09-10: a pre-rename version of this binary
-// left an `inet parental_proxy` table in the kernel, registered at the
-// same prerouting/dstnat hook as the current `inet optigate` table, with
-// stale device-set membership that silently shadowed the live policy.
-// EnsureBaseline must delete every legacyTableNames table before
-// building the current one.
+// TestEnsureBaseline_PrunesLegacyRenamedTable covers the cleanup for a
+// pre-rename version of this binary leaving an `inet parental_proxy`
+// table in the kernel, registered at the same prerouting/dstnat hook as
+// the current `inet optigate` table, with stale device-set membership
+// that would silently shadow the live policy. EnsureBaseline must
+// delete every legacyTableNames table before building the current one.
 func TestEnsureBaseline_PrunesLegacyRenamedTable(t *testing.T) {
 	ctx := context.Background()
 	optigateFake := knftables.NewFake(knftables.InetFamily, "optigate")
@@ -370,11 +365,10 @@ func TestEnsureBaseline_PrunesLegacyRenamedTable(t *testing.T) {
 	}
 }
 
-// TestBaselineRules_DropsQUICForBumpDevices is a regression test for the
-// HTTPS-interception bypass found live 2026-09-10: a bump device played
-// non-whitelisted Crunchyroll because Chrome switched to HTTP-3 over
-// QUIC (udp/443) after its first TCP request and never came back, so
-// every per-domain/per-path/per-show rule Squid enforces was silently
+// TestBaselineRules_DropsQUICForBumpDevices guards against an
+// HTTPS-interception bypass: a browser that switches to HTTP-3 over
+// QUIC (udp/443) after its first TCP request and never comes back would
+// have every per-domain/per-path/per-show rule Squid enforces silently
 // skipped. baselineRules must drop udp/443 for bump_v4 so the browser
 // falls back to tcp/443 (which the redirect rule then bumps). Scoped to
 // bump_v4 only -- a DNS-tier device's QUIC is fine.
@@ -421,9 +415,9 @@ func TestBaselineRules_QUICDropComesAfterSelfIPReturn(t *testing.T) {
 
 // TestBaselineRules_OmitsSelfIPExceptionWhenNotConfigured confirms a
 // Manager with no selfIP (every existing test's plain Manager{}, and the
-// package-level `baselineRules` var itself) gets exactly the pre-fix
-// ruleset -- RoadMap.md items 7/18/20's self-IP exception must never
-// apply itself silently just because a Manager exists.
+// package-level `baselineRules` var itself) gets no destination-IP-scoped
+// rules at all -- the self-IP exception must never apply itself
+// silently just because a Manager exists.
 func TestBaselineRules_OmitsSelfIPExceptionWhenNotConfigured(t *testing.T) {
 	m := &Manager{}
 	for _, r := range m.baselineRules() {
@@ -433,13 +427,13 @@ func TestBaselineRules_OmitsSelfIPExceptionWhenNotConfigured(t *testing.T) {
 	}
 }
 
-// TestBaselineRules_InstallsSelfIPExceptionForBumpV4Only confirms the
-// fix itself: with selfIP configured, both bump_v4 redirect ports (80
-// and 443) get a matching "ip daddr <selfIP> ... return" exception, and
-// -- just as important -- no OTHER source set (authenticated_v4,
+// TestBaselineRules_InstallsSelfIPExceptionForBumpV4Only confirms: with
+// selfIP configured, both bump_v4 redirect ports (80 and 443) get a
+// matching "ip daddr <selfIP> ... return" exception, and -- just as
+// important -- no OTHER source set (authenticated_v4,
 // unauthenticated_v4, quarantine_v4) gets any destination-IP-scoped
 // rule at all, since none of them share bump_v4's specific
-// Squid-redirect problem this fix exists for.
+// Squid-redirect problem this exists for.
 func TestBaselineRules_InstallsSelfIPExceptionForBumpV4Only(t *testing.T) {
 	m := &Manager{selfIP: "192.168.1.250"}
 	rules := m.baselineRules()

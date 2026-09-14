@@ -27,10 +27,9 @@ def test_build_catalog_uses_bare_file_when_no_region_split_exists():
 
 def test_build_catalog_prefers_the_global_ex_cn_variant_over_the_bare_union_file():
     """category-games (bare) is the union of category-games-cn and
-    category-games-!cn (confirmed live by fetching all three) -- using
-    it directly would re-include the China-specific noise the split
-    exists to let a caller avoid. The bare file must be skipped
-    entirely when a proper split exists."""
+    category-games-!cn -- using it directly would re-include the
+    China-specific noise the split exists to let a caller avoid. The
+    bare file must be skipped entirely when a proper split exists."""
     catalog = ccs.build_catalog(["category-games", "category-games-!cn", "category-games-cn"])
     slugs = {c["slug"] for c in catalog}
     assert slugs == {"games-!cn", "games-cn"}
@@ -54,8 +53,8 @@ def test_build_catalog_tags_a_region_only_family_with_no_global_equivalent():
 
 def test_build_catalog_applies_whole_name_region_overrides():
     """category-ir/category-ru are themselves the whole region identity
-    (confirmed live by reading their content) -- the suffix classifier
-    alone can't detect this, so it needs the explicit override table."""
+    -- the suffix classifier alone can't detect this, so it needs the
+    explicit override table."""
     catalog = ccs.build_catalog(["category-ir", "category-ru"])
     by_slug = {c["slug"]: c for c in catalog}
     assert by_slug["ir"]["region"] == "ir"
@@ -187,11 +186,10 @@ def test_sync_category_catalog_logs_a_warning_when_the_tree_was_truncated(monkey
 # ============================================================
 
 def test_start_ticks_immediately_not_after_a_full_interval(monkeypatch, conn):
-    """Same class of bug controller/periodic.py was fixed for
-    2026-09-07: with an 86400s default interval, waiting a full
-    interval before the first tick would mean a fresh install stays on
-    the bundled day-one seed for a full day before ever attempting a
-    live refresh."""
+    """With an 86400s default interval, waiting a full interval before
+    the first tick would mean a fresh install stays on the bundled
+    day-one seed for a full day before ever attempting a live
+    refresh."""
     calls = []
     monkeypatch.setattr(ccs, "sync_category_catalog", lambda conn, timeout=20.0: calls.append(1) or 0)
 

@@ -93,8 +93,7 @@ CREATE TABLE IF NOT EXISTS series_cache (
 -- belong to any one person. Parallel concept to `users`, not a kind of
 -- user -- a device is assigned to at most one user OR one group (see
 -- `devices` below), never both.
---   ignored: added 2026-09-07, project owner's explicit request --
---       group-level equivalent of `devices.ignored`. A device's
+--   ignored: group-level equivalent of `devices.ignored`. A device's
 --       EFFECTIVE ignored/BYPASS state is `devices.ignored OR (its
 --       group's ignored, if it belongs to one)` -- this is additive,
 --       not a replacement: a device keeps its own `ignored` bit (still
@@ -127,8 +126,7 @@ CREATE TABLE IF NOT EXISTS group_domains (
     UNIQUE(group_id, domain_id)
 );
 
--- v2 roadmap groundwork (no enforcement reads any of this yet -- Phase
--- 3+): a physical device on the network, identified by MAC address.
+-- A physical device on the network, identified by MAC address.
 --   user_id / group_id: at most one of these is set (enforced below) --
 --       a device belongs to a specific person, OR to a shared-device
 --       group ("TVs", "IoT"), OR neither. `ignored` is a third,
@@ -156,18 +154,16 @@ CREATE TABLE IF NOT EXISTS group_domains (
 --       rule keyed on this flag) rather than a schema change.
 --   last_seen_at: when this device was last observed on the network.
 --       NULL means "never observed" -- nothing populates this column yet
---       (that needs the Phase 3 interception layer or an equivalent
---       mechanism), so every device's is NULL today. Deliberately kept
+--       (that needs the interception layer or an equivalent mechanism),
+--       so every device's is NULL today. Deliberately kept
 --       distinct from "definitely stale": the stale-device cleanup below
 --       only ever matches a real, old timestamp, never a NULL one, so
 --       turning that feature on can't mass-delete every device just
 --       because none of them have been seen yet.
---   quarantined_at: Milestone 8's operator-triggered isolation state
---       (the QUARANTINE policy class -- see common/policy_class.py).
---       NULL means not quarantined (the default for every device). Set
---       by dashboard.py's pause/resume routes (_set_quarantine()) --
---       this comment used to say "nothing sets this yet," which stopped
---       being true once those routes shipped; corrected 2026-09-08.
+--   quarantined_at: the operator-triggered isolation state (the
+--       QUARANTINE policy class -- see common/policy_class.py). NULL
+--       means not quarantined (the default for every device). Set by
+--       dashboard.py's pause/resume routes (_set_quarantine()).
 --   pending_dismissed_at: the "Dismiss" action on the "Devices awaiting
 --       login" card (dashboard.py's dismiss_pending_device()) -- purely
 --       a display suppression, not a policy change. NULL means never
@@ -209,14 +205,14 @@ CREATE TABLE IF NOT EXISTS device_domains (
     UNIQUE(device_id, domain_id)
 );
 
--- Phase 8: a named content category (Adult, Gambling, Social Media, AI...).
--- The OPPOSITE polarity from `domains`/`user_domains`/etc above -- those are
+-- A named content category (Adult, Gambling, Social Media, AI...). The
+-- OPPOSITE polarity from `domains`/`user_domains`/etc above -- those are
 -- an allow-list (denied unless assigned); a category assignment means
 -- BLOCK for that target. `is_global` = blocked for everyone.
 --   subscription_url: where this category's domain list is fetched from
 --       (controller/category_fetch.py), or NULL for a purely
 --       admin-curated category (e.g. "AI", "Weapons" -- no public list
---       exists for either, confirmed 2026-08-31).
+--       exists for either).
 --   last_synced_at: when subscription_url was last fetched successfully.
 --       NULL means never synced (or subscription_url is NULL).
 CREATE TABLE IF NOT EXISTS categories (
@@ -232,11 +228,11 @@ CREATE TABLE IF NOT EXISTS categories (
     -- raw fetched bytes: a cosmetic-only change upstream (a comment
     -- line added, whitespace) must not be treated as "changed" if the
     -- resulting domain set is identical. NULL until the first sync.
-    -- Added 2026-09-12 so a re-sync can skip the DELETE+INSERT of every
-    -- 'subscription' row entirely when nothing actually changed --
-    -- real gap found by code review: the biggest seeded category
-    -- (Adult, ~953K domains) was rewriting itself wholesale on every
-    -- scheduled cycle even on a day the upstream list never changed.
+    -- Lets a re-sync skip the DELETE+INSERT of every 'subscription' row
+    -- entirely when nothing actually changed -- otherwise even the
+    -- biggest seeded category (Adult, ~953K domains) rewrites itself
+    -- wholesale on every scheduled cycle regardless of whether the
+    -- upstream list changed.
     last_subscription_hash TEXT
 );
 
@@ -253,15 +249,14 @@ CREATE TABLE IF NOT EXISTS category_domains (
     UNIQUE(category_id, pattern)
 );
 
--- Added 2026-09-07: the UNIQUE(category_id, pattern) constraint above
--- already indexes (category_id, pattern) together, but leads with
--- category_id -- useless for a lookup keyed on `pattern` ALONE across
--- every category at once, which is exactly what
--- matching.find_categories_for_hostname()'s fast path needs (real bug
--- fixed the same day: without this, that lookup fell back to a full
--- Python-side linear regex scan of every category_domains row --
--- 953,197 for the Adult category alone -- taking up to 51 seconds for
--- a single search).
+-- The UNIQUE(category_id, pattern) constraint above already indexes
+-- (category_id, pattern) together, but leads with category_id --
+-- useless for a lookup keyed on `pattern` ALONE across every category
+-- at once, which is exactly what
+-- matching.find_categories_for_hostname()'s fast path needs. Without
+-- this index that lookup falls back to a full Python-side linear regex
+-- scan of every category_domains row, which is untenable at real
+-- category sizes (Adult alone: ~953K domains).
 CREATE INDEX IF NOT EXISTS idx_category_domains_pattern ON category_domains(pattern);
 
 -- Admin-added allow-exceptions within a category -- a domain matching a
@@ -277,10 +272,10 @@ CREATE TABLE IF NOT EXISTS category_overrides (
     UNIQUE(category_id, pattern)
 );
 
--- The Categories page's "Add category from catalog" search picker
--- (2026-09-11, project owner's explicit request) -- a searchable menu
--- of ready-made subscription sources, so an admin doesn't have to go
--- find a raw blocklist URL themselves for a common case like "Gaming"
+-- The Categories page's "Add category from catalog" search picker -- a
+-- searchable menu of ready-made subscription sources, so an admin
+-- doesn't have to go find a raw blocklist URL themselves for a common
+-- case like "Gaming"
 -- or "Social Media". Sourced from
 -- https://github.com/v2fly/domain-list-community's own data/category-*
 -- files (common/category_catalog_sync.py resolves each one's own
@@ -342,7 +337,7 @@ CREATE TABLE IF NOT EXISTS category_devices (
     UNIQUE(category_id, device_id)
 );
 
--- Phase 8: a time window during which its assigned categories (or a full
+-- A time window during which its assigned categories (or a full
 -- lockout) apply to its assigned users/groups/devices.
 --   days_of_week: comma list of lowercase 3-letter day codes, e.g.
 --       "mon,tue,wed,thu,fri". Evaluated in `time_zone`, not UTC -- see
@@ -358,8 +353,7 @@ CREATE TABLE IF NOT EXISTS category_devices (
 --       this schedule's targets while active -- controller/policy_state.py
 --       reads this, NOT schedule_categories, when it's set. 0 = a normal
 --       DNS-tier category block, using schedule_categories below.
---   is_mode: added 2026-09-05 (Phase 12, temporary schedule overrides).
---       1 = this schedule is one of a target's mutually-exclusive daily
+--   is_mode: 1 = this schedule is one of a target's mutually-exclusive daily
 --       "modes" (e.g. School / Free Time / Bedtime) and is eligible to be
 --       manually forced active -- or forced inactive -- by a
 --       schedule_overrides row below. 0 (the default) = a standing rule
@@ -417,8 +411,8 @@ CREATE TABLE IF NOT EXISTS schedule_devices (
     UNIQUE(schedule_id, device_id)
 );
 
--- Phase 12 (2026-09-05): a manual, time-boxed "shift mode now" action --
--- e.g. school lets out early, so a parent forces the Free Time schedule
+-- A manual, time-boxed "shift mode now" action -- e.g. school lets out
+-- early, so a parent forces the Free Time schedule
 -- active for a kid right now instead of waiting for School's own window
 -- to end, or starts School early one day. Deliberately a one-off action,
 -- not a saved/reusable preset: created with expires_at computed from the
@@ -457,8 +451,8 @@ CREATE TABLE IF NOT EXISTS schedule_overrides (
 
 CREATE INDEX IF NOT EXISTS idx_schedule_overrides_expires ON schedule_overrides(expires_at);
 
--- Phase 3 identity model (Milestone 4): every observed MAC<->IPv4
--- pairing, feeding the interception controller's desired-state
+-- Every observed MAC<->IPv4 pairing, feeding the interception
+-- controller's desired-state
 -- computation (controller/desired_state.py). A device's IP can change
 -- (DHCP lease renewal) and an IP can be reassigned to a different MAC
 -- over time (a departed device's lease reused by a new one) -- this
@@ -486,10 +480,9 @@ CREATE INDEX IF NOT EXISTS idx_schedule_overrides_expires ON schedule_overrides(
 --       NULL means deleting a `devices` row later returns its
 --       bindings to pending rather than discarding the observation.
 --   hostname: nullable, best-effort mDNS reverse-PTR result for this
---       specific IP (controller/mdns_lookup.py, added 2026-09-11 --
---       RoadMap.md, project owner's request to see device type on the
---       "Devices awaiting login" card). DISPLAY ONLY, same rule as
---       vendor lookup (see common/oui_lookup.py's module docstring):
+--       specific IP (controller/mdns_lookup.py), shown on the "Devices
+--       awaiting login" card. DISPLAY ONLY, same rule as vendor lookup
+--       (see common/oui_lookup.py's module docstring):
 --       never consumed for auto-association, only ever rendered next
 --       to a MAC for a human to look at. Left NULL if the device never
 --       answers (most IoT gear, including most smart speakers).
@@ -514,10 +507,9 @@ CREATE INDEX IF NOT EXISTS idx_device_bindings_ip_active ON device_bindings(ipv4
 -- runtime state: what generation the controller wants applied vs what
 -- the worker has actually confirmed, and whether the system is
 -- currently degraded. Written by the controller (see
--- controller/health.py, Milestone 6); read by the dashboard for an
--- eventual "interception health" view (nothing reads it yet -- see the
--- v2 roadmap notes on that future dashboard scope).
---   desired_policy_json: Milestone 7's DesiredPolicy blob, computed by
+-- controller/health.py); read by the dashboard for an eventual
+-- "interception health" view (nothing reads it yet).
+--   desired_policy_json: the DesiredPolicy blob, computed by
 --       controller/policy_state.py from devices/device_bindings and
 --       read directly by phase3/nftables-manager (Go) -- following
 --       this project's own "one shared database, live reads" pattern
@@ -544,8 +536,7 @@ CREATE TABLE IF NOT EXISTS interception_runtime (
 
 -- Normalized network/identity-layer event log (device seen/lost, a
 -- binding created or superseded by a MAC/IP conflict, etc.) -- distinct
--- from access_log, which is proxy-layer allow/deny decisions. This is
--- the "outbox events" RoadMap.md's Milestone 4 refers to.
+-- from access_log, which is proxy-layer allow/deny decisions.
 CREATE TABLE IF NOT EXISTS network_events (
     id           INTEGER PRIMARY KEY,
     event_type   TEXT NOT NULL,
@@ -560,30 +551,24 @@ CREATE TABLE IF NOT EXISTS network_events (
 CREATE INDEX IF NOT EXISTS idx_network_events_observed ON network_events(observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_network_events_device ON network_events(device_id);
 
--- Operational event trail (2026-09-01, added ahead of G1 real-network
--- testing so an admin has SOMETHING to look at in the dashboard besides
--- `docker compose logs`): every long-running periodic sync/discovery
--- loop in controller/main.py already reports its own failures via a
--- PeriodicTask on_error callback -- previously that only ever went to
--- Python's own `logging` (container stdout, invisible from the
--- dashboard, needs SSH/Docker CLI to see at all). This table gives
--- those same failures (and the failure->success "recovery" transition,
--- via PeriodicTask's new on_success hook) a persistent, admin-visible
--- home. Deliberately NOT a firehose: by design (project owner's own
--- scope decision), only real failures and recoveries are recorded here
--- -- not every routine successful cycle, which would make this table
--- pure noise within hours. See common/system_events.py.
---   'info' (added 2026-09-09, real gap found live: clicking "Run now" on
---     the network discovery sweep reported nothing here at all, even
---     though it visibly did something) -- deliberately narrow, NOT a
---     general-purpose severity for routine success: only for (a) an
---     admin's own one-off manual action actually completing (e.g.
---     network_sweep.py's manual "Run now" trigger), and (b) discovery
---     genuinely recording a brand-new device for the first time
---     (common/identity.py's record_binding(), its own auto-create
---     branch) -- both are rare, meaningful, admin-relevant events, not
---     a routine automatic cycle succeeding, so this doesn't reopen the
---     "not a firehose" scope decision above.
+-- Operational event trail, giving an admin something to look at in the
+-- dashboard besides `docker compose logs`: every long-running periodic
+-- sync/discovery loop in controller/main.py reports its own failures
+-- via a PeriodicTask on_error callback (otherwise only visible in
+-- container stdout via SSH/Docker CLI). This table gives those same
+-- failures (and the failure->success "recovery" transition, via
+-- PeriodicTask's on_success hook) a persistent, admin-visible home.
+-- Deliberately NOT a firehose: only real failures and recoveries are
+-- recorded here, not every routine successful cycle, which would make
+-- this table pure noise within hours. See common/system_events.py.
+--   'info' -- deliberately narrow, NOT a general-purpose severity for
+--     routine success: only for (a) an admin's own one-off manual
+--     action actually completing (e.g. network_sweep.py's manual "Run
+--     now" trigger), and (b) discovery genuinely recording a brand-new
+--     device for the first time (common/identity.py's record_binding(),
+--     its own auto-create branch) -- both are rare, meaningful,
+--     admin-relevant events, not a routine automatic cycle succeeding,
+--     so this doesn't reopen the "not a firehose" decision above.
 CREATE TABLE IF NOT EXISTS system_events (
     id       INTEGER PRIMARY KEY,
     ts       TEXT NOT NULL,
@@ -599,8 +584,7 @@ CREATE TABLE IF NOT EXISTS access_log (
     id          INTEGER PRIMARY KEY,
     ts          TEXT NOT NULL,
     user_id     INTEGER,
-    -- Added 2026-08-31 alongside common/matching.py's device_domain_reason()
-    -- fix: which `devices` row made this request, when known. Lets the
+    -- Which `devices` row made this request, when known. Lets the
     -- Report page filter/act on a row by device or group even when it has
     -- no user_id at all (a group- or device-assigned identity). No
     -- REFERENCES clause, matching user_id's own existing convention on
@@ -617,17 +601,16 @@ CREATE TABLE IF NOT EXISTS access_log (
     -- used against this row; cleared again once an admin acts on it via
     -- approve_from_report(). NULL = no outstanding request.
     approval_requested_at TEXT,
-    -- Added 2026-09-07 (RoadMap.md's dated entry): the raw source IP,
-    -- captured independently of device_id -- real live-testing feedback
-    -- was that a row for a genuinely never-seen device (device_id NULL,
-    -- no device_bindings match at request time) gave an admin nothing at
-    -- all to track it down by, which is exactly the case where "add it
-    -- or keep it offline" matters most. Populated best-effort (see
+    -- The raw source IP, captured independently of device_id -- a row
+    -- for a genuinely never-seen device (device_id NULL, no
+    -- device_bindings match at request time) otherwise gives an admin
+    -- nothing to track it down by, which is exactly the case where "add
+    -- it or keep it offline" matters most. Populated best-effort (see
     -- common/logging_util.py's log_access() -- optional kwarg, every
-    -- existing caller keeps working unchanged). As of 2026-09-10 every
-    -- writer passes it: block_page_server.py, adguard_report_sync.py, and
-    -- all of proxy/authz_helper.py's + proxy/sni_helper.py's call sites
-    -- (RoadMap follow-up). Still NULL for rows written before that date.
+    -- existing caller keeps working unchanged). Every writer passes it
+    -- today (block_page_server.py, adguard_report_sync.py,
+    -- proxy/authz_helper.py, proxy/sni_helper.py); still NULL for rows
+    -- written before this column existed.
     ip_address  TEXT
 );
 
@@ -678,25 +661,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "quarantined_at" not in device_columns:
         conn.execute("ALTER TABLE devices ADD COLUMN quarantined_at TEXT")
     if "pending_dismissed_at" not in device_columns:
-        # 2026-09-08, project owner's explicit request: a "Dismiss" action
-        # for the "Devices awaiting login" card that does nothing except
-        # hide that one device from the card until it's genuinely active
-        # again (a new network binding or captive-portal login attempt) --
-        # deliberately not the same as Bypass/ignore, which are real policy
-        # changes. See dashboard.py's dismiss_pending_device() and the
+        # A "Dismiss" action for the "Devices awaiting login" card that
+        # does nothing except hide that one device from the card until
+        # it's genuinely active again (a new network binding or
+        # captive-portal login attempt) -- deliberately not the same as
+        # Bypass/ignore, which are real policy changes. See
+        # dashboard.py's dismiss_pending_device() and the
         # pending_devices query in devices() for how this is read back.
         conn.execute("ALTER TABLE devices ADD COLUMN pending_dismissed_at TEXT")
 
-    # interception_runtime is itself a new (Milestone 4) table, so an
-    # existing pre-Milestone-4 database won't have it at all yet --
-    # CREATE TABLE IF NOT EXISTS above handles that case. This only
-    # covers the Milestone 6/7 columns added to interception_runtime
-    # after ITS initial release, same idempotent pattern as devices
-    # above. No CHECK constraint on the migrated nft_mode column (SQLite's
-    # ADD COLUMN support for inline CHECK is version-fragile) -- unlike
-    # a fresh database, an existing one won't enforce it at the schema
-    # level; application code is still expected to only write the three
-    # valid values.
+    # interception_runtime is itself a newer table, so an existing older
+    # database won't have it at all yet -- CREATE TABLE IF NOT EXISTS
+    # above handles that case. This only covers columns added to
+    # interception_runtime after ITS initial release, same idempotent
+    # pattern as devices above. No CHECK constraint on the migrated
+    # nft_mode column (SQLite's ADD COLUMN support for inline CHECK is
+    # version-fragile) -- unlike a fresh database, an existing one won't
+    # enforce it at the schema level; application code is still expected
+    # to only write the three valid values.
     runtime_columns = {row["name"] for row in conn.execute("PRAGMA table_info(interception_runtime)")}
     if runtime_columns and "desired_policy_json" not in runtime_columns:
         conn.execute("ALTER TABLE interception_runtime ADD COLUMN desired_policy_json TEXT")
@@ -707,10 +689,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if runtime_columns and "nft_fail_reason" not in runtime_columns:
         conn.execute("ALTER TABLE interception_runtime ADD COLUMN nft_fail_reason TEXT")
 
-    # schedule_overrides is itself a new (Phase 12) table, so CREATE TABLE
-    # IF NOT EXISTS above already covers an existing pre-Phase-9 database.
-    # This only covers the new column added to the pre-existing schedules
-    # table alongside it.
+    # schedule_overrides is itself a newer table, so CREATE TABLE IF NOT
+    # EXISTS above already covers an existing older database. This only
+    # covers the new column added to the pre-existing schedules table
+    # alongside it.
     schedule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedules)")}
     if schedule_columns and "is_mode" not in schedule_columns:
         conn.execute("ALTER TABLE schedules ADD COLUMN is_mode INTEGER NOT NULL DEFAULT 0")
@@ -721,45 +703,41 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     binding_columns = {row["name"] for row in conn.execute("PRAGMA table_info(device_bindings)")}
     if binding_columns and "hostname" not in binding_columns:
-        # 2026-09-11: controller/mdns_lookup.py's best-effort mDNS
-        # reverse-PTR result -- see this column's own schema comment
-        # above for why it's display-only.
+        # controller/mdns_lookup.py's best-effort mDNS reverse-PTR
+        # result -- see this column's own schema comment above for why
+        # it's display-only.
         conn.execute("ALTER TABLE device_bindings ADD COLUMN hostname TEXT")
 
     category_columns = {row["name"] for row in conn.execute("PRAGMA table_info(categories)")}
     if category_columns and "last_subscription_hash" not in category_columns:
-        # 2026-09-12: see this column's own schema comment above.
+        # See this column's own schema comment above.
         conn.execute("ALTER TABLE categories ADD COLUMN last_subscription_hash TEXT")
 
     domain_columns = {row["name"] for row in conn.execute("PRAGMA table_info(domains)")}
     if domain_columns and "protected" not in domain_columns:
-        # 2026-09-13: see this column's own schema comment above. Existing
-        # rows default to 0 (unprotected) -- defaults/seed_defaults.py's
+        # See this column's own schema comment above. Existing rows
+        # default to 0 (unprotected) -- defaults/seed_defaults.py's
         # seed() backfills 1 onto its own known infrastructure patterns
         # the next time the proxy container starts, the same way it
         # already owns those patterns' notes.
         conn.execute("ALTER TABLE domains ADD COLUMN protected INTEGER NOT NULL DEFAULT 0")
 
-    # system_events.severity's CHECK constraint (added 2026-09-09, see
-    # that column's own schema comment for the 'info' severity's
-    # narrow scope) can't be widened with a plain ALTER TABLE the way
-    # every migration above is -- SQLite has no ALTER TABLE ... DROP/
-    # MODIFY CONSTRAINT, and (unlike interception_runtime.nft_mode's
-    # own migration just above, which deliberately skipped adding a
-    # CHECK at all rather than deal with this) 'info' genuinely needs
-    # to be accepted by SQLite itself: the app-level _VALID_SEVERITIES
-    # check in common/system_events.py runs BEFORE the INSERT, but the
-    # OLD constraint would still reject that INSERT outright on an
-    # un-migrated existing database, a hard failure app-level discipline
-    # can't route around. Rebuilds the table (rename, recreate with the
-    # new constraint, copy every row across, drop the renamed original)
-    # -- the standard SQLite pattern for widening a CHECK, and the only
-    # one available. Detected via sqlite_master's own stored CREATE
-    # TABLE text rather than a separate "have we migrated" flag: cheap,
-    # and inherently idempotent (a fresh database created from the
-    # schema above already has 'info' in its text, so this rebuild
-    # correctly never runs for it, only for a database created before
-    # this migration existed).
+    # system_events.severity's CHECK constraint can't be widened with a
+    # plain ALTER TABLE the way every migration above is -- SQLite has
+    # no ALTER TABLE ... DROP/MODIFY CONSTRAINT, and 'info' genuinely
+    # needs to be accepted by SQLite itself: the app-level
+    # _VALID_SEVERITIES check in common/system_events.py runs BEFORE the
+    # INSERT, but the OLD constraint would still reject that INSERT
+    # outright on an un-migrated existing database, a hard failure
+    # app-level discipline can't route around. Rebuilds the table
+    # (rename, recreate with the new constraint, copy every row across,
+    # drop the renamed original) -- the standard SQLite pattern for
+    # widening a CHECK, and the only one available. Detected via
+    # sqlite_master's own stored CREATE TABLE text rather than a
+    # separate "have we migrated" flag: cheap, and inherently idempotent
+    # (a fresh database created from the schema above already has
+    # 'info' in its text, so this rebuild correctly never runs for it,
+    # only for a database created before this migration existed).
     events_sql_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'system_events'"
     ).fetchone()
@@ -782,22 +760,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
             """
         )
 
-    # 2026-09-10 (RoadMap.md finding #1d): defaults/seed_defaults.py's
-    # CRUNCHYROLL_PATHS dropped its two blanket domain_paths rules
-    # (`^/playback/v[0-9]+/`, `^/content/v[0-9]+/`) -- see that list's own
-    # long comment for the full writeup: they'd turned into a live
-    # security gap, blanket-allowing any request under either prefix that
-    # common/cr_urls.py's classifier didn't specifically recognize,
-    # regardless of show ownership. But seed_defaults.seed()'s own
-    # INSERT OR IGNORE is additive-only (deliberately never touches a row
-    # an earlier run already inserted, see that module's docstring) and
-    # isn't even run automatically at startup (it's a standalone script,
-    # run by hand) -- so an existing database, prod's included, keeps
-    # both dangerous rows forever unless something removes them. This
-    # does that here, in the one place that DOES run automatically on
-    # every startup: deletes ONLY those two exact literal patterns (never
-    # a fuzzy/prefix match, so a genuinely different admin-added rule
-    # that happens to share a substring is untouched) off the Crunchyroll
+    # defaults/seed_defaults.py's CRUNCHYROLL_PATHS dropped its two
+    # blanket domain_paths rules (`^/playback/v[0-9]+/`,
+    # `^/content/v[0-9]+/`) -- see that list's own long comment for the
+    # full writeup: they blanket-allow any request under either prefix
+    # that common/cr_urls.py's classifier doesn't specifically
+    # recognize, regardless of show ownership. But seed_defaults.seed()'s
+    # own INSERT OR IGNORE is additive-only (deliberately never touches a
+    # row an earlier run already inserted, see that module's docstring)
+    # and isn't even run automatically at startup (it's a standalone
+    # script, run by hand) -- so an existing database keeps both
+    # dangerous rows forever unless something removes them. This does
+    # that here, in the one place that DOES run automatically on every
+    # startup: deletes ONLY those two exact literal patterns (never a
+    # fuzzy/prefix match, so a genuinely different admin-added rule that
+    # happens to share a substring is untouched) off the Crunchyroll
     # domain specifically, then seeds the two narrower replacements via
     # the same INSERT OR IGNORE idiom. Idempotent -- safe on every
     # startup, on any existing database, in any order relative to the
@@ -817,15 +794,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 (cr_domain["id"], pattern),
             )
 
-    # 2026-09-11: day-one seed for the Categories page's "Add category
-    # from catalog" picker (category_catalog table, see its own schema
-    # comment above) -- only fires when the table is genuinely empty, so
-    # a fresh install has something to search immediately without
-    # waiting for common/category_catalog_sync.py's own periodic
-    # background refresh to complete first. Never re-seeds over already-
-    # live-refreshed data (an "empty" table only happens once, before
-    # that first successful sync) -- this is a one-time bootstrap, not a
-    # standing source of truth the live sync has to fight.
+    # Day-one seed for the Categories page's "Add category from catalog"
+    # picker (category_catalog table, see its own schema comment above)
+    # -- only fires when the table is genuinely empty, so a fresh
+    # install has something to search immediately without waiting for
+    # common/category_catalog_sync.py's own periodic background refresh
+    # to complete first. Never re-seeds over already-live-refreshed data
+    # (an "empty" table only happens once, before that first successful
+    # sync) -- this is a one-time bootstrap, not a standing source of
+    # truth the live sync has to fight.
     catalog_count = conn.execute("SELECT COUNT(*) AS c FROM category_catalog").fetchone()["c"]
     if catalog_count == 0:
         snapshot_path = Path(__file__).resolve().parent / "data" / "v2fly_category_catalog.tsv"
@@ -851,20 +828,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 rows,
             )
 
-    # Real bug, RoadMap.md 2026-09-13: dashboard.py's update_device() and
-    # _batch_assign_devices_to_group() started setting is_authenticated=1
-    # the moment an admin assigns a device to a user/group (2026-09-11,
-    # "assigning a device IS the vouching act") -- but that fix only
-    # applies going forward. Any device assigned BEFORE that date (a
-    # real one found live: a device with a real label and group
-    # assignment, still stuck showing on "Devices awaiting login" days
-    # later) never got backfilled, since nothing else ever re-checks
-    # this. Safe to run on every startup indefinitely: no code path in
-    # this app assigns a user/group to a device while leaving
+    # Backfills is_authenticated=1 for any device assigned to a user/group
+    # before that assignment started implying authentication -- no code
+    # path in this app assigns a user/group while leaving
     # is_authenticated=0, so once every pre-fix row is caught up this
-    # becomes a permanent no-op, never overwriting an admin's own later
-    # choice to actually un-assign (which clears user_id/group_id, not
-    # just is_authenticated) or ignore/bypass a device.
+    # becomes a permanent no-op. Never overwrites an admin's later choice
+    # to actually un-assign (clears user_id/group_id) or ignore/bypass a
+    # device.
     conn.execute(
         "UPDATE devices SET is_authenticated = 1 "
         "WHERE is_authenticated = 0 AND (user_id IS NOT NULL OR group_id IS NOT NULL)"
@@ -905,10 +875,8 @@ def get_deleted_category_names(conn: sqlite3.Connection) -> list[str]:
     any of its DEFAULT_CATEGORIES starter rows (e.g. "Weapons"), which
     otherwise runs on every proxy container start/restart and has no
     way to tell "never created yet" apart from "an admin removed this
-    on purpose" (real bug, RoadMap.md 2026-09-13: a deleted starter
-    category silently came back on the next restart). Stored as one
-    JSON list under a single settings key, same convention as the
-    AdGuard recompile-latency card's baseline (RoadMap.md 2026-09-12)."""
+    on purpose". Stored as one JSON list under a single settings key,
+    same convention as the AdGuard recompile-latency card's baseline."""
     raw = get_setting(conn, _DELETED_CATEGORY_NAMES_SETTING_KEY, "[]")
     try:
         names = json.loads(raw)
@@ -931,13 +899,13 @@ def add_deleted_category_name(conn: sqlite3.Connection, name: str) -> None:
     set_setting(conn, _DELETED_CATEGORY_NAMES_SETTING_KEY, json.dumps(sorted(names)))
 
 
-# The memorable-URL feature (RoadMap.md's dated entry, 2026-09-07): a
-# device that's already connected to the WiFi but lost real internet
-# access (or just wants to self-check) can visit this hostname to see its
-# own Label/User-or-Group/IP/MAC -- see dashboard/block_page_server.py for
-# the page itself and controller/adguard_sync.py's sync_optigate_rewrite()
-# for the AdGuard DNS-rewrite that makes the hostname actually resolve to
-# this box. Lives here (common/), not in either of those two -- both
+# The memorable-URL feature: a device that's already connected to the
+# WiFi but lost real internet access (or just wants to self-check) can
+# visit this hostname to see its own Label/User-or-Group/IP/MAC -- see
+# dashboard/block_page_server.py for the page itself and
+# controller/adguard_sync.py's sync_optigate_rewrite() for the AdGuard
+# DNS-rewrite that makes the hostname actually resolve to this box.
+# Lives here (common/), not in either of those two -- both
 # dashboard.py's own Settings-page route and adguard_sync.py need the
 # exact same "what's the current full hostname" answer, and they're
 # separate container images (see common/category_fetch.py's own docstring
@@ -949,9 +917,7 @@ DEFAULT_OPTIGATE_HOSTNAME_PREFIX = "optigate"
 
 def optigate_hostname(conn: sqlite3.Connection) -> str:
     """The full current hostname (e.g. "optigate.home"). The `.home`
-    suffix is hardcoded, never stored or admin-editable -- the project
-    owner's explicit direction: "force the use of .home so the
-    administrator can only change the first part of the URL." Only the
+    suffix is hardcoded, never stored or admin-editable -- only the
     prefix (`optigate_hostname_prefix` setting) is customizable, from the
     dashboard's Settings page."""
     prefix = get_setting(conn, "optigate_hostname_prefix", DEFAULT_OPTIGATE_HOSTNAME_PREFIX)

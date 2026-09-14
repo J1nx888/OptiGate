@@ -1,57 +1,45 @@
 #!/usr/bin/env python3
-"""Pushes two independent sets of DNS-tier enforcement rules to AdGuard
-Home, both via its per-client custom filtering rules (see
-common/adguard_client.py's docstring for how that's verified to
-actually work), both built by the same shared engine
-(`_build_domain_deny_rules()`):
+"""Pushes DNS-tier enforcement rules to AdGuard Home via its per-client
+custom filtering rules (see common/adguard_client.py's docstring for
+how that's verified to work). Several independent rule sources feed
+one shared managed block:
 
-1. `build_rules()` -- a domain marked `domains.mode = 'bump'` must NEVER
-   be reachable via plain, unrefined DNS-tier access UNLESS the
+1. `build_rules()` -- a domain marked `domains.mode = 'bump'` must
+   never be reachable via plain, unrefined DNS-tier access unless the
    requesting device is both currently `bump_eligible()`
    (`common/policy_class.py`) AND that specific domain is actually
-   assigned to it (`is_global`, or a user/group/device grant) -- refined
-   through Squid, or denied outright, never a silent DNS-tier fallback.
-2. `build_splice_deny_rules()` (added 2026-08-31, GH #9) -- enforces the
-   same per-user/group/device/everyone domain assignment the dashboard's
-   Domains page already manages, for `mode = 'splice'` domains -- the
-   tier most devices actually use, since bump is a deliberately small
-   curated set. See that function's own docstring for the gap this
-   closed (this module used to do ONLY #1).
+   assigned to it (`is_global`, or a user/group/device grant) --
+   refined through Squid, or denied outright, never a silent DNS-tier
+   fallback.
+2. `build_splice_deny_rules()` -- enforces the same per-user/group/
+   device/everyone domain assignment the dashboard's Domains page
+   manages, for `mode = 'splice'` domains -- the tier most devices
+   actually use, since bump is a deliberately small curated set.
 
-**Reworked 2026-08-31, per the project owner's explicit design
-clarification (RoadMap.md's dated entry, GH #9)**: `build_rules()` used
-to ONLY check bump-eligibility, giving any bump-eligible device a free
-DNS pass to every `bump`-mode domain and relying entirely on Squid's own
-`authz_helper.decide()` to catch a domain that specific device/user
-wasn't actually assigned, after decryption. AdGuard now checks the same
-assignment before the DNS query even resolves, for both modes -- one
-shared engine, `_build_domain_deny_rules()`, that also excludes any
-device classified `BYPASS` (`ignored=1`) from every rule it builds, on
-either mode ("AdGuard should apply a baseline of protection... unless
-the device/user/group is set to bypass/ignore" -- the project owner's
-own words). See that function's own docstring for the full algorithm.
+Both share one engine, `_build_domain_deny_rules()`, which also
+excludes any device classified `BYPASS` (`ignored=1`) from every rule
+it builds, on either mode. See that function's own docstring for the
+full algorithm.
 
-nftables has no domain visibility to enforce either of these itself (it
-can only redirect by IP+port, see knftables_adapter.go's own comment on
-this exact point), so both happen here, at the DNS tier, before a
-connection to that domain is even attempted.
+nftables has no domain visibility to enforce either of these itself
+(it can only redirect by IP+port, see knftables_adapter.go's own
+comment on this exact point), so both happen here, at the DNS tier,
+before a connection to that domain is even attempted.
 
 Same idempotent-full-reconcile shape as everywhere else in this
 codebase (phase3/nftables-manager's flush-before-re-add,
 controller/policy_state.py's full DesiredPolicy recompute every cycle):
 every sync reads the DB and AdGuard's current rules fresh, computes the
-complete desired managed-rules block (both rule sets combined), and
+complete desired managed-rules block (all rule sets combined), and
 replaces it whole -- no incremental add/remove, no assumption about
 what a previous cycle left behind.
 
-**Phase 8 addendum (2026-08-31)**: content-category blocking
-(`build_category_deny_rules()`) adds a THIRD rule source to the same
-managed block, for categories at or under
-`matching.MAX_SCOPED_CATEGORY_DOMAINS` domains. Real category blocklists
-(confirmed live: https://github.com/blocklistproject/Lists) range from
-tens of domains to ~953K -- scoping a list that size to a subset of
-clients via `$client=` is exactly what AdGuard's own team calls
-"unworkable" for per-client blocklist assignment
+Content-category blocking (`build_category_deny_rules()`) adds a THIRD
+rule source to the same managed block, for categories at or under
+`matching.MAX_SCOPED_CATEGORY_DOMAINS` domains. Real category
+blocklists range from tens of domains to ~953K -- scoping a list that
+size to a subset of clients via `$client=` is exactly what AdGuard's
+own team calls "unworkable" for per-client blocklist assignment
 (AdguardTeam/AdGuardHome#8103: "requires maintaining thousands of rules
 for each client profile"). A category over that threshold is therefore
 `is_global`-only (enforced by the dashboard, not re-checked here) and
@@ -61,35 +49,24 @@ ITS OWN native managed filter lists instead of expanding it into custom
 rules, letting AdGuard's engine (built for exactly this) match it. See
 each function's own docstring.
 
-**Memorable-URL addendum (2026-09-07)**: `sync_optigate_rewrite()`
-managed an AdGuard DNS-rewrite entry (a completely different AdGuard
-feature from the custom filtering rules the other three sources feed,
-see common/adguard_client.py's own docstring), not a block/allow
-decision at all -- originally living in this same module purely
-because it was the same "reconcile every cycle" background loop.
-**Moved to common/optigate_rewrite.py 2026-09-08**: that placement
-meant the feature only ever worked while `controller` (the
-`interception` profile) was actually running -- OFF by default for
-most installs -- so `dashboard.py`'s own "Saved. The address is now
-X.home." confirmation was untrue for anyone not running that profile,
-silently, with no error. See that module's own docstring for the full
-story; `sync_once()` below still calls it every cycle as a second,
-now-redundant path for when the interception profile happens to be
-running, but the dashboard's own direct call is what actually makes it
-work by default.
+`sync_optigate_rewrite()` manages an AdGuard DNS-rewrite entry (a
+completely different AdGuard feature from the custom filtering rules
+the other sources feed, see common/adguard_client.py's own docstring),
+not a block/allow decision at all. It now lives in
+common/optigate_rewrite.py so the memorable-URL feature also works when
+the `interception` profile (this module's own process) isn't running;
+`sync_once()` below still calls it every cycle as a second,
+now-redundant path for when that profile is running, but the
+dashboard's own direct call is what makes it work by default.
 
-**ECH-strip addendum (2026-09-09, RoadMap.md item 17)**: `build_ech_strip_rules()`
-adds a FOURTH rule source to the same managed block, for `mode='bump'`
-domains specifically. Not a block/allow decision either -- it withholds
-just the HTTPS/SVCB-type DNS record (via AdGuard's `$dnstype=HTTPS`
-modifier) for exactly the devices actually authorized to reach that
-domain through Squid, so a Cloudflare-fronted domain's Encrypted Client
-Hello (which lives ONLY in that record) can't hide the real SNI from
-Squid's own bump/splice decision. See that function's own docstring for
-the full live-verified story -- an initial attempt to verify this
-appeared to fail entirely, root-caused to a race in the verification
-itself (AdGuard needs a moment to recompile its rule engine after a
-rules change), not any real limitation of AdGuard or this modifier.
+`build_ech_strip_rules()` adds a FOURTH rule source to the same managed
+block, for `mode='bump'` domains specifically. Not a block/allow
+decision either -- it withholds just the HTTPS/SVCB-type DNS record
+(via AdGuard's `$dnstype=HTTPS` modifier) for exactly the devices
+actually authorized to reach that domain through Squid, so a
+Cloudflare-fronted domain's Encrypted Client Hello (which lives ONLY in
+that record) can't hide the real SNI from Squid's own bump/splice
+decision. See that function's own docstring for the mechanism.
 """
 from __future__ import annotations
 
@@ -121,22 +98,19 @@ _MARKER_END = "! === end optigate managed rules ==="
 
 def _domain_rule(pattern: str, client_ips: list[str], block_page_ip: str | None = None) -> str:
     """One AdGuard regex rule, scoped to client_ips via the `$client`
-    modifier (confirmed live against a real AdGuard Home instance --
-    see common/adguard_client.py's docstring). The regex body mirrors
-    common/matching.py's own `_domain_regex()` anchoring EXACTLY
-    (`(?:^|\\.)(?:pattern)\\Z`, case-insensitive) so a domain is
-    hard-denied here under precisely the same suffix-match rules Squid
-    itself uses to decide bump-mode -- translated to AdGuard's regex
-    rule syntax (Go's RE2 engine via the `/regex/` rule form): RE2 has
-    no `\\Z`, but a plain `$` is equivalent here since a DNS query name
-    never contains an embedded newline; `(?i)` is RE2's inline
-    case-insensitivity flag, replacing Python's separate
-    `re.IGNORECASE` argument.
+    modifier. The regex body mirrors common/matching.py's own
+    `_domain_regex()` anchoring EXACTLY (`(?:^|\\.)(?:pattern)\\Z`,
+    case-insensitive) so a domain is hard-denied here under precisely
+    the same suffix-match rules Squid itself uses to decide bump-mode
+    -- translated to AdGuard's regex rule syntax (Go's RE2 engine via
+    the `/regex/` rule form): RE2 has no `\\Z`, but a plain `$` is
+    equivalent here since a DNS query name never contains an embedded
+    newline; `(?i)` is RE2's inline case-insensitivity flag, replacing
+    Python's separate `re.IGNORECASE` argument.
 
     If block_page_ip is given, the rule ALSO carries a `$dnsrewrite`
     modifier pointing the DNS answer at that IP instead of the plain
-    default deny (confirmed live combinable with `$client` on one rule).
-    That IP is expected to be running dashboard/block_page_server.py,
+    default deny. That IP is expected to be running dashboard/block_page_server.py,
     which only ever answers on port 80 -- deliberately no HTTPS
     equivalent, see that module's own docstring for why showing a page
     over HTTPS to a device that was never asked to trust this project's
@@ -207,33 +181,20 @@ _DOH_PROVIDER_DOMAINS = (
 
 def build_anti_doh_rules() -> list[str]:
     """Unconditional, network-wide deny rules for the DoH canary/provider
-    domains above -- closes the most realistic real-world bypass of
-    DNS-tier enforcement found during the 2026-09-02 brute-force/
-    injection audit (prompted directly: "can an end user bypass checks,
-    e.g. via browser dev tools"). The literal dev-tools scenario doesn't
-    apply anywhere in this codebase (verified: no client-supplied
-    header/cookie/param feeds into any allow/deny decision -- see
-    docs/security/overview.md section 9's SQL-injection audit for the
-    same kind of sweep applied to this question), but investigating it
-    surfaced a much more practically real one: a kid doesn't need dev
-    tools OR any special skill to defeat this project's DNS-tier
-    enforcement as it existed before this function -- Firefox and
-    Chrome both ship a one-click "Secure DNS"/DNS-over-HTTPS toggle in
-    their own visible Settings UI, and neither AdGuard nor
-    `phase3/nftables-manager`'s baseline rules intercepted plain
-    port-443 traffic for a normal (`authenticated_v4`, non-bump)
+    domains above. Firefox and Chrome both ship a one-click "Secure
+    DNS"/DNS-over-HTTPS toggle in their own visible Settings UI; neither
+    AdGuard nor `phase3/nftables-manager`'s baseline rules intercept
+    plain port-443 traffic for a normal (`authenticated_v4`, non-bump)
     device -- only port 53 is redirected for that class (see
-    `knftables_adapter.go`'s `baselineRules`) -- so a DoH query sailed
-    through completely unfiltered, and the browser then used whatever
-    real (unfiltered) IP it got back, also over port 443, also
-    untouched. This function does not fully close that class of gap
-    (a bump-eligible device's port 443 traffic already gets redirected
-    to Squid regardless of what IP a DoH query returns, and terminates
-    there against an unconfigured domain; a NON-bump device still has
-    no equivalent SNI-layer backstop) -- see docs/security/overview.md
-    section 10 for the accepted residual gap and why closing it fully
-    would mean giving DNS-tier-only devices some of Squid's own
-    SNI-inspection machinery, a bigger design change than this pass.
+    `knftables_adapter.go`'s `baselineRules`) -- so without this, a DoH
+    query sails through unfiltered and the browser uses whatever real
+    IP it gets back, also over port 443, also untouched. This function
+    does not fully close that class of gap (a bump-eligible device's
+    port 443 traffic already gets redirected to Squid regardless of
+    what IP a DoH query returns, and terminates there against an
+    unconfigured domain; a NON-bump device still has no equivalent
+    SNI-layer backstop) -- see docs/security/overview.md section 10 for
+    the accepted residual gap.
 
     No `conn` parameter needed -- unlike every other rule builder in
     this module, this one reads no per-household state at all; it is
@@ -244,32 +205,20 @@ def build_anti_doh_rules() -> list[str]:
 
 def _fetch_eligible_devices(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Every currently-bound, non-BYPASS device -- the shared "who does
-    AdGuard-side enforcement apply to right now" query duplicated,
-    before 2026-09-02, between `_build_domain_deny_rules()` and
-    `build_category_deny_rules()` (identical query, identical
-    `classify_device() != PolicyClass.BYPASS` filter, copy-pasted).
-    `sync_once()` now calls this exactly once per cycle and threads the
-    result into all three callers via their own `eligible_devices`
-    parameter, instead of each independently re-querying and
-    re-classifying the full device list -- on a household of 15 devices
-    and 40 bump/splice domains, the nested per-domain/per-device
-    authorization check inside `_build_domain_deny_rules()` alone made
-    this query (and the classification pass over it) run 2-3x more than
-    necessary every single cycle.
+    AdGuard-side enforcement apply to right now" query. `sync_once()`
+    calls this exactly once per cycle and threads the result into all
+    device-aware builders via their own `eligible_devices` parameter,
+    instead of each independently re-querying and re-classifying the
+    full device list.
 
-    **Real gap found 2026-09-11, same session/same bug class as
-    controller/desired_state.py and controller/policy_state.py's own
-    fixes**: this used to INNER JOIN `devices d ON b.device_id = d.id`,
-    which silently excludes an orphaned binding (`device_id` NULL via
+    LEFT JOIN from device_bindings (not INNER JOIN on devices), with
+    `d.*` NULL-safe: an orphaned binding (`device_id` NULL via
     `ON DELETE SET NULL` after a device delete -- see db.py's schema
-    comment) from AdGuard's eligible-device list entirely, rather than
-    including it as a PREAUTH device the way the nftables-side query
-    now correctly does. A deleted device's still-active binding used to
-    get NO AdGuard-side deny rule of any kind (bump, splice, or
-    category) -- unrestricted DNS resolution, indistinguishable from a
-    deliberate bypass. LEFT JOIN from device_bindings, with `d.*`
-    NULL-safe: `classify_device()` on an all-NULL row resolves to
-    PREAUTH (never BYPASS, so it stays eligible here), and
+    comment) must still get a deny rule rather than silently falling
+    out of the eligible-device list entirely (unrestricted DNS
+    resolution would be indistinguishable from a deliberate bypass).
+    `classify_device()` on an all-NULL row resolves to PREAUTH (never
+    BYPASS, so it stays eligible here), and
     `matching.device_domain_reason()`/`category_applies_to_device()`
     both null-guard `device["user_id"]`/`["group_id"]` before querying,
     so an orphaned device correctly falls through to only
@@ -305,41 +254,22 @@ def _build_domain_deny_rules(
     NOT authorized for it and emits one `$client=`-scoped deny rule per
     domain (skipped entirely if nobody needs denying for it).
 
-    **Reworked 2026-08-31, per the project owner's explicit direction on
-    tighter Squid/AdGuard integration (RoadMap.md's dated entry, GH #9)**:
-    a device is authorized for a domain when
+    A device is authorized for a domain when
     `matching.device_domain_reason()` (common/matching.py) returns
     non-None -- `is_global`, or an explicit user/group/device grant --
     AND, when `require_bump_eligible` is set, `policy_class.bump_eligible()`
-    is ALSO true. That `AND` is the actual behavior change: previously
-    (`build_rules()` before this rework) a `bump`-mode domain was only
-    ever denied to devices that weren't bump-eligible at all -- a
-    bump-eligible device got a free DNS pass to ANY bump-mode domain
-    regardless of whether that SPECIFIC domain was assigned to it,
-    relying entirely on Squid's own `authz_helper.decide()` to catch an
-    unassigned one after decryption. Now AdGuard checks the same
-    assignment `authz_helper.py` would check, before the DNS query even
-    resolves -- a bump-eligible device only gets a clean resolution for a
-    bump-mode domain that's actually `is_global` or assigned to it (via
-    its user, group, or the device itself); an unassigned one is denied
-    here, and the connection never reaches Squid at all. `is_global` on a
-    bump-mode domain still only ever means "assigned to everyone", never
-    "skip the bump-eligibility gate too" -- a non-bump-eligible device is
-    still denied a global bump domain exactly as before.
+    is ALSO true. `is_global` on a bump-mode domain only ever means
+    "assigned to everyone", never "skip the bump-eligibility gate too"
+    -- a non-bump-eligible device is still denied a global bump domain.
 
-    **A device classified `BYPASS` (`ignored=1`,
-    `policy_class.classify_device()`) is excluded entirely** -- never
-    added to any deny rule, on any domain, regardless of mode. Per the
-    project owner's explicit direction the same day: "AdGuard DNS should
-    apply a baseline of protection against all devices/users/groups
-    unless the device/user/group is set to bypass/ignore." (`bypass_login`
-    is deliberately NOT the same thing here -- see `classify_device()`'s
-    own docstring; a `bypass_login` device still belongs to whatever
-    user/group it's assigned to and is filtered normally. The dashboard's
-    `update_device()`/`bypass_login_device()` routes default a newly
-    `bypass_login`'d device to `ignored=1` too, but that's a UI default,
-    not a rule this function enforces -- an admin can still un-ignore one
-    while leaving `bypass_login` on.) An ignored device's packets never
+    A device classified `BYPASS` (`ignored=1`,
+    `policy_class.classify_device()`) is excluded entirely -- never
+    added to any deny rule, on any domain, regardless of mode.
+    (`bypass_login` is deliberately NOT the same thing here -- see
+    `classify_device()`'s own docstring; a `bypass_login` device still
+    belongs to whatever user/group it's assigned to and is filtered
+    normally. An admin can un-ignore a `bypass_login` device while
+    leaving `bypass_login` on.) An ignored device's packets never
     actually reach AdGuard's redirected port in the first place under
     normal ARP-spoofed interception (nftables' `bypass_v4` `return` --
     see `knftables_adapter.go`), so this exclusion is defense-in-depth
@@ -351,14 +281,12 @@ def _build_domain_deny_rules(
     quarantined device's packets are dropped outright at the network
     layer (`quarantine_v4 counter drop`) regardless of what AdGuard says,
     so it's moot either way -- left to fall through the normal
-    `device_domain_reason()` check rather than special-cased, since the
-    project owner didn't ask for quarantine-specific handling here.
+    `device_domain_reason()` check rather than special-cased.
 
-    Scope for `mode='splice'` (locked with the project owner, see
-    RoadMap.md): only domains that HAVE a `domains` row. A domain with no
-    row at all is unchanged -- deliberately still default-allow at the
-    DNS tier in this pass; default-deny-for-unconfigured is a separate
-    future decision.
+    Scope for `mode='splice'`: only domains that HAVE a `domains` row. A
+    domain with no row at all is unchanged -- deliberately still
+    default-allow at the DNS tier in this pass; default-deny-for-
+    unconfigured is a separate future decision.
 
     A device with no currently-active `device_bindings` row contributes
     no IP -- there's nothing to add a rule for yet; the same
@@ -371,13 +299,12 @@ def _build_domain_deny_rules(
     configured at all, or no non-BYPASS device currently has a known IP
     -- both legitimate "nothing to deny yet" states, not errors.
 
-    `eligible_devices` (added 2026-09-02): pass the result of a single
+    `eligible_devices`: pass the result of a single
     `_fetch_eligible_devices(conn)` call to reuse it across multiple
     builders in one `sync_once()` cycle instead of each re-querying and
-    re-classifying the full device list -- see that function's own
-    docstring. Defaults to `None`, which fetches it fresh (unchanged
-    behavior for any direct caller, e.g. existing tests, that doesn't
-    pass one in).
+    re-classifying the full device list. Defaults to `None`, which
+    fetches it fresh (unchanged behavior for any direct caller, e.g.
+    existing tests, that doesn't pass one in).
     """
     domains = conn.execute(
         "SELECT pattern, id, is_global FROM domains WHERE mode = ? ORDER BY id", (mode,)
@@ -414,28 +341,18 @@ def build_rules(
     currently `bump_eligible()` (`common/policy_class.py`) AND actually
     authorized for that specific domain (`is_global`, or an explicit
     user/group/device grant -- see `_build_domain_deny_rules()`'s own
-    docstring for the 2026-08-31 rework that added the per-domain
-    assignment check on top of the original bump-eligibility-only gate).
+    docstring for the full algorithm).
 
-    **Original fix, 2026-08-31 -- a real gap, same class of bug as
-    classify_device() and bypass_login (see RoadMap.md's dated entry
-    for that one)**: this used to select on the raw `d.bump_enabled = 0`
-    column instead of the actual derived `bump_eligible()` state. A
-    device with `bump_enabled = 1` set (an admin can do this at any
-    time, including on a device that hasn't logged in yet) but not yet
-    actually `AUTHENTICATED` -- e.g. a genuinely new, still-PREAUTH
-    device Phase 4 auto-creates, or one deliberately pre-configured for
-    bump ahead of its first login -- was excluded from this hard-deny
-    list entirely (since `bump_enabled = 1`), while ALSO not being a
-    member of nftables' `bump_v4` set (`bump_eligible()` requires
-    `AUTHENTICATED` too, which it isn't yet). The result: AdGuard
-    resolved the real IP for a `mode='bump'` domain, and nftables never
-    redirected the resulting HTTPS connection to Squid either -- a full,
-    unfiltered bypass of the exact invariant this module exists to
-    enforce, worse than either a hard deny or a Squid-refined
-    connection. Fixed to select the same way `controller/policy_state.py`
-    already does: fetch the columns `bump_eligible()` needs and exclude
-    only devices it actually returns True for.
+    Selects using the actual derived `bump_eligible()` state, not the
+    raw `d.bump_enabled` column -- a device can have `bump_enabled = 1`
+    set without yet being `AUTHENTICATED` (e.g. a still-PREAUTH device,
+    or one pre-configured for bump ahead of its first login), and such
+    a device is also not yet a member of nftables' `bump_v4` set. Using
+    the raw column here would resolve the real IP for a `mode='bump'`
+    domain with no nftables-side redirect to Squid either -- a full,
+    unfiltered bypass. Same selection approach as
+    `controller/policy_state.py`: fetch the columns `bump_eligible()`
+    needs and exclude only devices it actually returns True for.
 
     Returns an empty list when there are no bump-mode domains configured
     at all, or no device needs denying -- both legitimate "nothing to
@@ -456,8 +373,7 @@ def _ech_strip_rule(pattern: str, client_ips: list[str]) -> str:
     and the HTTP/3 `alpn=` hint is withheld, so the client has nothing to
     build an Encrypted Client Hello or a cold QUIC attempt with, and
     falls back to a normal, visible-SNI TLS 1.3 handshake. See
-    `build_ech_strip_rules()`'s own docstring for the live-verified
-    evidence this exists to address."""
+    `build_ech_strip_rules()`'s own docstring for why this is needed."""
     body = f"(?i)(?:^|\\.)(?:{pattern})$"
     return f"/{body}/$client={','.join(client_ips)},dnstype=HTTPS"
 
@@ -466,25 +382,21 @@ def build_ech_strip_rules(
     conn: sqlite3.Connection,
     eligible_devices: list[sqlite3.Row] | None = None,
 ) -> list[str]:
-    """RoadMap.md item 17: Cloudflare-fronted `mode='bump'` domains
-    (Crunchyroll, Asurascans) publish Encrypted Client Hello (ECH) in
-    their DNS HTTPS/SVCB record -- the browser then sends a TLS
-    ClientHello whose visible SNI is a generic, shared placeholder
-    (`cloudflare-ech.com`, used by thousands of unrelated sites), with
-    the real hostname encrypted inside where Squid cannot read it.
-    Confirmed live 2026-09-09 (RoadMap.md's dated entry, with Squid's
-    OWN `access.log` literally showing `CONNECT cloudflare-ech.com:443`):
-    Squid's built-in anti-spoofing check then validates that the visible
-    SNI's hostname actually resolves to the connection's real
-    destination IP -- which it never can for a shared ECH placeholder --
-    and kills the connection with `SECURITY ALERT: Host header forgery
-    detected`, entirely inside Squid's own core TLS-bump machinery,
-    before `proxy/sni_helper.py`'s own allow/deny logic ever runs. No
-    Squid config directive relaxes this check (confirmed against Squid's
-    own release notes and current ACL documentation -- no ECH-aware ACL
-    exists at any Squid version, contrary to at least one blog's
-    inaccurate claim); this is an acknowledged, unresolved upstream
-    limitation, not something fixable on the Squid side at all.
+    """Cloudflare-fronted `mode='bump'` domains (Crunchyroll, Asurascans)
+    publish Encrypted Client Hello (ECH) in their DNS HTTPS/SVCB record
+    -- the browser then sends a TLS ClientHello whose visible SNI is a
+    generic, shared placeholder (`cloudflare-ech.com`, used by thousands
+    of unrelated sites), with the real hostname encrypted inside where
+    Squid cannot read it. Squid's built-in anti-spoofing check then
+    validates that the visible SNI's hostname actually resolves to the
+    connection's real destination IP -- which it never can for a shared
+    ECH placeholder -- and kills the connection with `SECURITY ALERT:
+    Host header forgery detected`, entirely inside Squid's own core
+    TLS-bump machinery, before `proxy/sni_helper.py`'s own allow/deny
+    logic ever runs. No Squid config directive relaxes this check; no
+    ECH-aware ACL exists at any Squid version -- this is an
+    acknowledged, unresolved upstream limitation, not fixable on the
+    Squid side at all.
 
     **The fix, entirely at the DNS tier**: AdGuard's `$dnstype=HTTPS`
     modifier withholds just the HTTPS-type record for a domain, for
@@ -494,25 +406,10 @@ def build_ech_strip_rules(
     handshake Squid's own `sni_helper.py` can correctly bump or splice.
     A/AAAA answers, and every other domain, are completely untouched.
 
-    **Verified live before writing this function, not assumed from
-    documentation**: an initial attempt to verify this against the real
-    production AdGuard instance appeared to fail -- `$dnstype=HTTPS` (and
-    even AdGuard's own canonical documented `$dnstype=AAAA` example)
-    seemed to block nothing at all. Root-caused on a disposable smoke-test
-    VM (a standalone AdGuard container, isolated from this project's own
-    stack -- see RoadMap.md's dated entry), running BOTH the current
-    production AdGuard version (v0.107.79) and the newest available
-    v0.108.0 beta side by side: the real cause was a race in the
-    VERIFICATION itself, not AdGuard or this modifier -- AdGuard needs a
-    brief moment to recompile its rule engine after
-    `/control/filtering/set_rules`, and the first test round queried
-    immediately afterward, before that finished. With a short delay
-    between setting rules and querying, `$dnstype=HTTPS` correctly
-    withheld the HTTPS-type answer (`ancount=0`) while leaving the SAME
-    domain's A record fully resolved (`ancount=2`, unfiltered) -- on
-    v0.107.79 specifically, our actual pinned production version. No
-    AdGuard upgrade needed; the mechanism already works exactly as
-    documented, on the version we already run.
+    AdGuard needs a brief moment to recompile its rule engine after
+    `/control/filtering/set_rules` before `$dnstype=HTTPS` takes effect
+    -- querying immediately after a rules change can appear to show
+    nothing blocked even though the rule is correct.
 
     Deliberately mirrors `_build_domain_deny_rules()`'s own
     authorization check (`matching.device_domain_reason()` non-None AND
@@ -567,20 +464,15 @@ def build_splice_deny_rules(
     device can browse a splice-mode domain too, so eligibility is purely
     about domain assignment, not bump status.
 
-    **Added 2026-08-31, closing a real gap found while scoping tighter
-    Squid/AdGuard integration (RoadMap.md's dated entry, GH #9)**: until
-    this, `build_rules()` above was the ONLY thing this module did --
-    hard-deny bump-mode domains for non-bump-eligible devices. It never
-    touched splice-mode domains at all, so the entire per-user/group/
-    device/everyone content allowlist built on the Domains page was
-    completely unenforced at the DNS tier (the tier most devices actually
-    use, since bump is a deliberately small curated set) -- a domain
-    assigned to one kid was reachable by every device on the LAN as long
-    as it went through AdGuard instead of Squid.
+    Without this, the per-user/group/device/everyone content allowlist
+    built on the Domains page would be enforced only for bump-mode
+    domains -- a domain assigned to one kid would be reachable by every
+    device on the LAN as long as it went through AdGuard instead of
+    Squid, since splice is the tier most devices actually use.
 
     See `_build_domain_deny_rules()`'s own docstring for the full
     algorithm, the `is_global`/unconfigured-domain scope, and the
-    `ignored`/BYPASS exclusion (added the same day).
+    `ignored`/BYPASS exclusion.
 
     Composes with `build_rules()`'s bump-mode hard-deny rules in the same
     managed block (`sync_once()` concatenates both lists) -- same
@@ -817,12 +709,10 @@ def _strip_managed_block(rules: list[str]) -> list[str]:
 def sync_safesearch(
     conn: sqlite3.Connection, base_url: str, username: str, password: str, timeout: float = adguard_client.DEFAULT_TIMEOUT
 ) -> None:
-    """G3 (Bark Home parity): reconciles AdGuard Home's own native
-    SafeSearch/Restricted-Mode master toggle against this project's
-    `settings.safesearch_enabled` key (dashboard's Settings page),
-    same "recompute and reconcile every cycle" discipline as everything
-    else in this module. Confirmed live 2026-09-01 -- see
-    common/adguard_client.py's own module note.
+    """Reconciles AdGuard Home's own native SafeSearch/Restricted-Mode
+    master toggle against this project's `settings.safesearch_enabled`
+    key (dashboard's Settings page), same "recompute and reconcile
+    every cycle" discipline as everything else in this module.
 
     Network-wide only, matching Bark Home's own behavior exactly --
     there is no per-user/group/device equivalent here, unlike
@@ -851,44 +741,32 @@ def sync_once(
     """One full sync cycle. Returns the number of managed CUSTOM rules
     currently in force -- does not count native filter-subscription
     toggles from `sync_category_subscriptions()` or the SafeSearch
-    master toggle from `sync_safesearch()`, separate mechanisms (Phase
-    8/G3) each with their own success/failure shape. Never 0 as of
-    2026-09-02: `build_anti_doh_rules()`'s fixed baseline is always
-    included, so the minimum healthy count is `len(build_anti_doh_rules())`,
-    not 0 -- see that function's own docstring before assuming an empty
+    master toggle from `sync_safesearch()`, separate mechanisms each
+    with their own success/failure shape. Never 0:
+    `build_anti_doh_rules()`'s fixed baseline is always included, so
+    the minimum healthy count is `len(build_anti_doh_rules())`, not 0
+    -- see that function's own docstring before assuming an empty
     managed block still means "nothing to deny."
 
-    Fetches the eligible-device list ONCE (2026-09-02, a real
-    efficiency gap found by code review) and shares it across all
+    Fetches the eligible-device list ONCE and shares it across all
     device-aware builders below, instead of each independently
     re-querying and re-classifying the full device list -- see
-    `_fetch_eligible_devices()`'s own docstring for the before/after.
+    `_fetch_eligible_devices()`'s own docstring.
 
-    **Real gap found live 2026-09-11, closed the same night**: this
-    used to call `adguard_client.set_custom_rules()` UNCONDITIONALLY,
-    every single cycle (`--adguard-interval` defaults to 30s), even
-    when the computed rules were byte-for-byte identical to what was
-    already applied -- `set_custom_rules()` has no incremental update
-    API (see its own docstring), so every one of those needless calls
-    was a full tear-down-and-rebuild of AdGuard's entire custom-rules
-    engine. AdGuard needs a brief moment to recompile after that (this
-    project's own earlier `build_ech_strip_rules()` finding), and two
-    unrelated live tests the same night (Crunchyroll's bump-domain
-    hard-deny, Webtoons' category block) both showed a device correctly
-    listed in its deny rule getting full access anyway -- the working
-    theory being that a query landing inside one of these needless,
-    constantly-recurring recompile windows resolves the real IP, and
-    the client's own DNS cache then serves that answer for its own TTL,
-    long after the (never-actually-changed) rule is back in force. Now
-    skips the write entirely when `new_rules == current` -- the
-    self-correcting property (an admin's own AdGuard-side edit outside
-    this project, or any external drift, gets caught and overwritten)
-    is unchanged, since `current` is still read fresh every cycle
-    either way; only the WRITE, and the disruptive recompile it
-    triggers, is now conditional on something having actually changed.
-    In steady-state household operation (no new device, no schedule
-    boundary just crossed, no category/domain edit in the last cycle)
-    this should eliminate the vast majority of these calls entirely.
+    Skips the write to AdGuard entirely when `new_rules == current`.
+    `set_custom_rules()` has no incremental update API (see its own
+    docstring) -- every call is a full tear-down-and-rebuild of
+    AdGuard's entire custom-rules engine, and AdGuard needs a brief
+    moment to recompile after that. A query landing inside that
+    recompile window can resolve the real IP for a domain that should
+    be denied, and the client's own DNS cache then serves that answer
+    for its own TTL, long after the (never-actually-changed) rule is
+    back in force -- so writing only when something actually changed
+    matters for correctness, not just efficiency. The self-correcting
+    property (an admin's own AdGuard-side edit outside this project, or
+    any external drift, gets caught and overwritten) is unchanged,
+    since `current` is still read fresh every cycle either way; only
+    the WRITE is now conditional.
     """
     eligible_devices = _fetch_eligible_devices(conn)
     managed = (

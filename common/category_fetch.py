@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Phase 8: fetches each `categories` row's `subscription_url` and
-refreshes its `category_domains` rows.
+"""Fetches each `categories` row's `subscription_url` and refreshes its
+`category_domains` rows.
 
 Lives in common/ (not controller/), deliberately -- both
 dashboard/dashboard.py's per-category "Sync now" button (an on-demand
@@ -26,8 +26,6 @@ common/adguard_client.py's -- deliberately not reusing that module, since
 this fetches arbitrary third-party blocklist files (not AdGuard's own
 `/control/*` API), a genuinely different concern with its own error type.
 
-Verified live 2026-08-31 that the actual file formats
-(common/blocklist_parser.py's own docstring) match what's fetched here.
 NOT yet verified: pushing a category's `subscription_url` into AdGuard
 Home as one of ITS OWN native filter subscriptions -- see
 controller/adguard_sync.py's docstring for why a large category can't go
@@ -49,8 +47,8 @@ from blocklist_parser import parse_hostlist
 log = logging.getLogger("category_fetch")
 
 DEFAULT_TIMEOUT = 20.0
-# Real category lists run large (confirmed live 2026-08-31: the biggest,
-# Porn, is ~953K domains / tens of MB as plain text) -- this cap is about
+# Real category lists run large (the biggest is on the order of a
+# million domains / tens of MB as plain text) -- this cap is about
 # refusing a runaway/unexpected response, not about the normal case.
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
@@ -89,14 +87,14 @@ def _fetch(url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
 # common/blocklist_parser.py's own docstring for the sibling domain:/
 # full:/@attribute conventions this shares) -- a line that names another
 # file in the SAME directory to pull in wholesale, rather than a domain
-# of its own. Confirmed live 2026-09-11: that project's own "category"
-# files (e.g. data/category-games, data/category-entertainment) are
-# entirely made of these -- zero literal domains -- so fetching one
-# directly and handing it straight to parse_hostlist() would silently
-# produce zero domains. Deliberately matched generically (not gated on
-# the URL being v2fly-specific) since parse_hostlist() already silently
-# ignores an include: line either way -- this is a no-op, zero-extra-
-# fetch case for any source that never uses the convention.
+# of its own. That project's own "category" files (e.g.
+# data/category-games, data/category-entertainment) are entirely made
+# of these -- zero literal domains -- so fetching one directly and
+# handing it straight to parse_hostlist() would silently produce zero
+# domains. Deliberately matched generically (not gated on the URL being
+# v2fly-specific) since parse_hostlist() already silently ignores an
+# include: line either way -- this is a no-op, zero-extra-fetch case
+# for any source that never uses the convention.
 _INCLUDE_LINE_RE = re.compile(r"^include:(\S+)", re.IGNORECASE)
 _INCLUDE_ATTR_RE = re.compile(r"(?:\s+@\S+)+\s*$")
 
@@ -107,19 +105,18 @@ _INCLUDE_ATTR_RE = re.compile(r"(?:\s+@\S+)+\s*$")
 # documents), so an include graph needs the same "don't trust it to be
 # well-behaved" discipline as the response-size cap above. 300
 # comfortably covers every real category in v2fly's own catalog (the
-# largest confirmed live, category-entertainment, resolves to 156
-# files) with headroom, while still refusing a pathological/hostile one.
+# largest, category-entertainment, resolves to roughly 150 files) with
+# headroom, while still refusing a pathological/hostile one.
 MAX_INCLUDED_FILES = 300
 
 # Bounds total accumulated text across the WHOLE include chain, not just
 # each individual fetch (MAX_RESPONSE_BYTES) or the file count
-# (MAX_INCLUDED_FILES) -- found by code review 2026-09-11: those two
-# caps alone still allow up to MAX_INCLUDED_FILES * MAX_RESPONSE_BYTES
-# (300 * 64 MiB) of Python strings to accumulate in `merged` before
-# parse_hostlist() ever runs, risking an OOM kill of the container mid-
-# sync. 256 MiB is generous relative to any real category (the biggest
-# confirmed live, Porn, is "tens of MB" per this module's own docstring)
-# while staying well short of that worst case.
+# (MAX_INCLUDED_FILES): those two caps alone still allow up to
+# MAX_INCLUDED_FILES * MAX_RESPONSE_BYTES (300 * 64 MiB) of Python
+# strings to accumulate in `merged` before parse_hostlist() ever runs,
+# risking an OOM kill of the container mid-sync. 256 MiB is generous
+# relative to any real category (the biggest is tens of MB per this
+# module's own docstring) while staying well short of that worst case.
 MAX_TOTAL_INCLUDE_BYTES = 256 * 1024 * 1024
 
 
@@ -204,19 +201,19 @@ def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, tim
     unset -- callers (run_loop below) should only ever call this for a
     category that has one.
 
-    **Skips the actual DELETE+INSERT when nothing changed** (added
-    2026-09-12, real gap found by code review): the fetched, parsed
-    domain set is hashed (sorted + deduplicated first, so a source that
-    just reordered its lines doesn't look "changed") and compared
-    against `categories.last_subscription_hash` from the PREVIOUS sync.
-    Only a real difference triggers the rewrite -- see
-    `category_domains`' own schema comment for why the previous
-    always-rewrite behavior was expensive at real scale (the confirmed-
-    live "Adult" category alone is ~953K domains). `last_synced_at` is
-    still advanced either way: a no-op cycle still successfully checked,
-    it just found nothing to apply, and the dashboard's staleness
-    display should reflect that this category is actively being kept up
-    to date, not that the sync job silently stopped running.
+    **Skips the actual DELETE+INSERT when nothing changed**: the
+    fetched, parsed domain set is hashed (sorted + deduplicated first,
+    so a source that just reordered its lines doesn't look "changed")
+    and compared against `categories.last_subscription_hash` from the
+    PREVIOUS sync. Only a real difference triggers the rewrite -- see
+    `category_domains`' own schema comment for why an always-rewrite
+    approach is expensive at real scale (a large subscription category
+    can run into the hundreds of thousands of domains). `last_synced_at`
+    is still advanced either way: a no-op cycle still successfully
+    checked, it just found nothing to apply, and the dashboard's
+    staleness display should reflect that this category is actively
+    being kept up to date, not that the sync job silently stopped
+    running.
     """
     url = category["subscription_url"]
     if not url:
@@ -240,20 +237,18 @@ def fetch_and_sync_category(conn: sqlite3.Connection, category: sqlite3.Row, tim
         conn.commit()
         return len(domains)
 
-    # Explicit transaction, fixed 2026-09-07 (RoadMap.md's dated entry) --
-    # a real, severe performance bug found live the first time this ever
-    # ran against real subscription data at real scale (~953K domains for
-    # the largest list): `conn` opens with isolation_level=None
-    # (common/db.py), so without this, every single row of the executemany
-    # below would autocommit -- and fsync -- individually. What looked
-    # like a hang (one sync taking over 20 minutes, then colliding with
-    # another writer and raising "database is locked") was actually just
-    # hundreds of thousands of separate disk syncs. Same fix shape as
-    # common/identity.py's record_binding() -- BEGIN IMMEDIATE acquires
-    # the write lock up front rather than deferring to the first write
-    # inside, and makes the whole delete+insert+update one atomic unit
-    # (a category never ends up with a stale last_synced_at next to a
-    # half-replaced domain list if something fails partway through).
+    # Explicit transaction: `conn` opens with isolation_level=None
+    # (common/db.py), so without this, every row of the executemany
+    # below would autocommit -- and fsync -- individually, which at real
+    # subscription-list scale (hundreds of thousands of rows) means
+    # hundreds of thousands of separate disk syncs, risking a "database
+    # is locked" collision with another writer mid-sync. Same fix shape
+    # as common/identity.py's record_binding() -- BEGIN IMMEDIATE
+    # acquires the write lock up front rather than deferring to the
+    # first write inside, and makes the whole delete+insert+update one
+    # atomic unit (a category never ends up with a stale last_synced_at
+    # next to a half-replaced domain list if something fails partway
+    # through).
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute("DELETE FROM category_domains WHERE category_id = ? AND source = 'subscription'", (category["id"],))

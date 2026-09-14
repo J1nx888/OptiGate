@@ -1,18 +1,10 @@
-// Command pp-nftables-manager is the Milestone 5/6/7 nftables-manager
-// process: a small, CAP_NET_ADMIN-scoped daemon that maintains the
-// dedicated "optigate" nftables table and reconciles its four
-// named policy sets against the DesiredPolicy blob
+// Command pp-nftables-manager is a small, CAP_NET_ADMIN-scoped daemon
+// that maintains the dedicated "optigate" nftables table and reconciles
+// its four named policy sets against the DesiredPolicy blob
 // controller/policy_state.py (Python) computes and writes into the
-// shared SQLite database's interception_runtime table.
-//
-// Deployed live as of Milestone 9/10 (see phase3/nftables-manager's own
-// Dockerfile and docker-compose.yml's nftables-manager service) --
-// the doc comment above used to say this was "not a real deployable
-// yet"; corrected 2026-09-08 while fixing the SIGTERM-teardown gap
-// below, since that claim had been stale for a while and would mislead
-// anyone reading this file fresh. EnsureBaseline is safe to call
-// against an already-populated table (idempotent, see its own doc
-// comment).
+// shared SQLite database's interception_runtime table. EnsureBaseline
+// is safe to call against an already-populated table (idempotent, see
+// its own doc comment).
 package main
 
 import (
@@ -48,17 +40,16 @@ func main() {
 	dnsRedirectPort := flag.Int(
 		"dns-redirect-port", nft.DefaultDNSRedirectPort,
 		"Local port the baseline ruleset redirects DNS/DoT traffic to (AdGuard's own DNS listener, "+
-			"docker-compose.yml's ADGUARD_DNS_PORT). Added 2026-09-08 after a real deployment found the "+
-			"previous hardcoded 5353 conflicting with avahi-daemon (mDNS), a common default service on "+
-			"many Linux distributions -- keep this in sync with ADGUARD_DNS_PORT, whatever it's set to.",
+			"docker-compose.yml's ADGUARD_DNS_PORT). Configurable because a hardcoded 5353 can conflict "+
+			"with avahi-daemon (mDNS), a common default service on many Linux distributions -- keep this "+
+			"in sync with ADGUARD_DNS_PORT, whatever it's set to.",
 	)
 	dashboardURL := flag.String(
 		"dashboard-url", "",
 		"This project's own DASHBOARD_URL setting (e.g. http://192.168.1.250:8787), reused here purely "+
-			"to learn the box's own LAN IP -- see nft.SelfIPFromDashboardURL. Added 2026-09-09 (RoadMap.md "+
-			"items 7/18/20) so bump_v4's Squid redirect can exclude traffic addressed to the box itself. "+
-			"Left unset means no self-IP exception is installed, matching this project's pre-fix behavior "+
-			"exactly -- not a fatal error, since not every install runs the interception profile at all.",
+			"to learn the box's own LAN IP -- see nft.SelfIPFromDashboardURL, so bump_v4's Squid redirect "+
+			"can exclude traffic addressed to the box itself. Left unset means no self-IP exception is "+
+			"installed -- not a fatal error, since not every install runs the interception profile at all.",
 	)
 	flag.Parse()
 
@@ -98,16 +89,14 @@ func main() {
 		select {
 		case <-sig:
 			log.Print("shutting down: removing the optigate table and its rules")
-			// Fixed 2026-09-08: this used to just log and return, leaving
-			// every baseline redirect rule (DNS/HTTP/HTTPS DNAT, the
-			// DOCKER-USER exception) active in the kernel with this
-			// process gone -- found live shutting down a soak-test
-			// window, where it forced a manual `sudo nft delete table
-			// inet optigate` on the host to actually return the box to
-			// normal pass-through. Teardown is idempotent/best-effort
-			// the same way EnsureBaseline is -- logged, not fatal, since
-			// the process is exiting either way and a half-torn-down
-			// table is still strictly better than a fully-intact one.
+			// Without this, every baseline redirect rule (DNS/HTTP/HTTPS
+			// DNAT, the DOCKER-USER exception) would stay active in the
+			// kernel after this process exits, requiring a manual `sudo
+			// nft delete table inet optigate` to return the box to normal
+			// pass-through. Teardown is idempotent/best-effort the same
+			// way EnsureBaseline is -- logged, not fatal, since the
+			// process is exiting either way and a half-torn-down table is
+			// still strictly better than a fully-intact one.
 			if err := mgr.Teardown(ctx); err != nil {
 				log.Printf("teardown failed (a future EnsureBaseline call, e.g. this process "+
 					"restarting, will reconverge the table itself, but a manual `sudo nft delete "+
@@ -116,15 +105,14 @@ func main() {
 			return
 		case <-ticker.C:
 			if err := reconcileOnce(ctx, mgr, *dbPath); err != nil {
-				// Fixed 2026-09-12, per the project owner's explicit
-				// decision (see RoadMap.md): dbsource.ErrNoDesiredPolicy
-				// means the controller hasn't computed a policy yet (or
-				// the row/column has gone missing) -- NOT the same as a
-				// real, controller-computed empty policy. Reported as
-				// healthy ("running"), not fail_open: this process itself
-				// isn't broken, it's correctly holding whatever the
-				// kernel already has rather than wiping every set based
-				// on data that was never actually there.
+				// dbsource.ErrNoDesiredPolicy means the controller hasn't
+				// computed a policy yet (or the row/column has gone
+				// missing) -- NOT the same as a real, controller-computed
+				// empty policy. Reported as healthy ("running"), not
+				// fail_open: this process itself isn't broken, it's
+				// correctly holding whatever the kernel already has
+				// rather than wiping every set based on data that was
+				// never actually there.
 				if errors.Is(err, dbsource.ErrNoDesiredPolicy) {
 					log.Print("no desired policy yet from the DB (interception_runtime row/column missing) -- " +
 						"holding current kernel state, applying nothing this cycle")
@@ -151,9 +139,8 @@ func main() {
 // kernel) rather than trusting anything cached from a previous cycle
 // -- if this process crashed or errored mid-cycle last time, the next
 // call to reconcileOnce recovers on its own with no special-cased
-// resume logic, which is the Milestone 9 "partial nftables failure"
-// answer: knftables' Run() is atomic (all-or-nothing) so the kernel
-// itself can't be left half-updated, and this loop's own
+// resume logic: knftables' Run() is atomic (all-or-nothing) so the
+// kernel itself can't be left half-updated, and this loop's own
 // read-fresh-every-time structure means a mid-cycle process failure
 // just gets corrected on the very next tick.
 func reconcileOnce(ctx context.Context, mgr *nft.Manager, dbPath string) error {
@@ -181,18 +168,14 @@ func reconcileOnce(ctx context.Context, mgr *nft.Manager, dbPath string) error {
 	}
 	log.Printf("applied %d set diffs", len(diffs))
 
-	// Real gap found live 2026-09-09: the set diffs above are the whole
-	// story for a device's NEW connections (correctly blocked the moment
-	// it's added to unauthenticated_v4/quarantine_v4), but never revoked
-	// an already-open one -- see (*nft.Manager).
-	// FlushConntrackForReclassifiedDevices's own doc comment for the full
-	// story (an Amazon Echo kept answering voice commands well after
-	// being reclassified, until power-cycled). Best-effort and
-	// deliberately non-fatal: a flush failure here is strictly less
-	// severe than an ApplyDiffs failure above (the firewall rules
-	// already correctly deny this device's new traffic either way), so
-	// it's logged and the loop keeps going, the same posture already
-	// used for policy conflicts above.
+	// The set diffs above only affect a device's NEW connections -- they
+	// don't revoke an already-open one (see
+	// (*nft.Manager).FlushConntrackForReclassifiedDevices's own doc
+	// comment for why). Best-effort and deliberately non-fatal: a flush
+	// failure here is strictly less severe than an ApplyDiffs failure
+	// above (the firewall rules already correctly deny this device's new
+	// traffic either way), so it's logged and the loop keeps going, the
+	// same posture already used for policy conflicts above.
 	for _, err := range mgr.FlushConntrackForReclassifiedDevices(ctx, diffs) {
 		log.Printf("warning: %v", err)
 	}

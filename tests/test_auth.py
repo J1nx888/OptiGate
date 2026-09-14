@@ -80,10 +80,9 @@ def test_tampered_digest_rejected():
 
 
 # ============================================================
-# verify_admin_credentials -- factored out 2026-08-31 so
+# verify_admin_credentials -- the one admin-credential check shared by
 # dashboard.py's HTTP-Basic admin login and
-# captive_portal_server.py's portal-side admin action share exactly
-# one admin-credential check instead of each keeping its own copy.
+# captive_portal_server.py's portal-side admin action.
 # ============================================================
 
 def test_verify_admin_credentials_accepts_the_right_username_and_password():

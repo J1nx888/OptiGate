@@ -1,9 +1,7 @@
 """dashboard/adguard_config_sync.py: writes AdGuard Home's real
 AdGuardHome.yaml credential directly, since its REST API has no
-password-change endpoint at all (see that module's own docstring for the
-live verification against a real instance -- confirmed a hash generated
-by THIS module's bcrypt library authenticates against AdGuard's real Go
-bcrypt validator).
+password-change endpoint at all (see that module's own docstring for
+detail on bcrypt-hash compatibility with AdGuard's Go implementation).
 """
 from __future__ import annotations
 
@@ -111,13 +109,13 @@ def test_sync_raises_when_yaml_is_not_a_mapping(tmp_path):
 
 
 def test_sync_retries_a_transient_permission_error_on_read(tmp_path, monkeypatch):
-    """Real gap found live 2026-09-09: adguard/entrypoint.sh's own repair
-    loop re-grants the dashboard access every few seconds, but a write
-    attempted in the narrow window right after AdGuard resets the
-    file's permissions and right before the next repair tick would
-    otherwise still fail outright. sync_adguard_credentials() must
-    survive a PermissionError that clears up within a couple of
-    retries, not fail on the very first attempt."""
+    """adguard/entrypoint.sh's repair loop re-grants the dashboard access
+    every few seconds, but a write attempted in the narrow window right
+    after AdGuard resets the file's permissions and right before the
+    next repair tick would otherwise still fail outright.
+    sync_adguard_credentials() must survive a PermissionError that
+    clears up within a couple of retries, not fail on the very first
+    attempt."""
     monkeypatch.setattr(sync, "_PERMISSION_RETRY_DELAY_SECONDS", 0)
     conf = _write_conf(tmp_path / "AdGuardHome.yaml")
 

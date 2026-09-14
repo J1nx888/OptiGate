@@ -42,9 +42,9 @@ func TestLeaseMonitor_LateHeartbeatDoesNotReviveExpiredLease(t *testing.T) {
 		t.Fatalf("expected exactly one expiry, got %d", got)
 	}
 
-	// RoadMap.md requires an explicit fresh replace_targets (modeled
-	// here as Rearm) before poisoning can resume -- a late heartbeat
-	// alone must be a no-op.
+	// An explicit fresh replace_targets (modeled here as Rearm) is
+	// required before poisoning can resume -- a late heartbeat alone
+	// must be a no-op.
 	lm.Heartbeat()
 	time.Sleep(10 * time.Millisecond)
 	if got := atomic.LoadInt32(&expireCount); got != 1 {

@@ -3,60 +3,47 @@
 `access_log` with the DNS-tier hard-denies that never otherwise reach a
 logging call at all.
 
-**The gap this closes (RoadMap.md's dated entry, 2026-09-09):** when
-`controller/adguard_sync.py` hard-denies a domain, it does so with an
-AdGuard custom rule carrying `$dnsrewrite=NOERROR;A;<block_page_ip>` --
-the queried name resolves to this box's own IP so `block_page_server.py`
-can show a friendly page. That works for plain HTTP (port 80): the
-device's request lands on `block_page_server.py`'s real listener, which
-calls `logging_util.log_access()`, and the block shows up on the Report
-page. It does NOT work for HTTPS (port 443): nothing listens there by
-`block_page_server.py`'s own deliberate design (no cert this project's CA
-can present that an arbitrary domain's device already trusts), so the
-connection is simply refused -- and since nothing ever accepts it,
-nothing ever calls `log_access()`, so the block is invisible on the
-Report page even though it worked. That blind spot is the same for every
-device, bump-enabled or not.
+**The gap:** `controller/adguard_sync.py` hard-denies a domain via an
+AdGuard rule carrying `$dnsrewrite=NOERROR;A;<block_page_ip>`, so the
+queried name resolves to this box's own IP and `block_page_server.py`
+can show a friendly page. That only works for plain HTTP (port 80),
+where the device's request actually lands on `block_page_server.py`'s
+listener and gets logged. HTTPS (port 443) has nothing listening -- by
+`block_page_server.py`'s own deliberate design, since there's no cert
+this project's CA can present that an arbitrary domain's device already
+trusts -- so the connection is simply refused and never logged, even
+though the block worked. Same blind spot for every device, bump-enabled
+or not.
 
-**The fix, at the layer where the block is actually decided:** AdGuard's
-own query log records every DNS query it answers, including the ones it
-served from one of this project's own `$dnsrewrite` rules. This module
-polls that log, and for every entry whose answer is `block_page_ip` AND
-whose queried name is a domain/category this project currently manages
-(so an admin's own unrelated AdGuard rewrite to the same IP is never
-misattributed), writes one `access_log` "blocked" row via the exact same
-`logging_util.log_access()` every other block path already uses -- same
-table, same 5-minute dedupe, so the Report page needs no changes at all.
+**The fix:** AdGuard's own query log records every DNS query it
+answers, including the ones served from this project's `$dnsrewrite`
+rules. This module polls that log and, for every entry whose answer is
+`block_page_ip` AND whose queried name is a domain/category this
+project currently manages (so an admin's own unrelated AdGuard rewrite
+to the same IP is never misattributed), writes an `access_log` "blocked"
+row via the same `logging_util.log_access()` every other block path
+uses -- same table, same 5-minute dedupe.
 
-**Why it lives in `dashboard/` (always-on), not `controller/`:**
-`controller` only runs under the `interception` profile, which is off
-for most of this box's real operating time (Bark Home usually has the
-network). The AdGuard rules themselves persist in AdGuard's own config
-regardless of whether `controller` is currently running, so the blocks
-keep happening -- this poller has to be somewhere that's always up to
-observe them. `dashboard` already starts `block_page_server.py` and
-`captive_portal_server.py` as background components at boot; this is one
-more, gated behind the same `DASHBOARD_URL` check `block_page_server`
-already uses (no block-page IP configured -> nothing to correlate).
+**Why `dashboard/`, not `controller/`:** `controller` only runs under
+the `interception` profile, which is off for most of this box's real
+operating time -- but the AdGuard rules persist in its own config
+regardless, so blocks keep happening and this poller must live
+somewhere that's always up to observe them. Gated behind the same
+`DASHBOARD_URL` check `block_page_server` already uses (no block-page IP
+configured -> nothing to correlate).
 
-**The second gap this closes (RoadMap.md finding #9, 2026-09-10):** a
-normal authenticated device that is neither SSL-Bump-enabled nor hitting
-a blocked category produced ZERO Report rows at all -- Squid only ever
-sees `bump_v4` devices, and the hard-deny back-fill above only fires on
-an actual block. `correlate_once()` below also back-fills one `allowed`
-row per querylog entry that resolves to a device this project tracks,
-using the SAME `logging_util.log_access()` 5-minute rolling dedupe every
-other writer relies on -- just keyed on a deliberately coarse "site" (see
-`_dedupe_site_key()`) rather than the exact queried name, so a page that
-fans out to a dozen subdomains of the same site collapses to one row
-instead of a dozen. Tagged `reason="dns_tier_allowed"` and hidden by
-default on the Report page (a "Show routine DNS-tier activity" toggle
-reveals them) since they're expected to vastly outnumber every other
-reason code -- they're routine browsing, not something needing review.
-`prune_allowed_rows()` deletes them past a 30-day retention window so
-this ordinary-traffic sampling doesn't grow `access_log` without bound
-the way a real block (rare, and worth keeping indefinitely) should not
-be pruned.
+**The second gap:** a normal authenticated device that's neither
+SSL-Bump-enabled nor hitting a blocked category produced ZERO Report
+rows -- Squid only ever sees `bump_v4` devices. `correlate_once()` below
+also back-fills one `allowed` row per querylog entry that resolves to a
+tracked device, keyed on a deliberately coarse "site" (see
+`_dedupe_site_key()`) rather than the exact queried name so a page that
+fans out to a dozen subdomains collapses to one row. Tagged
+`reason="dns_tier_allowed"` and hidden by default on the Report page
+(vastly outnumbers every other reason code -- routine browsing, not
+something needing review); `prune_allowed_rows()` deletes them past a
+30-day retention window so this sampling doesn't grow `access_log`
+without bound, unlike a real block, which is kept indefinitely.
 """
 from __future__ import annotations
 
@@ -81,9 +68,9 @@ log = logging.getLogger("dashboard.adguard_report_sync")
 _REASON = "dns_hard_deny"
 
 # The reason string stamped on every routine-allowed row this module
-# writes (finding #9). Distinct from block_page_server.py's
-# "dns_tier_denied" and this module's own "dns_hard_deny" above -- this
-# is the ALLOWED half of DNS-tier visibility, not a block of any kind.
+# writes. Distinct from block_page_server.py's "dns_tier_denied" and
+# this module's own "dns_hard_deny" above -- this is the ALLOWED half of
+# DNS-tier visibility, not a block of any kind.
 _ALLOWED_REASON = "dns_tier_allowed"
 
 # How long an allowed-traffic sample row survives before
@@ -92,8 +79,7 @@ _ALLOWED_REASON = "dns_tier_allowed"
 # noise sampled purely so the Report page has SOMETHING to show for a
 # non-bump device -- unbounded retention would grow access_log forever
 # for no benefit past a few weeks of "what has this device been doing"
-# review. Chosen 2026-09-10 (RoadMap.md finding #9): the project owner's
-# call, weighed against 7/90-day alternatives.
+# review.
 _ALLOWED_RETENTION_DAYS = 30
 
 # prune_allowed_rows() only needs to run occasionally -- access_log has
@@ -205,9 +191,9 @@ def correlate_once(
 ) -> int:
     """Scans the most recent querylog page and writes an `access_log` row
     for each entry that's newer than the stored watermark and is either
-    one of this project's own DNS-tier hard-denies ("blocked", finding
-    #25) or a genuine successful lookup from a device this project
-    tracks ("allowed", finding #9 -- see module docstring).
+    one of this project's own DNS-tier hard-denies ("blocked") or a
+    genuine successful lookup from a device this project tracks
+    ("allowed" -- see module docstring).
 
     Returns the number of rows actually written -- 0 is a perfectly
     normal, healthy result when nothing new happened this cycle, and
@@ -293,10 +279,10 @@ def correlate_once(
 def prune_allowed_rows(conn: sqlite3.Connection, *, retention_days: int = _ALLOWED_RETENTION_DAYS) -> int:
     """Deletes `dns_tier_allowed` rows older than `retention_days` --
     keeps the routine-traffic sample from growing access_log without
-    bound (see module docstring / RoadMap.md finding #9). Only ever
-    touches this module's own `_ALLOWED_REASON` rows -- an actual block
-    (dns_hard_deny, dns_tier_denied, or any proxy-tier denial) is never
-    pruned by this or anything else. Returns the number of rows deleted.
+    bound (see module docstring). Only ever touches this module's own
+    `_ALLOWED_REASON` rows -- an actual block (dns_hard_deny,
+    dns_tier_denied, or any proxy-tier denial) is never pruned by this
+    or anything else. Returns the number of rows deleted.
     """
     cutoff = db.iso_secs_ago(retention_days * 86400)
     cur = conn.execute("DELETE FROM access_log WHERE reason = ? AND ts < ?", (_ALLOWED_REASON, cutoff))

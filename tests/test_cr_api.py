@@ -266,11 +266,9 @@ def test_series_id_of_type_series_branch():
 
 
 def test_series_id_of_top_level_series_id_fallback():
-    """Code-review fix: restored as defensive coverage for object types
-    never sampled against the real API (movie/musicvideo/concert) --
-    never observed on real episode/season/series data, but costs nothing
-    when absent and guards against silently failing closed on real
-    Crunchyroll content this project just hasn't hit in practice."""
+    """Defensive coverage for object types (movie/musicvideo/concert) that
+    have never been observed on real episode/season/series data, but cost
+    nothing to support if encountered."""
     assert cr_api.series_id_of({"series_id": "abc"}) == "ABC"
 
 
@@ -288,12 +286,10 @@ def test_series_id_of_no_match_returns_none():
 
 
 def test_series_id_of_real_season_shape_has_no_series_id_field():
-    """GH #3: verified against a real /content/v2/cms/objects/ response for
-    a season entry -- season_metadata has no series_id field at all in the
-    current API (the parent series only appears inside a pipe-delimited
-    `identifier` string). A season entry must resolve to None, not crash or
-    silently match something unrelated -- this is real captured shape, not
-    a hypothetical."""
+    """A season entry's season_metadata has no series_id field at all (the
+    parent series only appears inside a pipe-delimited `identifier` string),
+    so it must resolve to None rather than crash or match something
+    unrelated."""
     real_season_entry = {
         "id": "GR19CPDWM",
         "type": "season",
@@ -309,9 +305,8 @@ def test_series_id_of_real_season_shape_has_no_series_id_field():
 
 
 def test_series_id_of_real_series_shape_has_only_id_and_type():
-    """GH #3: verified against a real response -- a 'series' object entry
-    has no fields at all beyond id/type, so the type=='series' branch using
-    its own id is the only way to resolve it, not a redundant fallback."""
+    """A 'series' object entry has no fields beyond id/type, so the
+    type=='series' branch using its own id is the only way to resolve it."""
     real_series_entry = {"id": "GDKHZEJ0K", "type": "series"}
     assert cr_api.series_id_of(real_series_entry) == "GDKHZEJ0K"
 

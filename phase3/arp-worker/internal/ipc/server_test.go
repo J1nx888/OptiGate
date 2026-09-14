@@ -11,13 +11,9 @@ import (
 
 // TestServerNotify_DeliversToActiveConnection is a real, end-to-end
 // check (a genuine Unix socket, not just the dispatch()-level fakes in
-// dispatch_test.go) that Notify() actually reaches a connected client.
-// Added 2026-09-02 to lock in the fix for a real, silent bug found by
-// code review: the ARP worker's lease-expiry path used to have no way
-// to tell the controller anything happened at all -- onLeaseExpired
-// only ever logged locally. Notify() is the mechanism that closes that
-// gap; this proves it actually writes to the wire, not just that the
-// Go source compiles.
+// dispatch_test.go) that Notify() actually reaches a connected client
+// -- proving it writes to the wire, not just that the Go source
+// compiles.
 func TestServerNotify_DeliversToActiveConnection(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 	h := &fakeHandler{}

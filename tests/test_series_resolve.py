@@ -1,5 +1,5 @@
 """common/series_resolve.py: object-id -> series-id cache, including the
-S2.6 stale-on-error fallback (serve an expired positive cache entry rather
+stale-on-error fallback (serve an expired positive cache entry rather
 than break playback when Crunchyroll's API is unreachable / the anonymous
 client id has been rotated).
 """
@@ -101,7 +101,7 @@ def test_resolver_failure_with_no_prior_cache_fails_closed(conn, monkeypatch):
 
 
 def test_resolver_failure_with_stale_positive_cache_serves_stale(conn, monkeypatch):
-    """S2.6: the anonymous client id gets rotated / API goes down -- a show
+    """When the anonymous client id gets rotated / API goes down, a show
     that was already resolved must keep playing, not break."""
     fake = _install(monkeypatch, FakeResolver({"OBJ1": "SER1"}))
     series_resolve.resolve_series_ids(conn, ("OBJ1",))

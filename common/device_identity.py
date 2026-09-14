@@ -3,10 +3,8 @@
 
 Replaces %LOGIN (Squid's per-request Basic-Auth challenge via
 `proxy_auth`) as the identity signal the SNI/authz helper scripts key
-their decisions on. This is the concrete piece of RoadMap.md's "Squid:
-explicit-proxy-with-login -> transparent intercept" section (locked
-2026-08-30): an intercepted connection has no CONNECT handshake for
-Squid to answer a 407 challenge with, so per-request login is gone
+their decisions on: an intercepted connection has no CONNECT handshake
+for Squid to answer a 407 challenge with, so per-request login is gone
 entirely -- the client's own source IP (`%>a`, still available to an
 intercepted connection) is the only identity signal left. Resolving it
 means reusing the exact same device_bindings data the DNS tier's own
@@ -31,17 +29,12 @@ def resolve_user_for_device(conn: sqlite3.Connection, device: sqlite3.Row | None
     a real, enforceable identity (see common/matching.py's
     device_domain_reason()), it just has no single `users` row of its own.
 
-    **Replaces the old resolve_user(conn, client_ip) (removed 2026-08-31,
-    see device_domain_reason()'s own docstring for the bug this was part
-    of)**: that function INNER JOINed straight from device_bindings to
-    users through devices.user_id in one query, so a group-assigned device
-    resolved to None -- indistinguishable from "never seen at all" -- and
-    every caller treated that None as "deny everything," even though the
-    device itself was perfectly well identified. Callers now resolve the
-    *device* first via resolve_device() above (which has no such blind
-    spot -- it matches on device_bindings alone) and pass it here
-    separately, so "no user" and "no identity at all" are never conflated
-    again.
+    Callers resolve the *device* first via resolve_device() below (which
+    matches on device_bindings alone, with no blind spot for a
+    group-assigned device) and pass it here separately, so "no user" and
+    "no identity at all" are never conflated: a group/device-only
+    assignment must not read as "deny everything" just because there's
+    no single `users` row.
     """
     if device is None or device["user_id"] is None:
         return None
@@ -74,60 +67,38 @@ def resolve_device(conn: sqlite3.Connection, client_ip: str) -> sqlite3.Row | No
     Unlike resolve_user_for_device() above, this resolves straight from
     client_ip (not from an already-resolved device), and returns the
     device itself regardless of whether it has a user_id assigned --
-    dashboard/captive_portal_server.py (Phase 4 milestone 3) needs the
-    device_id itself to actually grant access (flipping
-    is_authenticated), not just whichever user, if any, already owns
-    it.
+    dashboard/captive_portal_server.py needs the device_id itself to
+    actually grant access (flipping is_authenticated), not just
+    whichever user, if any, already owns it.
 
-    **Real gap found live 2026-09-11, closed the same day**: a binding
-    with `device_id` NULL used to never match here at all -- the
-    original comment on this docstring called that "rare going
-    forward," reasoning that Phase 4's auto-create-on-first-sight
-    (`identity.record_binding()`) meant a MAC would basically never
-    reach this function without a real `devices` row. That reasoning
-    missed deletion: deleting a device leaves its `device_bindings` row
-    orphaned (`device_id` NULL via `ON DELETE SET NULL`, not deleted --
-    see db.py's own schema comment), and once
-    `controller/policy_state.py`'s matching fix correctly started
-    routing that orphaned binding's still-active device into
-    `unauthenticated_v4` (PREAUTH, same as any unknown device) instead
-    of silently escaping interception, its traffic started reaching
-    `dashboard/captive_portal_server.py` for the first time ever --
-    where this function returning None hard-failed every login AND
-    every admin action ("we couldn't identify this device on the
-    network yet") with literally no path to recover, since nothing
-    would ever create the missing row no matter how many times someone
-    retried.
+    Self-healing for orphaned bindings: deleting a device leaves its
+    `device_bindings` row orphaned (`device_id` NULL via `ON DELETE SET
+    NULL`, not deleted -- see db.py's own schema comment), and that
+    binding's still-active device can keep generating traffic. An
+    orphaned-but-currently-active binding for `client_ip` gets a fresh
+    PREAUTH `devices` row via `identity.create_pending_device()` -- the
+    exact same defaults a genuinely-new MAC gets -- and every
+    `device_bindings` row for that MAC (not just this one IP) is
+    repointed at it, so this only happens once per deleted device, not
+    on every single request. Deliberately calls
+    `create_pending_device()` directly rather than going through
+    `record_binding()`'s own `_mac_has_any_prior_binding()` gate: that
+    gate exists specifically to block *passive* background binding
+    refreshes from reviving a deleted device, which does not describe
+    this call site -- reaching here means a real HTTP request (a login
+    attempt, an admin action, an intercepted connection) is actively in
+    flight for this exact device right now.
 
-    Now self-healing: an orphaned-but-currently-active binding for
-    `client_ip` gets a fresh PREAUTH `devices` row via
-    `identity.create_pending_device()` -- the exact same defaults a
-    genuinely-new MAC gets -- and every `device_bindings` row for that
-    MAC (not just this one IP) is repointed at it, so this only ever
-    happens once per deleted device, not on every single request.
-    Deliberately calls `create_pending_device()` directly rather than
-    going through `record_binding()`'s own `_mac_has_any_prior_binding()`
-    gate: that gate exists specifically to block *passive* background
-    binding refreshes from reviving a deleted device, which does not
-    describe this call site -- reaching here means a real HTTP request
-    (a login attempt, an admin action, an intercepted connection) is
-    actively in flight for this exact device right now.
-
-    **Race fixed 2026-09-11, found live by code review the same day this
-    self-heal was added**: two near-simultaneous requests for the same
-    orphaned IP (plausible -- sni_helper.py/authz_helper.py both resolve
-    identity for one connection, and captive_portal_server.py/
-    block_page_server.py do too for portal loads) used to both see the
-    same orphaned row before either wrote, both call
-    `create_pending_device()`, and the second `INSERT` into
-    `devices(mac_address, ...)` would raise an unhandled
-    `sqlite3.IntegrityError` (mac_address is UNIQUE) straight out of this
-    function. Fixed the same way `identity.record_binding()` already
-    fixed the identical class of check-then-act race (2026-09-02):
-    `BEGIN IMMEDIATE` acquires SQLite's write lock up front, and the
-    healed-row check is repeated once inside it -- a concurrent caller
-    that already healed this MAC while we waited for the lock is picked
-    up here instead of racing a second INSERT.
+    Two near-simultaneous requests for the same orphaned IP (plausible
+    -- sni_helper.py/authz_helper.py both resolve identity for one
+    connection, and captive_portal_server.py/block_page_server.py do
+    too for portal loads) could otherwise both see the same orphaned row
+    before either wrote and both call `create_pending_device()`, racing
+    an `INSERT` into `devices(mac_address, ...)` (mac_address is
+    UNIQUE). `BEGIN IMMEDIATE` acquires SQLite's write lock up front,
+    and the healed-row check is repeated once inside it -- a concurrent
+    caller that already healed this MAC while we waited for the lock is
+    picked up here instead of racing a second INSERT.
     """
     row = conn.execute(
         """

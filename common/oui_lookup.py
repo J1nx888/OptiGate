@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """MAC-address-prefix -> vendor name lookup, for the "Devices awaiting
-login" card's "Manufacturer" column (RoadMap.md, 2026-09-11: project
-owner's own words -- "I need to see the device type that is trying to
-connect... to distinguish between an Amazon Echo and an actual
-laptop/phone").
+login" card's "Manufacturer" column -- lets an admin distinguish e.g.
+an Amazon Echo from an actual laptop/phone at a glance.
 
 Deliberately a pure, static, offline lookup against
 data/oui_prefixes.tsv (a bundled snapshot of the IEEE's public MA-L/
@@ -13,12 +11,11 @@ matching common/'s stdlib-only discipline.
 
 This is a DISPLAY AID ONLY. It must never be used to auto-associate a
 device_bindings row with a `devices` row, or to auto-fill/override a
-device's label -- common/db.py's own device_bindings schema comment is
-explicit that "hostname/vendor guessing is exactly the auto-merge the
-v2 roadmap rules out." A vendor name shown next to a MAC address is
-just a hint for the human looking at the "Devices awaiting login"
-card to make their own decision; it never feeds back into any
-`devices` row or policy decision.
+device's label -- vendor guessing is exactly the kind of auto-merge
+this project's device-identity model rules out. A vendor name shown
+next to a MAC address is just a hint for the human looking at the
+"Devices awaiting login" card to make their own decision; it never
+feeds back into any `devices` row or policy decision.
 """
 from __future__ import annotations
 

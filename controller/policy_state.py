@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Milestone 7: builds the DesiredPolicy JSON blob that
-phase3/nftables-manager reads directly from the shared SQLite database
--- following this project's own established "one shared database, live
-reads, no separate sync" pattern (see docs/project.md's Key technical
-decisions) rather than inventing a new controller<->nftables-manager
-IPC protocol.
+"""Builds the DesiredPolicy JSON blob that phase3/nftables-manager
+reads directly from the shared SQLite database -- this project's
+"one shared database, live reads, no separate sync" pattern, rather
+than a controller<->nftables-manager IPC protocol.
 """
 from __future__ import annotations
 
@@ -17,10 +15,9 @@ from schedule_eval import is_full_lockout_active
 
 # The nftables-manager side's fifth, independent set (policy.SetBump) --
 # not one of PolicyClass's four mutually-exclusive values, so it isn't
-# in to_set_name()'s table. Kept here, next to the JSON key literals
-# this module already owns, rather than in policy_class.py, since
-# policy_class.py's to_set_name() contract is specifically "PolicyClass
-# -> set name" and bump isn't a PolicyClass.
+# in to_set_name()'s table. Kept here rather than in policy_class.py,
+# since to_set_name()'s contract is specifically "PolicyClass -> set
+# name" and bump isn't a PolicyClass.
 _BUMP_SET_NAME = "bump"
 
 
@@ -29,8 +26,7 @@ def compute_desired_policy(
 ) -> dict[str, list[str]]:
     """One entry per PolicyClass's nftables set name, each holding the
     IPv4 addresses of every device currently classified into it, PLUS
-    an independent `"bump"` entry (RoadMap.md's "two independent axes"
-    section, locked 2026-08-30) for devices with bump_eligible() true.
+    an independent `"bump"` entry for devices with bump_eligible() true.
     An IP can legitimately appear in both `"authenticated"` and
     `"bump"` at once -- bump is a refinement layered on top of
     authenticated access, not a fifth exclusive class, so it is
@@ -45,25 +41,22 @@ def compute_desired_policy(
     policy. Devices with no active binding contribute nothing -- there's
     no IP to add to any set.
 
-    **Real gap found live 2026-09-11**, same root cause and fix shape as
-    controller/desired_state.py's own dated comment: this used to INNER
-    JOIN `devices`, so a binding orphaned by device deletion
-    (`device_id` NULL, `ON DELETE SET NULL`) contributed to NO set at
-    all rather than falling back to PREAUTH/unauthenticated -- the same
-    "vanishes from enforcement entirely instead of defaulting safe" bug.
-    Now a LEFT JOIN from `device_bindings`: every `d.*` column reads
-    NULL for an orphaned binding, and classify_device()/bump_eligible()
-    already treat every one of those columns as falsy by default
+    Deliberately a LEFT JOIN from `device_bindings`, not an INNER JOIN
+    on `devices`: a binding orphaned by device deletion (`device_id`
+    NULL via `ON DELETE SET NULL`) must still contribute to a set
+    rather than vanishing from enforcement entirely. Every `d.*` column
+    reads NULL for such a row, and classify_device()/bump_eligible()
+    already treat each of those columns as falsy by default
     (`ignored`/`quarantined_at`/`is_authenticated`/`bypass_login`/
     `bump_enabled` all None), which resolves to exactly PREAUTH with no
-    bump eligibility -- no special-casing needed here beyond the JOIN
+    bump eligibility -- no special-casing needed beyond the JOIN
     direction itself.
 
-    **Phase 8 (2026-08-31)**: `now` (defaults to the current UTC instant;
-    tests inject a fixed value) drives a second, independent overlay --
-    a device whose classify_device() result ISN'T already BYPASS gets
-    reclassified to QUARANTINE if `schedule_eval.is_full_lockout_active()`
-    says a `lockout_all` schedule currently targets it. This is a PURE
+    `now` (defaults to the current UTC instant; tests inject a fixed
+    value) drives a second, independent overlay -- a device whose
+    classify_device() result ISN'T already BYPASS gets reclassified to
+    QUARANTINE if `schedule_eval.is_full_lockout_active()` says a
+    `lockout_all` schedule currently targets it. This is a PURE
     computation, same as bump_eligible() above -- it never writes
     `devices.quarantined_at`, so a manual operator quarantine (that
     column) and a scheduled bedtime lockout (this overlay) stay on fully
@@ -71,10 +64,8 @@ def compute_desired_policy(
     quarantined regardless of any schedule, and a device under an active
     bedtime schedule returns to its normal classification the moment the
     window ends, with nothing left over to clean up. An already-BYPASS
-    (`ignored`) device is never overridden -- "outside the whole system,
-    for good" (common/db.py's own words on that column) includes being
-    outside schedules too, matching the same baseline-protection rule
-    already applied to AdGuard in controller/adguard_sync.py.
+    (`ignored`) device is never overridden -- being outside the whole
+    system includes being outside schedules too.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -100,25 +91,17 @@ def compute_desired_policy(
         if policy_class != PolicyClass.BYPASS and is_full_lockout_active(conn, row, now):
             policy_class = PolicyClass.QUARANTINE
         policy[to_set_name(policy_class)].append(row["ipv4_address"])
-        # Fixed 2026-09-02, a real bug found by code review:
-        # bump_eligible(row) re-derives classify_device(row) internally
-        # from the RAW row, blind to the QUARANTINE overlay just applied
-        # above -- so a bump-enabled, otherwise-AUTHENTICATED device
-        # caught in an active lockout_all schedule used to land in BOTH
-        # the quarantine set AND the bump set for this cycle, violating
-        # bump_eligible()'s own documented invariant ("never true ...
-        # for BYPASS, QUARANTINE, or PREAUTH"). phase3/nftables-manager's
-        # resolveBump() does drop the conflicting membership before it
-        # reaches the kernel (so this was never an actual filter
-        # bypass), but it logged a policy-conflict warning every cycle
-        # for as long as the window stayed open, and any FUTURE overlay
-        # added the same way would hit the identical trap. Gating on the
-        # post-overlay policy_class here, not just the row-derived
-        # signal bump_eligible() computes internally, is the fix -- in
-        # the normal (no-overlay) case this is a no-op, since
-        # bump_eligible() already requires classify_device(row) ==
-        # AUTHENTICATED internally, which is exactly what policy_class
-        # already equals whenever no overlay fired.
+        # Gate on the post-overlay policy_class, not just bump_eligible()'s
+        # own row-derived classify_device() call: bump_eligible() is blind
+        # to the QUARANTINE overlay just applied above, so without this
+        # check a bump-enabled device caught in an active lockout_all
+        # schedule would land in both the quarantine set AND the bump set,
+        # violating bump_eligible()'s documented invariant ("never true
+        # ... for BYPASS, QUARANTINE, or PREAUTH"). In the normal
+        # (no-overlay) case this is a no-op, since bump_eligible() already
+        # requires classify_device(row) == AUTHENTICATED internally, which
+        # is exactly what policy_class already equals whenever no overlay
+        # fired.
         if policy_class == PolicyClass.AUTHENTICATED and bump_eligible(row, group_ignored):
             policy[_BUMP_SET_NAME].append(row["ipv4_address"])
 

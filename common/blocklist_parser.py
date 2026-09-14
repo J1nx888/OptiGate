@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Phase 8: parses a fetched category blocklist's text into plain domain
-names. Pure function, no network access (see controller/category_fetch.py
-for the fetch side) -- verified live 2026-08-31 against real files from
-https://github.com/blocklistproject/Lists (MIT), which serves three of
-the four formats below; the fourth (full-URL-per-line) was added
-2026-09-08, verified live against a real list of that shape (see
-`parse_hostlist()`'s own docstring).
+"""Parses a fetched category blocklist's text into plain domain names.
+Pure function, no network access (see controller/category_fetch.py for
+the fetch side). Handles the four formats documented on
+`parse_hostlist()` below, covering the real-world list sources this
+project pulls from (e.g. https://github.com/blocklistproject/Lists).
 
 Returns PLAIN, lowercased domain strings -- NOT regex-escaped. Callers
 that store a result into `category_domains.pattern` (matched later via
@@ -23,23 +21,22 @@ from urllib.parse import urlparse
 _COMMENT_PREFIXES = ("#", "!")
 
 # Hosts-file style: "<ip> <hostname> [alias...]". Recognizes the null-route
-# IPs real blocklists actually use (confirmed live: BlockListProject's own
-# `hosts`-format files use 0.0.0.0; the IPv6 forms are included defensively
-# for other hosts-style sources that use them).
+# IPs real blocklists actually use (BlockListProject's own `hosts`-format
+# files use 0.0.0.0; the IPv6 forms are included defensively for other
+# hosts-style sources that use them).
 _HOSTS_IP_PREFIXES = ("0.0.0.0", "127.0.0.1", "::", "::1")
 
 # AdGuard/uBlock style: "||hostname^" optionally followed by more modifiers
-# (e.g. "||hostname^$important") -- confirmed live against
-# BlockListProject's own `adguard/*-ags.txt` files, which use exactly this
-# shape with no other rule forms mixed in.
+# (e.g. "||hostname^$important") -- matches BlockListProject's own
+# `adguard/*-ags.txt` files, which use exactly this shape with no other
+# rule forms mixed in.
 _ADGUARD_RULE_RE = re.compile(r"^\|\|([^\^$]+)\^?")
 
 # A full URL per line -- e.g. "http://example.com" or
 # "http://example.com?p=tgraph&r=home_home" (some real lists in this shape
 # glue a query string straight onto the bare hostname with no `/` in
-# between, which urlparse() still handles correctly -- confirmed live
-# 2026-09-08 against a real list using exactly that pattern). Only the
-# scheme is checked here; urlparse() does the actual host extraction.
+# between, which urlparse() still handles correctly). Only the scheme is
+# checked here; urlparse() does the actual host extraction.
 _URL_SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 # A bare domain-per-line entry: letters/digits/hyphens, dot-separated
@@ -82,15 +79,10 @@ def parse_hostlist(text: str) -> list[str]:
         line).
       - a full URL, e.g. `http://example.com` or
         `https://example.com/some/path?query=1` -- the hostname is
-        extracted via `urlparse()` (added 2026-09-08, real gap found by
-        live user testing: a real list -- a social-networking-sites list
-        formatted exactly this way, one full URL per line, including a
-        few lines with a query string glued straight onto the bare
-        hostname with no `/` -- fetched successfully but produced zero
-        domains, since none of the three formats above recognize a URL
-        with a scheme). Verified live against that exact file: all ~197
-        entries parsed correctly, including the query-glued and
-        trailing-`#`-fragment lines.
+        extracted via `urlparse()`. Needed because a list formatted this
+        way (one full URL per line) produces zero domains under the
+        other three formats above, none of which recognize a URL with a
+        scheme.
       - a bare domain on its own line.
       - v2fly/domain-list-community style: a bare domain (or a `domain:` /
         `full:` prefixed one) with zero or more trailing ` @attribute` tags,
@@ -98,9 +90,7 @@ def parse_hostlist(text: str) -> list[str]:
         tags are stripped; the hostname underneath is then parsed as a bare
         domain. `keyword:` / `regexp:` / `include:` lines from that same
         format are NOT unwrapped -- they are not plain domains and stay
-        skipped (added 2026-09-10, RoadMap follow-up item 13: real coverage
-        loss found in the live YouTube category, whose source list is one of
-        these -- `ggpht.cn` and other `@`-tagged entries were being dropped).
+        skipped.
 
     A line matching none of these shapes (malformed, or a rule type this
     parser doesn't understand -- e.g. a regex rule, an exception rule

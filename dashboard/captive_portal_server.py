@@ -1,96 +1,52 @@
 #!/usr/bin/env python3
-"""Phase 4 milestone 3: the captive-portal login server nftables has
-been redirecting PREAUTH (unauthenticated_v4) devices' plain-HTTP
-traffic to since Phase 3 was designed -- see
-phase3/nftables-manager/internal/nft/knftables_adapter.go's
-`baselineRules`, which already carries
-`ip saddr @unauthenticated_v4 tcp dport 80 redirect to :3131` with a
-`# -> future portal` comment in the original design doc. This module
-is that future portal; the nftables/interception side needed NO
-changes at all.
+"""Captive-portal login server. nftables redirects PREAUTH
+(unauthenticated_v4) devices' plain-HTTP traffic here (see
+phase3/nftables-manager's baseline rules) -- no changes are needed on
+that side to add or modify what this module does.
 
-**Design decision, confirmed by how OS captive-portal detection
-actually works (Apple/Google/Microsoft/Firefox all publicly documented
--- see RoadMap.md's dated entry for the exact expected values each OS
-checks for) rather than assumed**: every one of these OSes probes a
-plain-HTTP URL expecting an EXACT response (Apple:
-`captive.apple.com/hotspot-detect.html` -> the literal string
-"Success"; Android/Chrome: `.../generate_204` -> a bare 204; Windows:
+Every GET returns the same login page regardless of path or Host
+header. This is deliberate: every major OS's captive-portal detector
+probes a specific plain-HTTP URL expecting an exact response (Apple:
+`captive.apple.com/hotspot-detect.html` -> "Success"; Android/Chrome:
+`.../generate_204` -> a bare 204; Windows:
 `www.msftconnecttest.com/connecttest.txt` -> "Microsoft Connect Test";
-Firefox: `detectportal.firefox.com/success.txt` -> "success"). Getting
-ANYTHING else -- wrong status, wrong body -- is what every one of them
-already treats as "there's a captive portal," and each then opens (or
-offers to open) exactly the URL it just probed in a real browser/
-webview, which -- since nftables redirects by source IP and
-destination PORT, not by hostname -- lands right back on THIS server
-and renders whatever HTML we send. That means a single handler that
-always returns the same login page for every GET, regardless of path
-or Host header, is enough to trigger every major OS's native "Sign in
-to network" UI AND to show the login form for a device manually typing
-a URL -- no per-OS special-casing needed.
+Firefox: `detectportal.firefox.com/success.txt` -> "success"). Any
+other response is what makes each OS show its "Sign in to network" UI,
+which then opens exactly the URL it just probed -- since nftables
+redirects by source IP and port, not hostname, that request lands back
+here regardless of which URL it was, so one handler covers every OS
+without per-OS branching.
 
-**Self-resolving success path, not something this module has to
-handle**: once a login succeeds and the device's `is_authenticated`
-flag flips, it takes controller/main.py's own next reconcile cycle
-(`--poll-interval`, default 5s) to actually move the device's IP from
-`unauthenticated_v4` to `authenticated_v4` in the real kernel ruleset
-(see controller/policy_state.py). From that point on, this device's
-port-80 traffic is no longer redirected here at all -- the OS's own
-routine re-probe of its detection URL reaches the REAL Apple/Google/
-Microsoft server directly and gets the REAL expected response, which
-is what makes the OS dismiss its own captive-portal UI on its own.
-Nothing here needs to detect or announce that transition itself.
+Nothing here needs to detect or announce a successful login: once
+`is_authenticated` flips, controller/main.py's own reconcile loop
+moves the device from `unauthenticated_v4` to `authenticated_v4` (see
+controller/policy_state.py) within one poll interval. From that point
+the device's port-80 traffic isn't redirected here at all, so the OS's
+own next re-probe reaches the real detection endpoint directly and
+dismisses its UI on its own.
 
-**No interception for HTTPS (tcp/443) -- a known, deliberate,
-documented limitation, not an oversight**: matches virtually every
-commercial captive portal (hotel/airport WiFi) in existence, and
-`phase3/nftables-manager`'s baseline rules were never designed to
-redirect 443 for unauthenticated_v4 either (there is no cert this
-project's own CA can present that an ungated device already trusts,
-same reasoning as `block_page_server.py`'s own explicit choice never to
-terminate TLS for a domain a device hasn't been told to trust). In
-practice this is what actually triggers detection for the overwhelming
-majority of real usage anyway: the OS's own automatic captive-portal
-probe fires immediately upon a new interception generation taking
-effect, using plain HTTP specifically because every captive portal
-implementation relies on that being interceptable. A technically
-determined user who notices the redirect and deliberately avoids ever
-completing an HTTP request could evade the prompt indefinitely; RoadMap.md
-tracks this explicitly as a possible future hardening item (e.g.
-dropping tcp/udp 443 for unauthenticated_v4 too) rather than something
-silently added here without verifying it doesn't also break the OS's
-own captive-portal-assistant webview, which sometimes needs its own
-auxiliary HTTPS requests to render correctly.
+No interception for HTTPS (tcp/443) -- deliberate, not an oversight:
+there is no cert this project's own CA can present that an ungated
+device already trusts (same reasoning as block_page_server.py's own
+choice never to terminate TLS for a domain a device hasn't been told
+to trust). A user who notices the redirect and never completes a
+plain-HTTP request could evade the prompt indefinitely; tracked as a
+possible future hardening item in RoadMap.md rather than added here
+without checking it doesn't also break the OS's own captive-portal
+webview, which sometimes needs its own HTTPS requests to render.
 
-**Portal-side admin action, added 2026-08-31**: the design sketch's
-admin-facing quick-add path (RoadMap.md) originally offered two ways to
-handle a gated device -- "the same portal screen, or a separate device
-with real dashboard access." Only the latter existed until now
-(Milestone 2's dashboard Bypass/Manage actions). This adds the former,
-for when an admin is physically at the gated device itself: a
-collapsed `<details>` section on the same login page, asking for the
-SAME admin credentials `dashboard/dashboard.py`'s HTTP-Basic login
-checks (`common/auth.py`'s `verify_admin_credentials()`, factored out
-of `dashboard.py`'s own `_check_admin_auth` so there's exactly one
-admin-credential check, not two), offering **Bypass** (identical effect
-to the dashboard's own `/devices/bypass_login`) or **assign to a
-group**. Shares this module's own per-IP rate limiter with the kid
-login form above -- a wrong admin-password guess counts against the
-same budget, which is the more conservative choice given this surface
-grants strictly more than the kid login ever does.
+The `<details>` admin section lets an admin standing at the gated
+device itself Bypass, Ignore, or assign it to a group, using the same
+credential check as the dashboard's own HTTP-Basic login
+(`common/auth.py`'s `verify_admin_credentials()`). It shares the kid
+login form's own rate limiter (`_LOGIN_LIMITER`) rather than a separate
+budget -- deliberate, since this surface grants strictly more than the
+kid login ever does.
 
-**Device name required, added 2026-09-14**: project owner's explicit
-request -- every device-claiming action here (the kid-login form, and
-Bypass/Ignore/Assign-to-group in the admin section) now requires a
-device name before it succeeds, whenever the device doesn't already
-have one. Before this, a device that arrived on this portal only ever
-had a bare MAC address to show for itself on the dashboard's Devices
-page, until an admin happened to notice and rename it by hand
-afterward -- sometimes never. Asked exactly once per device: skipped
-entirely once a name exists, whether set here or directly on the
-Devices page (`_handle_login()`'s and `_handle_admin_action()`'s own
-`needs_label` checks), and `label = COALESCE(label, ?)` on every
-resulting UPDATE makes writing it back a safe no-op either way.
+Every device-claiming action (kid login, Bypass, Ignore, assign to
+group) requires a device name before it succeeds, unless the device
+already has one -- see `_render()`'s, `_handle_login()`'s, and
+`_handle_admin_action()`'s own `needs_label` checks.
 """
 from __future__ import annotations
 
@@ -109,19 +65,11 @@ from device_identity import resolve_device
 
 log = logging.getLogger("dashboard.captive_portal_server")
 
-# Brute-force protection, added alongside this module's first version
-# rather than retrofitted later (this project's standing security
-# practice -- see RoadMap.md's cross-cutting security-by-design
-# section): a login form an unauthenticated device can reach with no
-# rate limiting at all is an obvious guessing-attack surface,
-# especially since a kid's own password is realistically short/weak.
-# 2026-09-02: factored the actual limiter mechanism out into
-# common/rate_limit.py so dashboard.py's own HTTP-Basic admin login
-# (audited the same day, found to have none at all) can reuse it
-# rather than a second hand-rolled copy -- see that module's docstring.
-# Still one shared instance for BOTH forms below (kid login and the
-# portal admin action), a deliberate choice, not an oversight -- see
-# _handle_admin_action's own comment.
+# Rate-limits both login forms below against brute-force guessing -- a
+# kid's own password is realistically short/weak, and this form has no
+# other protection. One shared instance for BOTH forms (kid login and
+# the admin action), not a separate budget for each -- see
+# _handle_admin_action's own comment on why.
 _MAX_ATTEMPTS = 5
 _WINDOW_SECONDS = 60.0
 _LOGIN_LIMITER = rate_limit.RateLimiter(_MAX_ATTEMPTS, _WINDOW_SECONDS)
@@ -138,26 +86,16 @@ def _log_failed_login(
 ) -> None:
     """Writes a dashboard-visible Events-page row for a failed login/
     admin-action attempt, alongside (not instead of) the log.info/
-    log.warning calls at each call site below -- same "layer, don't
-    replace" principle common/system_events.py's own docstring already
-    established for controller/main.py's background loops. Never logs
-    the attempted password, only the username and source IP -- a kid's
-    (or an attacker's) mistyped password is still a real, sensitive
-    credential-adjacent string not worth persisting anywhere.
+    log.warning calls at each call site below. Never logs the attempted
+    password, only the username and source IP.
 
-    `mac_address` (added 2026-09-07, real gap found by live user
-    testing): stored in `detail`, not a new column -- lets
-    dashboard.py's pending-devices card answer "has this specific device
-    already tried and been denied" via a plain `detail = ?` lookup,
-    which matters because a never-assigned device that HAS tried to log
-    in (and knows a real household username, just isn't allowed onto
-    that account's device list yet) is a different situation from one
-    that's simply never been used. Only `_handle_login()` below passes
-    this -- `_handle_admin_action()`'s own failed-credential path checks
-    admin credentials before it would resolve a device at all, so
-    there's no device in hand yet at that point without adding a lookup
-    purely for this, and that event type isn't "a device tried to log
-    in" the way this one is anyway."""
+    `mac_address` is stored in `detail`, not a new column: it lets
+    dashboard.py's pending-devices card answer "has this specific
+    device already tried and been denied" via a plain `detail = ?`
+    lookup. Only `_handle_login()` below passes it -- `_handle_admin_
+    action()`'s own failed-credential path checks admin credentials
+    before it would resolve a device at all, so there's no device in
+    hand yet at that point."""
     truncated = username[:_LOGGED_USERNAME_MAX_LEN]
     system_events.log_event(
         conn, source, "error",
@@ -221,13 +159,9 @@ stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l8 3.5v5.2c0 4.7-3.
 </body></html>
 """
 
-# Rendered in BOTH forms above (same {label_field} placeholder, filled
-# with the same value each time `_render()` is called) only when the
-# device this request resolves to doesn't already have one -- see
-# `_render()`'s own `needs_label` param and the module docstring's
-# "Device name required" section for why every device-claiming action
-# here (kid login, bypass, ignore, assign_group) asks for this exactly
-# once, not on every future visit.
+# Rendered in both forms above via the same {label_field} placeholder,
+# only when the device this request resolves to doesn't already have a
+# label -- see _render()'s own `needs_label` param.
 _LABEL_FIELD_TEMPLATE = """\
   <input type="text" name="label" placeholder="Name this device (e.g. Alex's phone)" value="{value}" required>\
 """
@@ -266,12 +200,9 @@ actually open up. Try reloading whatever page you were on.</p>
 """
 
 # Shown on the success page only when this same user already has a
-# DIFFERENT device with SSL-Bump enabled -- see this module's own
-# docstring's design-sketch reference (RoadMap.md): the login flow
-# only ever grants DNS-tier access, so a kid whose usual device has
-# full SSL-Bump refinement logging in from a NEW device here would
-# otherwise have no idea why something that works on their other
-# device doesn't work on this one.
+# DIFFERENT device with SSL-Bump enabled -- this login only ever grants
+# DNS-tier access, so a kid used to full access on another device would
+# otherwise have no idea why this one is more limited.
 _BUMP_REMINDER_HTML = (
     '<p class="note">Heads up: this is only basic (DNS-level) access. '
     "Your other device has extra access set up by a parent -- ask them "
@@ -318,14 +249,9 @@ def _render(
         group_row = _GROUP_ROW_TEMPLATE.format(options=options)
     else:
         group_row = ""
-    # needs_label (2026-09-14, RoadMap.md, project owner's explicit
-    # request): only rendered at all when the device this request
-    # resolves to has no label yet -- once one exists (set here, or
-    # directly on the dashboard's Devices page), neither form asks
-    # again. label_value re-populates what was already typed across a
+    # label_value re-populates what was already typed across a
     # validation error (a wrong password, a missing/nonexistent group)
-    # so a multi-field mistake doesn't cost retyping the device's name
-    # too.
+    # so a multi-field mistake doesn't cost retyping the device's name.
     label_field = _LABEL_FIELD_TEMPLATE.format(value=html.escape(label_value)) if needs_label else ""
     return _PAGE_TEMPLATE.format(
         error=error_html, admin_error=admin_error_html, group_row=group_row, label_field=label_field,
@@ -356,19 +282,12 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler's own naming convention
-        # Deliberately the SAME response regardless of path/Host -- see
-        # this module's own docstring for why that alone is enough to
-        # trigger every major OS's captive-portal-detected UI. Groups
-        # DO need a real DB read (unlike the rest of this response,
-        # which is static) so the admin section's dropdown reflects
-        # whatever groups actually exist right now -- same reason this
-        # also resolves the requesting device, purely to decide up front
-        # whether either form needs to ask for a name (see _render()'s
-        # own `needs_label` comment); a device that can't be resolved
-        # yet (not the common case here -- do_GET runs on every plain
-        # page load, not just a genuine login attempt) simply doesn't
-        # ask, same as any other "we couldn't identify this device yet"
-        # path in this module.
+        # Same response regardless of path/Host -- see the module
+        # docstring. Groups need a live DB read so the admin dropdown
+        # reflects reality; resolving the device here too decides up
+        # front whether either form needs to ask for a name (see
+        # _render()'s own `needs_label`) -- a device that can't be
+        # resolved yet simply isn't asked.
         conn = db.get_conn()
         try:
             groups = _fetch_groups(conn)
@@ -416,13 +335,10 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
 
         device = resolve_device(conn, client_ip)
         if device is None:
-            # By construction this request could only have reached us
-            # via nftables' unauthenticated_v4 redirect, which requires
-            # an active device_bindings row to exist in the first
-            # place -- reaching this branch means it was deactivated in
-            # the narrow window since, not the common case. Fails
-            # closed (no login granted) with an honest explanation
-            # rather than silently retrying.
+            # Reaching here requires an active device_bindings row (how
+            # this request got redirected here at all), so None means it
+            # was deactivated in the narrow window since. Fails closed
+            # with an honest explanation rather than retrying silently.
             log.warning("login attempt from %s but no active binding was found", client_ip)
             self._send_html(
                 200,
@@ -433,41 +349,24 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # 2026-09-14, RoadMap.md, project owner's explicit request: every
-        # device-claiming action on this portal (this login, and
-        # bypass/ignore/assign_group in _handle_admin_action below) now
-        # requires a device name up front if the device doesn't already
-        # have one -- previously a device that arrived here only ever had
-        # a bare MAC address to show for itself on the Devices page,
-        # until an admin happened to notice and name it by hand later
-        # (sometimes never). Computed once here (not re-checked after
-        # this point) so a device that already had a name from an
-        # earlier login, or set directly on the Devices page, is never
+        # Computed once, up front, so a device that already has a name
+        # (from an earlier login, or set on the Devices page) is never
         # asked again.
         needs_label = not (device["label"] or "").strip()
 
         if not username or not password:
-            # No real login has an empty username or password (the form
-            # fields are `required`, so a human can't submit this) -- it's
-            # an OS captive-portal assistant / WebView auto-POSTing the
-            # bare form the moment it renders, or a re-POST of a blank
-            # one. Re-render the form and stop here: recording a
-            # system_events row for it would be pure "username: ''" noise
-            # on the Events page (RoadMap.md finding, 2026-09-10), and
-            # spending the shared rate-limit budget on a submission that
-            # can never succeed risks locking out the device's real
-            # attempt right after.
+            # A real login never has an empty username or password (both
+            # fields are `required`) -- this is an OS captive-portal
+            # assistant auto-POSTing the bare form, or a resubmitted blank
+            # one. Re-render and stop: this can never succeed, so it's
+            # not worth logging or spending the rate-limit budget on.
             self._send_html(200, _render(groups=_fetch_groups(conn), needs_label=needs_label, label_value=label))
             return
 
-        # Case-insensitive on purpose (RoadMap.md, project owner's live-testing
-        # feedback): a kid typing "Alex" for a household username created as
-        # "alex" got a flat "Incorrect username or password" with no hint why --
-        # nothing else about this login (the password itself, the admin
-        # dashboard login) is case-sensitive, so this one surprised the one
-        # person who couldn't fix it themselves. add_user() now also refuses to
-        # create a second username that only differs by case, so this can never
-        # become ambiguous between two real accounts.
+        # Case-insensitive on purpose -- nothing else about this login
+        # (the password, the admin dashboard login) is case-sensitive.
+        # add_user() refuses a second username differing only by case,
+        # so this can never become ambiguous.
         user = conn.execute(
             "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
         ).fetchone()
@@ -485,11 +384,10 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             return
 
         if needs_label and not label:
-            # Credentials are correct -- the only thing stopping this
-            # login is the missing name. Doesn't touch the rate limiter
-            # (this isn't a credential guess) or write a system_events
-            # row (not a failure, just an incomplete submission -- same
-            # reasoning as the blank-submission branch above).
+            # Credentials are correct -- only the missing name blocks
+            # this login. Not a credential guess (don't touch the rate
+            # limiter) and not a failure worth logging, same as the
+            # blank-submission branch above.
             self._send_html(
                 200,
                 _render(
@@ -499,29 +397,18 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # Deliberately NOT clearing _LOGIN_LIMITER here (fixed 2026-09-02,
-        # a real bug found by code review): this limiter is shared with
-        # _handle_admin_action() below on purpose, but that means a
-        # success on ONE surface used to wipe out failures recorded
-        # against the OTHER -- a household member's normal kid login
-        # succeeding from a shared/NAT'd IP would silently hand an
-        # in-progress admin-password guesser a fresh 5-attempt budget,
-        # exactly defeating the "shared, more conservative budget"
-        # reasoning this sharing exists for in the first place. Recorded
-        # failures now simply age out of the window on their own
-        # (_WINDOW_SECONDS) rather than being reset by an unrelated
-        # credential domain's success.
+        # Deliberately NOT clearing _LOGIN_LIMITER here: it's shared with
+        # _handle_admin_action() below, and a success on one surface
+        # clearing it would silently hand a fresh attempts budget to an
+        # in-progress guess against the OTHER surface. Failures only age
+        # out of the window on their own (_WINDOW_SECONDS).
 
-        # Grants DNS-tier access ONLY -- never bump_enabled, matching
-        # Phase 4's design sketch exactly (RoadMap.md). COALESCE so a
-        # device an admin already assigned to a different user (or a
-        # group) keeps that assignment; this login only fills in
-        # user_id when nothing has claimed the device yet. The label
-        # COALESCE is the same idea: `label` is only ever a non-empty
-        # string here when needs_label was True (the form only submits
-        # it when rendered, and the check above already refused an empty
-        # one in that case) -- when the device already had a name, this
-        # is a no-op that leaves it exactly as it was.
+        # Grants DNS-tier access ONLY -- never bump_enabled. Both
+        # COALESCEs are no-ops when already set: user_id so a device an
+        # admin already assigned to a user/group keeps that assignment,
+        # label so an already-named device keeps its name (`label` is
+        # only ever non-empty here when needs_label was True, and the
+        # check above already rejected an empty one in that case).
         conn.execute(
             "UPDATE devices SET is_authenticated = 1, user_id = COALESCE(user_id, ?), "
             "label = COALESCE(label, ?) WHERE id = ?",
@@ -529,14 +416,8 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
         )
         conn.commit()
         log.info("device %s authenticated as %s", device["mac_address"], username)
-        # Auditable, dashboard-visible record that a device joined the
-        # filtered network via the portal -- the counterpart to the
-        # failed-attempt rows already written above, so the whole portal
-        # flow (not just its failures) can be confirmed from the Events
-        # page without container logs (RoadMap.md, 2026-09-10). A genuine
-        # one-off admin-relevant event, not a routine cycle -- the same
-        # bar system_events' own `'info'` severity documents for its
-        # other callers.
+        # Auditable, dashboard-visible record that a device joined via
+        # the portal -- the counterpart to the failed-attempt rows above.
         system_events.log_event(
             conn, "captive_portal_login", "info",
             f"{username!r} logged in from device {device['mac_address']} ({client_ip})",
@@ -587,11 +468,8 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # See the matching comment in _handle_login() above -- this
-        # limiter is deliberately shared between both forms, so clearing
-        # it here on an admin success would also wipe out failures
-        # recorded against the kid-login form (and vice versa), reopening
-        # the exact cross-surface reset this fix closes.
+        # Same reasoning as _handle_login()'s own comment -- don't clear
+        # the shared limiter here either.
 
         device = resolve_device(conn, client_ip)
         if device is None:
@@ -605,14 +483,11 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # Same requirement, same reasoning, as _handle_login()'s own
-        # `needs_label` comment above -- applies uniformly to all three
-        # actions below (including "ignore": the docstring's own
-        # motivating example, a work laptop running its own DNS-hijack
-        # detection, is exactly the kind of device an admin wants to
-        # recognize by name later, not just by MAC). Checked once here,
-        # before dispatching on `action`, rather than duplicated in each
-        # branch below.
+        # Same requirement as _handle_login() -- checked once here,
+        # before dispatching on `action`, since bypass/ignore/
+        # assign_group all need it. "ignore" isn't exempt: the device it
+        # excludes (e.g. a laptop running its own DNS-hijack detection)
+        # is exactly the kind an admin wants to recognize by name later.
         needs_label = not (device["label"] or "").strip()
         if needs_label and not label:
             self._send_html(
@@ -626,10 +501,9 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
 
         if action == "bypass":
             # Identical effect to dashboard.py's own
-            # /devices/bypass_login -- only ever touches this one
-            # column, same reasoning as that route's own docstring. The
-            # label COALESCE is the same no-op-if-already-named idea as
-            # _handle_login()'s own UPDATE.
+            # /devices/bypass_login. The label COALESCE is the same
+            # no-op-if-already-named idea as _handle_login()'s own
+            # UPDATE.
             conn.execute(
                 "UPDATE devices SET bypass_login = 1, label = COALESCE(label, ?) WHERE id = ?",
                 (label or None, device["id"]),
@@ -640,23 +514,14 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
             return
 
         if action == "ignore":
-            # RoadMap.md's dated entry (item 22): bypass_login and
-            # ignored are two different things -- bypass skips only the
-            # captive-portal login while still applying full DNS-tier
-            # filtering, but a device running its own DNS-hijack-
-            # detecting security software (found live: a work laptop
-            # running Cisco Umbrella/OpenDNS) needs to be excluded from
-            # DNS interception ENTIRELY, which only `ignored` does. That
-            # was only fixable from the dashboard's Devices page before
-            # this -- an admin standing at the gated device itself had
-            # no equivalent one-click option here, same gap `bypass`
-            # already closed for the "skip login" case. Same semantics
-            # as dashboard.py's own bulk_set_ignored_devices(): ignored
-            # and a user/group assignment are mutually exclusive at the
-            # UI level (devices' own CHECK constraint doesn't require
-            # it, but every other ignore path in this project clears
-            # both), so this clears any prior assignment too rather than
-            # leaving a stale one behind a now-ignored device.
+            # `ignored` differs from `bypass_login`: bypass only skips
+            # the portal login while DNS-tier filtering still applies; a
+            # device running its own DNS-hijack detection (e.g.
+            # corporate security software) needs to be excluded from
+            # interception entirely, which only `ignored` does. Clears
+            # any prior user/group assignment too -- same mutual-
+            # exclusion convention as dashboard.py's own
+            # bulk_set_ignored_devices().
             conn.execute(
                 "UPDATE devices SET ignored = 1, user_id = NULL, group_id = NULL, label = COALESCE(label, ?) "
                 "WHERE id = ?",
@@ -677,16 +542,12 @@ class _CaptivePortalHandler(BaseHTTPRequestHandler):
                             groups=_fetch_groups(conn), needs_label=needs_label, label_value=label),
                 )
                 return
-            # group_id/user_id are mutually exclusive (devices' own
-            # CHECK constraint) -- clearing user_id here is required,
-            # not just tidy, or this UPDATE would violate it whenever
-            # the device already had a personal owner. is_authenticated
-            # is set explicitly rather than relying on
-            # common/policy_class.py's bypass_login fallback (2026-08-31
-            # fix) -- both are true here, which is fine, but a group
-            # assignment reads more clearly as "this device is now
-            # authenticated, and governed by this group" than as a
-            # bypass side effect.
+            # group_id/user_id are mutually exclusive (devices' own CHECK
+            # constraint) -- clearing user_id is required here, not just
+            # tidy. is_authenticated is set explicitly rather than
+            # relying on policy_class.py's bypass_login fallback, since a
+            # group assignment reads more clearly as "authenticated,
+            # governed by this group" than as a bypass side effect.
             conn.execute(
                 "UPDATE devices SET group_id = ?, user_id = NULL, is_authenticated = 1, "
                 "label = COALESCE(label, ?) WHERE id = ?",

@@ -1,12 +1,12 @@
 """common/db.py's _migrate(): removes the two blanket Crunchyroll
 domain_paths rules (`^/playback/v[0-9]+/`, `^/content/v[0-9]+/`) that
-defaults/seed_defaults.py's CRUNCHYROLL_PATHS stopped seeding 2026-09-10
-(RoadMap.md finding #1d) -- see that list's own long comment for why they'd
-turned into a live security gap. seed_defaults.seed()'s own INSERT OR
-IGNORE is additive-only and isn't even run automatically at startup, so an
-existing database (prod's included) needs this data-repair migration to
-actually stop carrying the dangerous rows -- _migrate() is the one place
-that DOES run automatically on every startup.
+defaults/seed_defaults.py's CRUNCHYROLL_PATHS no longer seeds -- see that
+list's own comment for why they'd turned into a security gap.
+seed_defaults.seed()'s own INSERT OR IGNORE is additive-only and isn't
+even run automatically at startup, so an existing database (prod's
+included) needs this data-repair migration to actually stop carrying the
+dangerous rows -- _migrate() is the one place that DOES run automatically
+on every startup.
 """
 from __future__ import annotations
 

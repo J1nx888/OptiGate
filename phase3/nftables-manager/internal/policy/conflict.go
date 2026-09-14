@@ -26,9 +26,9 @@ type Conflict struct {
 // desired.Bump is resolved separately and is NOT part of the four-way
 // exclusivity above -- it composes with Authenticated rather than
 // competing with it (see SetBump's doc comment). Its only precondition
-// is RoadMap.md's hard-deny invariant: a bump-enabled device must also
-// BE an authenticated one, since bump-tier is a refinement of
-// authenticated access, not a standalone class. A bump IP that didn't
+// is that a bump-enabled device must also BE an authenticated one,
+// since bump-tier is a refinement of authenticated access, not a
+// standalone class. A bump IP that didn't
 // resolve into Authenticated above (e.g. a device flagged bump_enabled
 // while also ignored or quarantined -- a bug in the caller's own
 // desired-state computation, not something that should happen) is

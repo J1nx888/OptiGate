@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Configuration export/import (backup/restore) -- tracked as a deferred
-item in RoadMap.md since before 2026-09-07 ("no way currently to export
-the whole household's configuration... useful before a risky change, or
-when moving to new hardware"), built 2026-09-08 as the actual mechanism
-for that: wipe the production box and redeploy clean (e.g. once the
-Phase C infrastructure rename happens) without losing anything or
-needing to re-trust a new CA certificate on every device.
+"""Configuration export/import (backup/restore) -- lets an admin export
+the whole household's configuration (e.g. before a risky change, or
+when moving to new hardware) and restore it elsewhere without losing
+anything or needing to re-trust a new CA certificate on every device.
 
-Lives in common/ (not dashboard/) on the same reasoning
-category_fetch.py's own docstring already gives for its module -- purely
-a lower-level data concern, kept separate from the HTTP/file-upload
-handling in dashboard.py.
+Lives in common/ (not dashboard/), same reasoning category_fetch.py's
+own docstring gives for its module -- purely a lower-level data
+concern, kept separate from the HTTP/file-upload handling in
+dashboard.py.
 
 **What "configuration" means here, deliberately**: every table (or
 column) a human actually decided, not runtime/observational state that
@@ -40,23 +37,22 @@ either doesn't matter after a restore or actively shouldn't survive one:
 
 **Restore is a full replace, not a merge**: every included table is
 cleared and reinserted from the backup, WITH THE ORIGINAL ROW IDS
-preserved. This is deliberate, not an oversight -- every join table
-above (user_domains, category_users, etc.) references its parent by
-that same original id, so preserving ids means every foreign key just
-lines up naturally with zero remapping logic, at the cost of restore
-being a genuine "return to exactly this snapshot" operation rather than
-an incremental import. `PRAGMA foreign_keys=ON` (common/db.py's own
-get_conn()) is what makes deleting the six root tables below
-(users/groups/devices/domains/categories/schedules) enough to clear
-every dependent join-table row too -- every child table above uses `ON
-DELETE CASCADE` on its parent references (device_bindings/
-network_events use `ON DELETE SET NULL` instead, deliberately, so a
-restore doesn't destroy real network-observation history sitting in
-those excluded-from-backup tables, just orphans it back to "pending"
-until discovery re-associates it -- self-healing, not a bug). access_log
-and system_events have no REFERENCES clause at all on purpose (see their
-own schema comments), so a restore never touches Report-page history or
-the audit log either way.
+preserved. This is deliberate -- every join table above (user_domains,
+category_users, etc.) references its parent by that same original id,
+so preserving ids means every foreign key just lines up naturally with
+zero remapping logic, at the cost of restore being a genuine "return to
+exactly this snapshot" operation rather than an incremental import.
+`PRAGMA foreign_keys=ON` (common/db.py's own get_conn()) is what makes
+deleting the six root tables below (users/groups/devices/domains/
+categories/schedules) enough to clear every dependent join-table row
+too -- every child table above uses `ON DELETE CASCADE` on its parent
+references (device_bindings/network_events use `ON DELETE SET NULL`
+instead, deliberately, so a restore doesn't destroy real
+network-observation history sitting in those excluded-from-backup
+tables, just orphans it back to "pending" until discovery
+re-associates it). access_log and system_events have no REFERENCES
+clause at all on purpose (see their own schema comments), so a restore
+never touches Report-page history or the audit log either way.
 
 The CA certificate/private key files are NOT part of this module's own
 job (they're not database rows) -- dashboard.py's backup/restore routes

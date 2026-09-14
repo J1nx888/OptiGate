@@ -1,8 +1,5 @@
-"""Phase 8: common/blocklist_parser.py -- pure text extraction from the
-three real formats confirmed live against
-https://github.com/blocklistproject/Lists, plus a fourth (full URL per
-line, added 2026-09-08) confirmed live against a real social-networking-
-sites list of that shape (see that module's docstring)."""
+"""common/blocklist_parser.py -- pure text extraction across the several
+hostlist formats it accepts (see that module's docstring for the formats)."""
 from __future__ import annotations
 
 import blocklist_parser
@@ -78,7 +75,7 @@ def test_whitespace_only_lines_and_crlf_handled():
     assert blocklist_parser.parse_hostlist(text) == ["example.com", "other.example.org"]
 
 
-# --- full-URL-per-line format (added 2026-09-08) --------------------------
+# --- full-URL-per-line format ---------------------------------------------
 
 def test_full_url_per_line():
     text = "http://example.com\nhttps://other.example.org\n"
@@ -96,9 +93,8 @@ def test_full_url_is_case_insensitive_scheme_and_host():
 
 
 def test_full_url_real_world_edge_cases():
-    # Confirmed live 2026-09-08 against the actual file that surfaced this
-    # gap: a query string glued directly onto the bare hostname with no
-    # "/" separator, and a bare "#" fragment marker with nothing after it.
+    # A query string glued directly onto the bare hostname with no "/"
+    # separator, and a bare "#" fragment marker with nothing after it.
     text = (
         "http://bebo.com#\n"
         "http://www.bolt.com?p=tgraph&r=home_home\n"
@@ -112,11 +108,10 @@ def test_full_url_deduplicates_with_other_formats_for_the_same_host():
     assert blocklist_parser.parse_hostlist(text) == ["example.com"]
 
 
-# --- v2fly/domain-list-community format (RoadMap follow-up item 13, 2026-09-10) -
+# --- v2fly/domain-list-community format ------------------------------------
 
 def test_v2fly_trailing_attribute_tag_is_stripped():
-    # The exact shape that was dropping real YouTube-related domains from the
-    # live category: a bare host with a trailing region/purpose tag.
+    # A bare host with a trailing region/purpose tag.
     text = "ggpht.cn @cn\nads.youtube.com @ads\n"
     assert blocklist_parser.parse_hostlist(text) == ["ggpht.cn", "ads.youtube.com"]
 

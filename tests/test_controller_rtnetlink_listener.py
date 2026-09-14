@@ -1,7 +1,7 @@
 """controller/rtnetlink_listener.py: the pure message-filtering logic
-(extract_ipv4_binding), tested against real message shapes captured live
-from a real Linux kernel 2026-08-30 (see the module's own docstring), plus
-the listener's threading/retry wiring, tested against a fake `pyroute2`
+(extract_ipv4_binding), tested against real message shapes captured from
+a real Linux kernel (see the module's own docstring), plus the
+listener's threading/retry wiring, tested against a fake `pyroute2`
 module injected via sys.modules -- this project's controller/common code
 is otherwise stdlib-only, and pyroute2 is Linux-only (no AF_NETLINK on
 Windows), so these tests must not require it to actually be installed.

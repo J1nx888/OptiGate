@@ -1,13 +1,8 @@
-"""controller/active_scan.py: Milestone 4's final discovery source,
-active rate-limited ARP scanning. `nudge()`'s real network send is
-monkeypatched in every test here via a fake socket -- see this file's
-own `_FakeSocket`/`_fake_socket_module` fixtures -- so these tests
-never touch a real network, matching this module's own docstring
-("unit tests for the rate-limiting/staleness-selection logic, fully
-mockable, no real network needed"). The UDP-nudge technique itself was
-separately confirmed live against a real kernel on the smoke-test VM
-(see RoadMap.md's dated entry and active_scan.py's module docstring
-for the full transcript) -- not re-verified here.
+"""controller/active_scan.py: active rate-limited ARP scanning.
+`nudge()`'s real network send is monkeypatched in every test here via
+`_FakeSocket`, so these tests never touch a real network. The UDP-nudge
+technique itself is covered by active_scan.py's own module docstring,
+not re-verified here.
 """
 from __future__ import annotations
 

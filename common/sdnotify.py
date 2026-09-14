@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Minimal systemd sd_notify protocol client -- stdlib only, no
 third-party dependency. Mirrors the ARP worker's use of
-github.com/coreos/go-systemd/v22/daemon on the Go side (RoadMap.md's
-Milestone 6: "watchdog notifications let systemd terminate a hung
-service").
+github.com/coreos/go-systemd/v22/daemon on the Go side.
 
 Implements exactly the two messages this project needs (READY=1,
 WATCHDOG=1), not the full sd_notify protocol -- see

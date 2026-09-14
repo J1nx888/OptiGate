@@ -55,15 +55,11 @@ CMS_OBJECTS_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Added 2026-09-10 (RoadMap.md finding #1d, docs/design/crunchyroll-trace-
-# 2026-09-10/ANALYSIS.md item 1): the "continue watching" / "next episode"
-# feed for a series page. The series id is already in the URL path (no
-# resolver round-trip needed, same direct matching.user_has_show() check
-# SERIES_PAGE gets below) -- confirmed live by probe 2026-09-10. Before
-# this classifier existed, a request here fell through to OTHER and was
-# blanket-allowed by the (now removed, see defaults/seed_defaults.py)
-# `^/content/v[0-9]+/` domain_paths rule -- i.e. genuinely unfiltered
-# regardless of show ownership. This closes that gap.
+# The "continue watching" / "next episode" feed for a series page. The
+# series id is already in the URL path (no resolver round-trip needed,
+# same direct matching.user_has_show() check SERIES_PAGE gets below).
+# Without this classifier, a request here falls through to OTHER --
+# genuinely unfiltered regardless of show ownership.
 UP_NEXT_URL_RE = re.compile(
     r"^https://www\.crunchyroll\.com/content/v\d+/discover/up_next/"
     r"([A-Za-z0-9]+)(?:\?[^#]*)?(?:#.*)?$",

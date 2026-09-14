@@ -39,12 +39,7 @@ type Worker struct {
 	// ConsecutiveSendFailures below) so a sustained failure (the
 	// realistic case: the whole bound interface going down, which
 	// fails every send regardless of target) surfaces as real
-	// controller-visible health data instead of only a local log line
-	// -- closing the gap sendGratuitousReply's own TODO comment used
-	// to flag, confirmed live 2026-08-31 via a NIC-down test against a
-	// properly-isolated veth harness: interception_runtime stayed
-	// "running" throughout a real, sustained send-failure window
-	// because nothing upstream of this field existed yet to report it.
+	// controller-visible health data instead of only a local log line.
 	consecutiveSendFailures uint64
 }
 
@@ -97,7 +92,7 @@ func (w *Worker) ApplyGeneration(ctx context.Context, gen Generation) {
 // (SIGTERM handling in main.go, the systemd ExecStop path, and lease
 // expiry) must call this before the process exits or the worker is
 // otherwise left unattended -- this is the concrete fail-open
-// mechanism RoadMap.md requires.
+// mechanism that guarantees targets are restored, not left poisoned.
 func (w *Worker) Shutdown() {
 	w.mu.Lock()
 	rg := w.rg
@@ -245,9 +240,7 @@ func (w *Worker) SentCounters() map[string]uint64 {
 // satisfied from a cache. Exposed as a Worker method (rather than
 // requiring callers to reach into Worker's private sender field) so
 // cmd/pp-arp-worker/main.go's controllerHandler can re-verify the
-// wire-supplied gateway MAC on every replace_targets call (added
-// 2026-09-12: safety.go's own ResolveGateway had never actually been
-// wired up to anything, found by code review the previous night).
+// wire-supplied gateway MAC on every replace_targets call.
 //
 // On timeout, the underlying ARPSender.Resolve() call is abandoned, not
 // cancelled -- github.com/mdlayher/arp's Client.Resolve has no

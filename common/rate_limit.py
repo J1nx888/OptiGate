@@ -2,13 +2,10 @@
 """A small, in-memory, per-key sliding-window rate limiter for login-style
 brute-force protection.
 
-Added 2026-09-02, factored out of `dashboard/captive_portal_server.py`'s
-own original hand-rolled limiter (its kid-login/portal-admin-action forms)
-so `dashboard/dashboard.py`'s HTTP-Basic admin login -- audited the same
-day and found to have NO brute-force protection at all, unlike the portal
--- can reuse the exact same, already-reasoned-about mechanism instead of a
-second copy. See docs/security/overview.md section 6 for the audit that
-found the gap, and RoadMap.md's dated entry for the full writeup.
+Shared by `dashboard/dashboard.py`'s HTTP-Basic admin login and
+`dashboard/captive_portal_server.py`'s kid-login/portal-admin-action
+forms, so both reuse the same mechanism instead of separate hand-rolled
+copies.
 
 Stdlib-only (`threading` + `time`) -- this module is flat-copied into
 every image that copies `common/*.py` (see each Dockerfile's own `COPY`
@@ -18,9 +15,8 @@ line), including the `proxy` container, which must never need `pip` (see
 regardless, on the same footing as everything else in `common/`.
 
 In-memory, per-process, deliberately not a new DB table: losing lockout
-state across a process restart is an accepted tradeoff for a first pass on
-a LAN-only deployment -- the same call the portal's original limiter made.
-Each login surface should hold its OWN module-level `RateLimiter` instance
+state across a process restart is an accepted tradeoff for a LAN-only
+deployment. Each login surface should hold its OWN module-level `RateLimiter` instance
 rather than sharing one between logically different surfaces (unless that
 sharing is itself a deliberate choice, as it is between the portal's kid
 login and its own admin action -- see that module's docstring) -- state

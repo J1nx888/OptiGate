@@ -1,13 +1,8 @@
 """controller/mdns_lookup.py: best-effort mDNS reverse-PTR hostname
-lookup for devices on the "Devices awaiting login" card (RoadMap.md,
-2026-09-11). The hand-rolled DNS wire-format encode/decode is tested
-directly against crafted byte strings -- see this module's own
-docstring for why hand-rolling this (rather than a third-party mDNS
-library) was the chosen design. All real network I/O (`socket.socket`)
-is monkeypatched via `_FakeSocket`, same pattern as
-test_controller_active_scan.py -- these tests never touch a real
-network. The UDP "QU bit" technique itself is standard RFC 6762 SS5.4
-behavior, not separately live-verified here.
+lookup for devices on the "Devices awaiting login" card. The hand-rolled
+DNS wire-format encode/decode is tested directly against crafted byte
+strings. All real network I/O (`socket.socket`) is monkeypatched via
+`_FakeSocket` -- these tests never touch a real network.
 """
 from __future__ import annotations
 
@@ -186,13 +181,9 @@ class _FakeSocket:
         self.raise_on_sendto: Exception | None = None
         self.recv_queue: list[bytes] = []
         self.timeout_after_queue_empty = True
-        # Fixed 2026-09-11 alongside reverse_lookup()'s own source-address
-        # check (real gap found by code review: any host replying with a
-        # matching PTR record was trusted, regardless of who actually
-        # sent it): an arbitrary placeholder that no test's IP_N happens
-        # to equal, so every existing test keeps exercising the same
-        # "reply source doesn't match" path unless a test deliberately
-        # overrides it to look like a genuine responder.
+        # Placeholder that doesn't match any test's IP_N, so tests exercise
+        # the "reply source doesn't match" path unless deliberately
+        # overridden to look like a genuine responder.
         self.reply_addr: tuple[str, int] = ("192.168.1.1", mdns_lookup._MDNS_PORT)
         _FakeSocket.instances.append(self)
 
@@ -229,10 +220,8 @@ def test_reverse_lookup_returns_hostname_on_a_valid_reply(monkeypatch):
     def _make_socket(*a, **k):
         sock = _FakeSocket()
         sock.recv_queue = [response]
-        # A genuine responder answers this query FROM the IP we asked
-        # about (the QU bit requests a unicast reply straight back --
-        # see reverse_lookup()'s own docstring) -- reverse_lookup() now
-        # checks this, so a "valid reply" test has to look like one.
+        # reverse_lookup() checks that a reply's source IP matches the
+        # queried IP, so this must come from IP_1 to count as valid.
         sock.reply_addr = (IP_1, mdns_lookup._MDNS_PORT)
         return sock
 
@@ -245,12 +234,10 @@ def test_reverse_lookup_returns_hostname_on_a_valid_reply(monkeypatch):
 
 
 def test_reverse_lookup_ignores_a_well_formed_reply_from_the_wrong_source_ip(monkeypatch):
-    """Real gap found live by code review 2026-09-11: mDNS is a shared
-    multicast channel, and this used to trust any reply whose PTR record
-    matched the expected name, regardless of who actually sent it -- a
-    rogue device could race the real one with a forged hostname. A
-    well-formed, correctly-matching PTR response from a source OTHER
-    than the queried IP must be ignored, not accepted."""
+    """mDNS is a shared multicast channel -- a rogue device could race the
+    real responder with a forged hostname. A well-formed, correctly-
+    matching PTR response from a source OTHER than the queried IP must be
+    ignored, not accepted."""
     expected_name = mdns_lookup._reverse_arpa_name(IP_1)
     response = _build_response(expected_name, mdns_lookup._TYPE_PTR, "Rogue-Device.local")
 

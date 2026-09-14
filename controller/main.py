@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
-"""Entrypoint for the interception-controller (Milestones 3/4/6/7
-scaffold).
+"""Entrypoint for the interception-controller.
 
 Wires a WorkerClient, a desired-state source, reconcile(), and the
-heartbeat pacer together into the control loop RoadMap.md's Milestone 3
-describes: versioned Unix-socket IPC, generations, leases, idempotent
-reconciliation. Milestone 6 adds systemd sd_notify/watchdog integration
-and interception_runtime health reporting; Milestone 7 adds computing
-and publishing the DesiredPolicy blob phase3/nftables-manager reads.
+heartbeat pacer together into the control loop: versioned Unix-socket
+IPC, generations, leases, idempotent reconciliation, systemd
+sd_notify/watchdog integration, interception_runtime health reporting,
+and computing/publishing the DesiredPolicy blob phase3/nftables-manager
+reads.
 
-Deployed live as of the interception profile (controller/Dockerfile,
-docker-compose.yml's controller service) -- the doc comment above used
-to say this was "not a real deployable yet"; corrected 2026-09-08 since
-that claim had been stale for a while. The gateway is still passed in
-on the command line rather than resolved live (that's the ARP worker's
-own job at startup -- see phase3/arp-worker/internal/worker/safety.go's
-ResolveGateway -- not something the controller should do a second
-time). See docs/design/phase3-technical-design.md and RoadMap.md's
-milestone list.
+Deployed live as the interception profile (controller/Dockerfile,
+docker-compose.yml's controller service). The gateway is still passed
+in on the command line rather than resolved live (that's the ARP
+worker's own job at startup -- see
+phase3/arp-worker/internal/worker/safety.go's ResolveGateway -- not
+something the controller should do a second time). See
+docs/design/phase3-technical-design.md.
 
-**Discovery is now wired in (2026-08-30)**: when --db-path is given,
-run() also starts controller/discovery.py's snapshot loop on its own
-background thread and its own DB connection (see discovery.run_loop's
-own docstring for why a separate connection is required). This is still
-only the periodic ip-neigh-show snapshot -- the higher-precedence live
-rtnetlink-event listener remains unbuilt (see discovery.py's module
-docstring).
+When --db-path is given, run() also starts controller/discovery.py's
+snapshot loop on its own background thread and its own DB connection
+(see discovery.run_loop's own docstring for why a separate connection
+is required).
 """
 from __future__ import annotations
 
@@ -40,8 +34,8 @@ from pathlib import Path
 from typing import Callable
 
 # common/*.py lives in ../common relative to this file when run from a
-# repo checkout. controller/Dockerfile (added 2026-08-30) instead
-# flat-copies common/*.py alongside controller/*.py into one directory,
+# repo checkout. controller/Dockerfile instead flat-copies common/*.py
+# alongside controller/*.py into one directory,
 # matching proxy/Dockerfile and dashboard/Dockerfile's own pattern --
 # in that layout ../common doesn't exist, but it doesn't need to:
 # Python already puts this script's own directory (where the flat-
@@ -87,7 +81,7 @@ ARP_SEND_FAILURE_THRESHOLD = 3
 def placeholder_desired_state() -> DesiredState:
     """The default when --db-path isn't given. See
     controller/desired_state.py's db_backed_desired_state for the real
-    Milestone 4 source (devices + device_bindings) -- this placeholder
+    source (devices + device_bindings) -- this placeholder
     still exists for running against a worker with no real device data
     behind it yet. Deliberately raises rather than guessing at a
     "safe-looking" empty target list -- an empty DesiredState would
@@ -147,15 +141,12 @@ def run(
     why it must open that connection itself rather than being handed
     health_conn/policy_conn) for the duration of this call, stopped in
     the `finally` block below alongside the heartbeat pacer. None (the
-    default) means no discovery loop runs, matching this parameter's
-    absence before 2026-08-30 -- existing callers that don't pass it see
-    no behavior change.
+    default) means no discovery loop runs.
 
     enable_rtnetlink, if True, starts
     controller/rtnetlink_listener.py's live RTM_NEWNEIGH listener
     alongside the discovery snapshot loop above -- the higher-precedence
-    source discovery.py's own docstring flagged as still unbuilt until
-    2026-08-30. Also stopped in the `finally` block below. Independent
+    source. Also stopped in the `finally` block below. Independent
     of discovery_interval -- both can run together (the snapshot catches
     anything the live listener missed, e.g. a device already-idle before
     this process started), matching the design doc's own layered
@@ -171,8 +162,8 @@ def run(
     adguard_discovery_interval, if given (not None), starts
     controller/adguard_discovery.py's periodic querylog correlation on
     its own background thread and its own DB connection (same reasoning
-    as discovery_interval above) -- Milestone 4's "AdGuard query-log
-    observations (confirms active IP usage)" discovery source. Only
+    as discovery_interval above) -- a discovery source that confirms
+    active IP usage from AdGuard's query log. Only
     refreshes last_seen_at for bindings another source already created;
     never creates one on its own (AdGuard's query log has no MAC).
     Independent of adguard_interval -- one pushes hard-deny rules TO
@@ -182,9 +173,8 @@ def run(
     active_scan_interval, if given (not None), starts
     controller/active_scan.py's periodic rate-limited ARP-nudge loop on
     its own background thread and its own DB connection (same reasoning
-    as discovery_interval above) -- Milestone 4's final discovery
-    source, "active, rate-limited ARP scanning (only when stale or
-    onboarding a new device)." Requires no adguard_url/credentials
+    as discovery_interval above) -- active, rate-limited ARP scanning
+    (only when stale or onboarding a new device). Requires no adguard_url/credentials
     (unlike adguard_interval/adguard_discovery_interval above) since it
     never touches AdGuard at all -- it only nudges the kernel's own
     neighbor-resolution state for stale device_bindings rows;
@@ -197,7 +187,7 @@ def run(
     on a large household LAN.
     category_fetch_interval, if given (not None), starts
     common/category_fetch.py's periodic subscription-blocklist refresh
-    (Phase 8) on its own background thread and its own DB connection
+    on its own background thread and its own DB connection
     (same reasoning as discovery_interval above) -- requires no
     adguard_url/credentials (same as active_scan_interval above) since it
     only fetches each category's OWN subscription_url and writes
@@ -208,31 +198,30 @@ def run(
 
     enable_network_sweep, if True, starts
     controller/network_sweep.py's own background thread and DB
-    connection (same reasoning as discovery_interval above) -- the real
-    fix for a confirmed gap found live 2026-09-08 (RoadMap.md's dated
-    entry): every discovery source above is purely reactive, so a
-    device that never generates traffic this box's own kernel happens
-    to observe is invisible to all of them, indefinitely. Unlike every
-    other background task here, its own interval isn't a `run()`
-    parameter at all -- it's admin-configurable from the dashboard
-    Settings page (`network_sweep_interval_minutes`,
-    `network_sweep_enabled`), re-read fresh on every check tick so a
-    settings change takes effect live, without a controller restart.
-    This parameter is only the process-level "start this subsystem at
-    all" switch (mirroring enable_rtnetlink's own on/off-only shape,
-    not active_scan_interval's configurable-interval shape).
+    connection (same reasoning as discovery_interval above): every
+    discovery source above is purely reactive, so a device that never
+    generates traffic this box's own kernel happens to observe is
+    invisible to all of them, indefinitely. Unlike every other
+    background task here, its own interval isn't a `run()` parameter at
+    all -- it's admin-configurable from the dashboard Settings page
+    (`network_sweep_interval_minutes`, `network_sweep_enabled`),
+    re-read fresh on every check tick so a settings change takes effect
+    live, without a controller restart. This parameter is only the
+    process-level "start this subsystem at all" switch (mirroring
+    enable_rtnetlink's own on/off-only shape, not active_scan_interval's
+    configurable-interval shape).
 
     mdns_lookup_interval, if given (not None), starts
     controller/mdns_lookup.py's periodic mDNS reverse-PTR hostname
     lookup on its own background thread and its own DB connection (same
-    reasoning as discovery_interval above) -- 2026-09-11, project owner's
-    request to see a connecting device's type on the "Devices awaiting
-    login" card. Requires no adguard_url/credentials or CAP_NET_RAW
-    (same shape as active_scan_interval above) -- it only sends a plain
-    UDP query to the mDNS multicast group and writes any resolved
-    hostname onto the relevant device_bindings row. mdns_lookup_limit
-    caps how many not-yet-resolved pending devices get probed per
-    cycle, same rate-limiting reasoning as active_scan_limit.
+    reasoning as discovery_interval above), feeding a connecting
+    device's type onto the "Devices awaiting login" card. Requires no
+    adguard_url/credentials or CAP_NET_RAW (same shape as
+    active_scan_interval above) -- it only sends a plain UDP query to
+    the mDNS multicast group and writes any resolved hostname onto the
+    relevant device_bindings row. mdns_lookup_limit caps how many
+    not-yet-resolved pending devices get probed per cycle, same
+    rate-limiting reasoning as active_scan_limit.
 
     block_page_ip, if given, is threaded through to
     adguard_sync.build_rules() so hard-deny rules also carry a
@@ -244,8 +233,7 @@ def run(
     A single failed reconcile cycle (a worker fault, a transient DB
     error) is logged and reported via health_conn rather than crashing
     the process -- matching the fail-open design's "controller drives
-    repair, not a crash" intent (RoadMap.md's Milestone 9 fault-
-    campaign). If the underlying socket itself dies (WorkerConnectionError
+    repair, not a crash" intent. If the underlying socket itself dies (WorkerConnectionError
     -- a broken pipe, connection reset, or EOF, as opposed to a healthy
     connection carrying an application-level fault), run() closes the
     dead client and tries exactly one fresh connection per loop
@@ -259,21 +247,18 @@ def run(
     have changed since the connection dropped.
 
     **This reconnect path is also triggered by a failed heartbeat, not
-    just a failed run_cycle() (added 2026-08-30, a real gap found during
-    this project's first live-container verification pass)**: if
-    desired state never changes across a worker restart, run_cycle()'s
-    own reconcile() correctly returns None every time (nothing new to
-    send) and never touches the connection at all -- with an unchanging
-    desired state, a dead worker could previously go undetected
-    indefinitely, since the heartbeat pacer's own failures were only
-    ever logged, never acted on. The heartbeat pacer is the one thing
-    that touches the connection every single cycle regardless of
-    desired state, which is what makes it the thing that actually
-    notices. `heartbeat_worker_dead` (a threading.Event set by the
-    pacer's on_error callback, checked at the top of the main loop)
-    routes a heartbeat-detected failure through the exact same
-    `_reconnect()` codepath run_cycle()'s own WorkerConnectionError
-    uses, rather than duplicating the reconnect logic.
+    just a failed run_cycle()**: if desired state never changes across
+    a worker restart, run_cycle()'s own reconcile() correctly returns
+    None every time (nothing new to send) and never touches the
+    connection at all -- so a dead worker could otherwise go undetected
+    indefinitely. The heartbeat pacer is the one thing that touches the
+    connection every single cycle regardless of desired state, which is
+    what makes it the thing that actually notices. `heartbeat_worker_dead`
+    (a threading.Event set by the pacer's on_error callback, checked at
+    the top of the main loop) routes a heartbeat-detected failure
+    through the exact same `_reconnect()` codepath run_cycle()'s own
+    WorkerConnectionError uses, rather than duplicating the reconnect
+    logic.
 
     Known race, accepted rather than fixed here given the scope of this
     pass: the heartbeat pacer runs on its own thread and reads `client`
@@ -285,10 +270,10 @@ def run(
     bug. A future pass could add a lock around client reads/writes if
     the noise proves annoying in practice.
 
-    worker_ready_timeout/adguard_ready_timeout (Milestone 6's readiness
-    gates, added 2026-08-31 -- see controller/readiness.py) bound how
-    long this call blocks waiting for each real dependency to actually
-    answer, rather than just having started: the initial worker connect
+    worker_ready_timeout/adguard_ready_timeout (see
+    controller/readiness.py) bound how long this call blocks waiting
+    for each real dependency to actually answer, rather than just
+    having started: the initial worker connect
     below retries for up to worker_ready_timeout seconds instead of
     failing on the very first attempt (closing the ordinary "arp-worker
     hasn't created its socket file yet" startup race docker-compose.yml's
@@ -319,13 +304,12 @@ def run(
     # rather than a lock is enough here since CPython's GIL makes a
     # single dict-item assignment/read atomic, matching this file's own
     # heartbeat_worker_dead precedent for cross-thread signaling without
-    # a full lock. Added 2026-08-31 to close a real, confirmed gap: a
-    # NIC-down test against a properly-isolated veth harness showed
-    # interception_runtime staying "running" throughout a sustained real
-    # ARP-send-failure window, because nothing upstream of
-    # worker.Worker.ConsecutiveSendFailures (added the same day) existed
-    # to carry that signal from the worker to here. See run_cycle's own
-    # docstring for how this gets turned into a fail_open report.
+    # a full lock. Without this, interception_runtime could keep
+    # reporting "running" through a sustained ARP-send-failure window
+    # (e.g. the bound interface going down), since nothing upstream of
+    # worker.Worker.ConsecutiveSendFailures would carry that signal from
+    # the worker to here. See run_cycle's own docstring for how this
+    # gets turned into a fail_open report.
     arp_send_health = {"consecutive_failures": 0}
 
     def _send_heartbeat() -> None:
@@ -338,23 +322,21 @@ def run(
     # Set by the heartbeat pacer's own error callback below when a
     # heartbeat fails with WorkerConnectionError -- checked at the top
     # of the main loop to trigger the exact same reconnect path
-    # run_cycle()'s own WorkerConnectionError handling uses. Added
-    # 2026-08-30 after a real gap found during this project's first
-    # live-container verification pass: if desired state never changes
-    # across a worker restart, run_cycle() never touches the connection
-    # at all (by design -- reconcile() returns None, nothing to send),
-    # so a dead worker was previously only ever noticed by whichever
-    # thread happened to actually try using the socket next -- which,
-    # with an unchanging desired state, could be never. The heartbeat
-    # pacer is the one thing that ALWAYS touches the connection every
-    # cycle regardless of desired state, making it the right place to
-    # actually detect this.
+    # run_cycle()'s own WorkerConnectionError handling uses. If desired
+    # state never changes across a worker restart, run_cycle() never
+    # touches the connection at all (by design -- reconcile() returns
+    # None, nothing to send), so a dead worker would otherwise only be
+    # noticed by whichever thread happens to actually use the socket
+    # next -- which, with an unchanging desired state, could be never.
+    # The heartbeat pacer is the one thing that ALWAYS touches the
+    # connection every cycle regardless of desired state, making it the
+    # right place to actually detect this.
     heartbeat_worker_dead = threading.Event()
 
-    # Added 2026-09-02, same cross-thread-signaling shape as
-    # heartbeat_worker_dead above: the worker's own unsolicited
-    # lease-expiry fault (see phase3/arp-worker's ipc.Server.Notify) is
-    # asynchronous, so it can arrive as the "reply" to whichever request
+    # Same cross-thread-signaling shape as heartbeat_worker_dead above:
+    # the worker's own unsolicited lease-expiry fault (see
+    # phase3/arp-worker's ipc.Server.Notify) is asynchronous, so it can
+    # arrive as the "reply" to whichever request
     # this connection happens to send next -- which, in practice, is
     # often a routine heartbeat rather than run_cycle()'s own
     # replace_targets/reconcile call. run_cycle()'s docstring documents
@@ -563,8 +545,8 @@ def run_cycle(
     its caller a replacement client. Returns the (possibly unchanged)
     AppliedState for the caller to pass back in next cycle.
 
-    consecutive_send_failures (added 2026-08-31) is the most recent
-    value of worker.Worker.ConsecutiveSendFailures, read from run()'s
+    consecutive_send_failures is the most recent value of
+    worker.Worker.ConsecutiveSendFailures, read from run()'s
     own arp_send_health (populated by the heartbeat pacer, which runs
     independently of this cycle) -- NOT re-fetched here, so this
     function stays the single writer of health_conn's mode/
@@ -590,7 +572,7 @@ def run_cycle(
             log.info("applied generation %d (%d targets)", next_gen, result.target_count)
 
         if policy_conn is not None:
-            # Milestone 7: recompute and publish DesiredPolicy every
+            # Recompute and publish DesiredPolicy every
             # cycle -- phase3/nftables-manager reads this directly from
             # the DB (see policy_state.py's own module doc), so this is
             # the only "push" step needed on this side.
@@ -612,16 +594,12 @@ def run_cycle(
         raise  # let run() handle reconnection -- see this function's own docstring
     except WorkerError as exc:
         # A real reply from a live worker, just an unhappy one -- most
-        # commonly the worker's own unsolicited lease-expiry fault
-        # (added 2026-09-02: the worker now actually sends this instead
-        # of silently self-correcting with zero signal, see
+        # commonly the worker's own unsolicited lease-expiry fault (see
         # phase3/arp-worker's ipc.Server.Notify). Distinguish that
         # specific, self-limiting case (repair_only -- the worker
         # already restored real MACs and stopped poisoning on its own)
         # from every other WorkerError (fail_open), so the dashboard's
-        # amber vs. red badge actually means something -- see
-        # health.report_repair_only()'s own docstring for why this was
-        # previously unreachable.
+        # amber vs. red badge actually means something.
         log.warning("reconcile cycle failed: %s", exc)
         if health_conn is not None:
             if exc.action == "entering_repair_only_mode":
@@ -652,10 +630,10 @@ def _build_db_backed_provider(
 
 
 def _purge_offlan_discovery_junk(conn: sqlite3.Connection) -> int:
-    """One-time cleanup for RoadMap finding #3 (2026-09-10): before
-    identity.record_binding() filtered non-LAN IPs, the discovery loop
-    recorded Docker-bridge (172.17.x) addresses off the host's docker0
-    interface as real `devices` rows. Delete every device row that is
+    """Cleanup for devices recorded before identity.record_binding()
+    filtered non-LAN IPs, when the discovery loop could record
+    Docker-bridge (172.17.x) addresses off the host's docker0 interface
+    as real `devices` rows. Delete every device row that is
     unmistakably that junk -- it has at least one binding, EVERY binding
     it has is outside the configured local_network, and it carries no
     human intent (no user, no group, not ignored, no label). A
@@ -936,7 +914,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Starting the AdGuard loops with no password would just
                 # spray 401s at AdGuard on every cycle -- and enough of
                 # those trip AdGuard's own brute-force lockout, which then
-                # locks out the dashboard too (observed 2026-09-10). Skip
+                # locks out the dashboard too. Skip
                 # them instead and say why; the periodic sync is a
                 # convenience, not a correctness gate, and an admin
                 # setting the password in dashboard Settings + restarting

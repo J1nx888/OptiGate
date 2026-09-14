@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 8: time-window evaluation for `schedules` rows.
+"""Time-window evaluation for `schedules` rows.
 
 `schedule_is_active()` is pure (no DB access) and does the actual
 day-of-week/time-of-day/time-zone arithmetic -- kept separate from
@@ -57,16 +57,11 @@ def schedule_is_active(schedule_row: sqlite3.Row, now_utc: datetime) -> bool:
     today_code = _DAY_CODES[local.weekday()]
 
     if start_minutes == end_minutes:
-        # Fixed 2026-09-02, a real bug found by code review: equal
-        # start/end times (e.g. "00:00" to "00:00") is the natural way
-        # an admin would type "block all day" -- but the same-day
-        # branch below evaluates `start_minutes <= now_minutes <
-        # end_minutes`, which is X <= now < X for any X, a range no
-        # integer ever satisfies. That silently made a full-day
-        # lockout schedule NEVER activate, on any day, with no error
-        # anywhere to reveal why. Treated as "active all day on a
-        # scheduled day" instead, matching what an admin who typed this
-        # almost certainly meant.
+        # Equal start/end times (e.g. "00:00" to "00:00") is the natural
+        # way to type "block all day" -- but the same-day branch below
+        # evaluates `start_minutes <= now_minutes < end_minutes`, a range
+        # no integer satisfies when they're equal. Treated as "active all
+        # day on a scheduled day" instead, matching the obvious intent.
         return today_code in days
 
     if start_minutes < end_minutes:
@@ -93,8 +88,8 @@ def active_override_for_target(
     existing override for the exact target it's about to write, so this
     is a defensive tie-break, not the normal case).
 
-    Pulled out of what used to be device-only active_override_for_device()
-    (2026-09-06) so a caller with only a user id in hand -- e.g. the user
+    Accepts a bare user/group/device id rather than requiring a full
+    device row, so a caller with only a user id in hand -- e.g. the user
     detail page's "what's active for this kid right now" display, which
     has no single device to check against -- doesn't need to fabricate
     one. `schedule_is_active_for_device()` below passes all three ids
@@ -155,12 +150,12 @@ def schedule_is_active_for_target(
     """Target-aware wrapper around schedule_is_active() -- the one choke
     point both controller/policy_state.py (via is_full_lockout_active()
     below) and controller/adguard_sync.py's build_category_deny_rules()
-    call instead of the bare clock check, so a Phase 12 override affects
-    both enforcement paths (nftables lockout AND DNS-tier category
-    blocks) without either module needing its own special case. Also
-    what active_schedules_for_target() below uses for the user detail
-    page's "what's active right now" display, generalized to accept a
-    bare user/group/device id rather than requiring a full device row.
+    call instead of the bare clock check, so an override affects both
+    enforcement paths (nftables lockout AND DNS-tier category blocks)
+    without either module needing its own special case. Also what
+    active_schedules_for_target() below uses for the user detail page's
+    "what's active right now" display, generalized to accept a bare
+    user/group/device id rather than requiring a full device row.
 
     A schedule is override-eligible if it's `is_mode = 1` OR
     `lockout_all = 1` -- see schedules.is_mode's own comment in
@@ -172,10 +167,7 @@ def schedule_is_active_for_target(
     path unconditionally, is_mode or not: a full lockout ("Bedtime", say)
     is a total blackout that's incompatible with being "in" any mode at
     all, so an admin deliberately shifting the target out of it is always
-    meant to lift it too -- found 2026-09-10 when prod's `lockout_all = 1,
-    is_mode = 0` "Bedtime" schedule couldn't be suppressed by "Shift mode
-    now" at all, stranding the device in quarantine_v4 despite the
-    explicit override (see RoadMap.md finding #10).
+    meant to lift it too.
 
     For an override-eligible schedule: an active override for this target
     means the schedule is active only if the override names IT
@@ -248,10 +240,9 @@ def is_full_lockout_active(conn: sqlite3.Connection, device: sqlite3.Row, now_ut
     (shifted into Free Time instead) via the same schedule_overrides
     mechanism a mode-flagged category-block schedule uses. Unlike a
     category-block schedule, this override-awareness applies to every
-    lockout_all schedule regardless of its own is_mode flag (fixed
-    2026-09-10, RoadMap.md finding #10) -- a full lockout is a total
-    blackout, not one of several coexisting modes, so any active shift
-    override for the target lifts it too.
+    lockout_all schedule regardless of its own is_mode flag -- a full
+    lockout is a total blackout, not one of several coexisting modes, so
+    any active shift override for the target lifts it too.
     """
     import matching  # local import: keeps schedule_is_active() usable with zero DB dependency
 

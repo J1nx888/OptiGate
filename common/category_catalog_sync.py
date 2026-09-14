@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
-"""The Categories page's "Add category from catalog" search picker
-(2026-09-11, project owner's explicit request): "so someone could click
-'Add' and select a specific category... provide the bulk of the
-categories needed." Rather than an admin having to go find a raw
-blocklist URL themselves, this maintains a searchable local catalog of
-ready-made subscription sources, sourced from
+"""The Categories page's "Add category from catalog" search picker:
+rather than an admin having to go find a raw blocklist URL themselves,
+this maintains a searchable local catalog of ready-made subscription
+sources, sourced from
 https://github.com/v2fly/domain-list-community's own `data/category-*`
-files (118 of them as of 2026-09-11, confirmed via GitHub's git-trees
-API -- the plain "contents" API silently truncates a directory listing
-past 1000 entries, and this repo's `data/` alone has 1,539 files, so
-the trees API's `recursive=1` is required, not just a nicety).
+files, fetched via GitHub's git-trees API with `recursive=1` -- the
+plain "contents" API silently truncates a directory listing past 1000
+entries, and this repo's `data/` has well over that many files.
 
 **Why this needs its own fetch logic, not just a URL paste into the
-existing subscription_url field**: confirmed live 2026-09-11 that
-v2fly's own *category* files (e.g. `data/category-games`) are entirely
-made of `include:<name>` lines pointing at other files -- zero literal
-domains of their own. Pasting one directly into a category's
-subscription_url would fetch successfully and silently produce zero
-domains. `common/category_fetch.py`'s `_resolve_includes()` (added the
-same day) already recursively follows that include graph at CATEGORY
-FETCH time, for any source that happens to use the convention -- this
-module is a different concern: which category NAMES to offer for
-picking in the first place, and which underlying v2fly file each one
-should point at.
+existing subscription_url field**: v2fly's own *category* files (e.g.
+`data/category-games`) are entirely made of `include:<name>` lines
+pointing at other files -- zero literal domains of their own. Pasting
+one directly into a category's subscription_url would fetch
+successfully and silently produce zero domains.
+`common/category_fetch.py`'s `_resolve_includes()` already recursively
+follows that include graph at CATEGORY FETCH time, for any source that
+happens to use the convention -- this module is a different concern:
+which category NAMES to offer for picking in the first place, and
+which underlying v2fly file each one should point at.
 
 Picking a catalog entry never itself becomes a category, is never
 assigned to anyone, and is never referenced by category_domains -- it
@@ -34,9 +30,9 @@ MAX_SCOPED_CATEGORY_DOMAINS) is the same as any other category.
 **Region filtering**: v2fly's file-naming convention splits some
 categories by region -- `category-games-!cn` (outside mainland China)
 vs `category-games-cn` (China only) vs a bare `category-games` (the
-union of both, confirmed live by fetching all three: the bare file is
-literally `include:category-games-cn` + `include:category-games-!cn`).
-For a region-split family, this module's `build_catalog()` keeps the
+union of both: the bare file is literally
+`include:category-games-cn` + `include:category-games-!cn`). For a
+region-split family, this module's `build_catalog()` keeps the
 `-!cn`-style file as the default/global entry (skipping the noisier
 bare-union file entirely) and tags the region-specific sibling(s) with
 their region code; a family with ONLY a region-specific file (no
@@ -88,11 +84,10 @@ _REGION_LABELS = {
 }
 
 # Base names where the FILE'S OWN NAME is a whole country identity
-# (confirmed live 2026-09-11 by reading the actual content -- e.g.
-# data/category-ir opens "# Iranian websites...") rather than a
+# (e.g. data/category-ir opens "# Iranian websites...") rather than a
 # trailing '-xx' suffix the classifier below can detect mechanically.
-# 'tm' (Turkmenistan telecom, confirmed by content) is dropped
-# entirely -- too niche to model a whole new region code for one file.
+# 'tm' (Turkmenistan telecom) is dropped entirely -- too niche to model
+# a whole new region code for one file.
 _WHOLE_NAME_REGION_OVERRIDE = {"ir": "ir", "ru": "ru", "media-ru-blocked": "ru"}
 _WHOLE_NAME_DROP = {"tm"}
 
@@ -215,11 +210,9 @@ def resolve_subscription_url(file_path: str) -> str:
 def _fetch_category_filenames(timeout: float) -> list[str]:
     """Fetches v2fly's own repo tree via GitHub's git-trees API with
     recursive=1 -- the plain "contents" API silently truncates past
-    1000 entries and this repo's data/ directory alone has 1,539 files,
-    confirmed live 2026-09-11 (contents API returned exactly 1000 with
-    no truncation indicator at all; the trees API's own `truncated`
-    field is the only reliable signal). Returns the bare 'category-*'
-    filenames under data/ (no 'data/' prefix)."""
+    1000 entries with no truncation indicator at all; the trees API's
+    own `truncated` field is the only reliable signal. Returns the bare
+    'category-*' filenames under data/ (no 'data/' prefix)."""
     text = category_fetch._fetch(_TREE_API_URL, timeout=timeout)
     try:
         payload = json.loads(text)
@@ -276,10 +269,9 @@ def start(
 ) -> threading.Thread:
     """Starts sync_category_catalog() running on its own daemon thread,
     ticking immediately on start (not waiting a full `interval` first --
-    see controller/periodic.py's own 2026-09-07 fix for exactly this
-    class of bug: a long default interval, 86400s here, would otherwise
-    mean a database that's never had a successful live sync stays on
-    the bundled day-one seed for a full day after every fresh install).
+    a long default interval, 86400s here, would otherwise mean a
+    database that's never had a successful live sync stays on the
+    bundled day-one seed for a full day after every fresh install).
     Opens its own DB connection lazily on that thread (sqlite3
     connections are single-thread). A failed cycle (network, malformed
     JSON) is logged and skipped -- the existing catalog (bundled seed or

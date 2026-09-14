@@ -29,15 +29,12 @@ def test_task_runs_on_the_given_thread_name():
 
 
 def test_task_runs_immediately_not_after_waiting_a_full_interval():
-    """Regression for a real bug (RoadMap.md, "categories not
-    pre-seeded"): every PeriodicTask consumer used to wait a full
-    `interval` before its very first cycle -- harmless at a 5s
-    reconciliation interval, but common/category_fetch.py's own 86400s
-    default meant category subscriptions could never populate until
-    controller had run continuously for a full day, which had never
-    actually happened. A long interval proves this isn't just "the
-    first tick happened to land inside the sleep window" -- it can only
-    pass if the first call happens near-instantly."""
+    """The first cycle must run immediately, not after waiting a full
+    `interval` -- otherwise a long-interval consumer like
+    common/category_fetch.py's 86400s default would never populate
+    until controller had run continuously for a full day. A long
+    interval here proves the first call happens near-instantly rather
+    than just landing inside a short sleep window by chance."""
     calls = []
     lock = threading.Lock()
 
@@ -61,19 +58,17 @@ def test_task_runs_immediately_not_after_waiting_a_full_interval():
 
 
 def test_stop_before_start_never_runs_the_task_at_all():
-    """The _stop.is_set() guard on the immediate call: calling stop()
-    before start() (already-covered as "safe" by lease.py's own tests,
-    for the no-thread-to-join case) sets the same Event a later start()
-    would otherwise race against -- without the guard, the new
-    immediate-first-tick behavior would run the task once anyway,
-    despite being told to stop first."""
+    """Calling stop() before start() sets the same Event a later
+    start() would otherwise race against -- without the _stop.is_set()
+    guard on the immediate call, the task would run once anyway despite
+    being told to stop first."""
     calls = []
 
     def task():
         calls.append(1)
 
     pt = PeriodicTask(0.02, task)
-    pt.stop()  # before start() -- see lease.py's own "stop before start is safe" coverage
+    pt.stop()  # before start()
     pt.start()
     time.sleep(0.05)
     pt.stop()
@@ -163,15 +158,11 @@ def test_on_success_is_not_called_when_task_raises():
 
 
 def test_on_error_itself_raising_does_not_kill_the_loop(caplog):
-    """Real production incident, 2026-09-11 (see this module's own
-    dated docstring): a real caller's on_error writes to the shared DB
-    (common/system_events.py's failure_recovery_callbacks()), and that
-    write can itself raise (sqlite3.OperationalError: database is
-    locked, on a real box with several containers hitting the DB at
-    once). That second exception used to have nowhere to go -- it
-    escaped uncaught and killed the whole background thread outright,
-    which is exactly what silently froze a real reconcile loop in
-    production. The loop must survive an on_error that itself raises."""
+    """A caller's on_error can itself raise (e.g. writing to the shared
+    DB via common/system_events.py's failure_recovery_callbacks() hits
+    sqlite3.OperationalError: database is locked). That second
+    exception must not escape and kill the whole background thread --
+    the loop must survive an on_error that itself raises."""
     task_calls = []
     lock = threading.Lock()
 
@@ -219,11 +210,9 @@ def test_on_success_itself_raising_does_not_kill_the_loop(caplog):
 
 
 def test_on_stop_fires_exactly_once_after_the_loop_exits():
-    """Added 2026-09-12 alongside `stop_requested` so
-    controller/rtnetlink_listener.py could delegate its own
-    thread/stop-Event bookkeeping to this class -- on_stop is that
-    listener's one guaranteed place to close its thread-affine sqlite
-    connection."""
+    """on_stop is the one guaranteed place a consumer like
+    controller/rtnetlink_listener.py can close a thread-affine
+    resource (e.g. its sqlite connection)."""
     events = []
     lock = threading.Lock()
 
@@ -301,9 +290,9 @@ def test_stop_requested_reflects_whether_stop_has_been_called():
 
 
 def test_on_success_and_on_error_alternate_correctly_across_a_transition():
-    """A real regression class: on_success firing for a FAILED cycle (or
-    vice versa) would silently corrupt system_events.py's own
-    failure/recovery transition tracking."""
+    """on_success firing for a FAILED cycle (or vice versa) would
+    silently corrupt system_events.py's own failure/recovery transition
+    tracking."""
     events = []
     lock = threading.Lock()
     should_fail = {"value": True}

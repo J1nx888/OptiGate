@@ -88,34 +88,29 @@ def test_get_custom_rules_strips_trailing_slash_from_base_url(monkeypatch):
 
 
 def test_get_custom_rules_rejects_missing_user_rules_key(monkeypatch):
-    # A key entirely missing is more anomalous than the confirmed-live null
-    # case below (wrong endpoint, incompatible AdGuard version) -- code
-    # review 2026-08-30 caught an earlier version of this fix treating this
-    # the same as null, which let sync_once() silently proceed to a
-    # destructive full-replace write on a merely malformed read. This must
-    # still raise and fail closed.
+    # A key entirely missing (wrong endpoint, incompatible AdGuard version)
+    # is more anomalous than the null case below and must still raise and
+    # fail closed, rather than letting sync_once() proceed to a destructive
+    # full-replace write on a malformed read.
     monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: _json_response({}))
     with pytest.raises(adguard_client.AdGuardError, match="user_rules"):
         adguard_client.get_custom_rules("http://127.0.0.1:3000", "admin", "x")
 
 
 def test_get_custom_rules_treats_null_user_rules_as_empty(monkeypatch):
-    # Confirmed live 2026-08-30: a freshly-configured AdGuard Home instance
-    # that has never had a custom rule set reports `"user_rules": null`
-    # (key PRESENT, value null), not `[]` -- see adguard_client.py's module
-    # docstring. This must NOT raise, or sync_once() could never complete
-    # its first cycle ever against a brand-new instance (it always reads
-    # before it writes).
+    # A freshly-configured AdGuard Home instance with no custom rule set
+    # yet reports `"user_rules": null` (key present, value null), not `[]`.
+    # This must NOT raise, or sync_once() could never complete its first
+    # cycle against a brand-new instance (it always reads before it writes).
     monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: _json_response({"user_rules": None}))
     assert adguard_client.get_custom_rules("http://127.0.0.1:3000", "admin", "x") == []
 
 
 def test_get_custom_rules_rejects_non_dict_top_level_response(monkeypatch):
-    # A bare JSON array/scalar at the top level is a different, more
-    # anomalous failure than the confirmed null-on-fresh-install quirk
-    # (wrong endpoint, a proxy/auth error page that happens to be valid
-    # JSON) and must still raise rather than being silently swallowed as
-    # "no rules yet" -- code review 2026-08-30.
+    # A bare JSON array/scalar at the top level (wrong endpoint, a proxy/
+    # auth error page that happens to be valid JSON) is a different,
+    # more anomalous failure than the null-on-fresh-install case and must
+    # still raise rather than being silently swallowed as "no rules yet".
     monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: _json_response(["not", "a", "dict"]))
     with pytest.raises(adguard_client.AdGuardError, match="JSON object"):
         adguard_client.get_custom_rules("http://127.0.0.1:3000", "admin", "x")
@@ -176,11 +171,9 @@ def test_http_error_is_wrapped_with_status_and_detail(monkeypatch):
     monkeypatch.setattr(adguard_client._OPENER, "open", fake_open)
     with pytest.raises(adguard_client.AdGuardError, match="HTTP 401") as excinfo:
         adguard_client.get_custom_rules("http://127.0.0.1:3000", "admin", "wrong")
-    # Added 2026-09-08, real gap found investigating an "AdGuard
-    # username/password not synced" report: callers need to tell a
-    # stale-credentials 401 apart from AdGuard being genuinely
-    # unreachable (status_code is None for that case, see the test
-    # right below) -- see dashboard.py's _optigate_rewrite_status().
+    # Callers need to tell a stale-credentials 401 apart from AdGuard being
+    # genuinely unreachable (status_code is None for that case, see the
+    # test right below) -- see dashboard.py's _optigate_rewrite_status().
     assert excinfo.value.status_code == 401
 
 
@@ -258,8 +251,7 @@ def test_refresh_filters_rejects_a_response_with_no_updated_count(monkeypatch):
 # ============================================================
 
 def test_normalize_query_log_time_truncates_nanosecond_fraction():
-    # The exact shape confirmed live 2026-08-31 against a real AdGuard
-    # Home instance's /control/querylog response.
+    # Matches the shape of a real AdGuard Home /control/querylog response.
     assert (
         adguard_client.normalize_query_log_time("2026-08-31T13:17:13.089285447Z")
         == "2026-08-31T13:17:13Z"
@@ -324,7 +316,7 @@ def test_get_query_log_rejects_a_non_dict_top_level_response(monkeypatch):
         adguard_client.get_query_log("http://127.0.0.1:3000", "admin", "x")
 
 
-# ---------------------------- Phase 8: native filter-list subscriptions ----
+# ---------------------------- native filter-list subscriptions ------------
 
 def test_get_filters_status_returns_the_filters_list(monkeypatch):
     monkeypatch.setattr(
@@ -342,11 +334,9 @@ def test_get_filters_status_rejects_a_response_missing_the_filters_list(monkeypa
 
 
 def test_request_raises_a_clear_error_on_a_truncated_response(monkeypatch):
-    """Real production incident (2026-09-11): AdGuard's
-    /control/filtering/status response grew past the old 1 MiB cap,
-    response.read(MAX_RESPONSE_BYTES) silently truncated it, and the
-    truncated body fed to json.loads() failed with a confusing
-    "Unterminated string" error instead of a clear "too large" one."""
+    """A response body exceeding MAX_RESPONSE_BYTES must raise a clear
+    "too large" error, not get silently truncated and fed to json.loads()
+    as a confusing "Unterminated string" failure."""
     oversized_body = b'{"filters": [' + b"1" * adguard_client.MAX_RESPONSE_BYTES + b"]}"
     monkeypatch.setattr(adguard_client._OPENER, "open", lambda r, timeout=None: StatefulFakeResponse(oversized_body))
     with pytest.raises(adguard_client.AdGuardError, match="exceeded"):
@@ -415,7 +405,7 @@ def test_set_filter_url_enabled_posts_the_expected_body(monkeypatch):
     }
 
 
-# ---------------------------- G3: SafeSearch / Restricted Mode ------------
+# ---------------------------- SafeSearch / Restricted Mode ----------------
 
 def test_get_safesearch_status_returns_the_config(monkeypatch):
     config = {
@@ -455,9 +445,7 @@ def test_set_safesearch_settings_puts_the_expected_body(monkeypatch):
 
 
 # ============================================================
-# DNS rewrites (optigate.home memorable-URL feature, RoadMap.md's dated
-# 2026-09-07 entry) -- confirmed live the same session against a real
-# AdGuard Home instance, see this module's own docstring.
+# DNS rewrites (optigate.home memorable-URL feature)
 # ============================================================
 
 def test_get_rewrites_returns_the_plain_list(monkeypatch):

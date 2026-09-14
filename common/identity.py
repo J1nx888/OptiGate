@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Phase 3 identity model (Milestone 4): recording observed MAC<->IPv4
-bindings and the network/identity event log that feeds them.
+"""Identity model: recording observed MAC<->IPv4 bindings and the
+network/identity event log that feeds them.
 
 See db.py's device_bindings/network_events schema comments and
 docs/design/phase3-technical-design.md section 7 for the design this
-implements. This module's own claim used to end here saying "nothing in
-the proxy/dashboard enforcement path reads any of this yet" -- corrected
-2026-09-09, since that stopped being true a long time ago:
-common/device_identity.py's resolve_device()/resolve_user_for_device()
-(used by every proxy helper and the dashboard's own Report page) both
-read device_bindings directly, and controller/desired_state.py has been
-a real, running consumer since the interception profile shipped.
+implements. common/device_identity.py's resolve_device()/
+resolve_user_for_device() (used by every proxy helper and the
+dashboard's own Report page) read device_bindings directly, and
+controller/desired_state.py is a real, running consumer of it too.
 """
 from __future__ import annotations
 
@@ -35,9 +32,8 @@ def record_binding(
     """Record one MAC<->IP observation.
 
     Idempotent for a repeated (mac, ip) pair -- just bumps last_seen_at.
-    Handles the two conflict shapes the v2 roadmap's "MAC/IP conflict
-    handling" requirement calls for, deactivating whichever prior
-    binding is now stale and logging a network_events row for each:
+    Handles two conflict shapes, deactivating whichever prior binding
+    is now stale and logging a network_events row for each:
 
       - IP reassigned: this ipv4_address was actively bound to a
         DIFFERENT mac_address (e.g. a departed device's DHCP lease
@@ -48,49 +44,44 @@ def record_binding(
     Reuses whatever device_id (if any) an existing binding for the same
     mac_address already carries, or a `devices` row whose mac_address
     already matches -- this is never a heuristic guess (hostname/vendor
-    matching, which the roadmap's "never auto-merge devices solely by
-    hostname/vendor" rule forbids), only an exact mac_address match.
+    matching is deliberately never used to auto-merge devices), only an
+    exact mac_address match.
 
-    **Phase 4 addition, 2026-08-31**: a MAC this function has genuinely
-    NEVER seen before (no `devices` row, and no `device_bindings` row
-    of any kind -- active or inactive -- has ever existed for it
-    either) gets a brand-new, unassociated `devices` row auto-created
-    for it (`is_authenticated = 0`, `ignored = 0`, no `user_id`) rather
-    than being left with a dangling `device_id = NULL` binding
-    requiring a human to notice and manually associate it. This closes
-    a real gap `controller/desired_state.py`'s own docstring didn't
-    used to have to think about: a `device_id = NULL` binding is
-    invisible to that module's `JOIN`, so a brand-new device previously
-    got NO interception of any kind (full, unfiltered access) until
-    someone happened to visit the dashboard and create it manually --
-    the opposite of Phase 4's "gate any newly-seen MAC by default."
-    `is_authenticated = 0` (not the `devices` table's own schema
-    default of `1`) is deliberate: that default exists for a device an
-    admin creates directly through today's dashboard (an admin manually
-    adding a device already implies trust), not for a MAC nobody has
-    looked at yet -- see `common/policy_class.py`'s `classify_device()`,
-    which puts a device with `is_authenticated = 0` into `PREAUTH`.
+    A MAC this function has genuinely NEVER seen before (no `devices`
+    row, and no `device_bindings` row of any kind -- active or inactive
+    -- has ever existed for it either) gets a brand-new, unassociated
+    `devices` row auto-created for it (`is_authenticated = 0`,
+    `ignored = 0`, no `user_id`) rather than being left with a dangling
+    `device_id = NULL` binding requiring a human to notice and manually
+    associate it: a `device_id = NULL` binding is invisible to
+    `controller/desired_state.py`'s own `JOIN`, so a brand-new device
+    would otherwise get NO interception of any kind (full, unfiltered
+    access) until someone happened to visit the dashboard and create it
+    manually. `is_authenticated = 0` (not the `devices` table's own
+    schema default of `1`) is deliberate: that default exists for a
+    device an admin creates directly through today's dashboard (an
+    admin manually adding a device already implies trust), not for a
+    MAC nobody has looked at yet -- see `common/policy_class.py`'s
+    `classify_device()`, which puts a device with `is_authenticated = 0`
+    into `PREAUTH`.
 
     This auto-create only ever fires the FIRST time a given MAC is ever
     recorded -- once any `device_bindings` row exists for a MAC (even
     an inactive, long-superseded one), this function never auto-creates
     a `devices` row for it again, so an already-known-but-unassociated
     device from before this feature shipped is deliberately left alone
-    (per an explicit 2026-08-31 product decision: no retroactive
-    backfill, only newly-observed MACs going forward) even across a
-    later DHCP renewal.
+    (no retroactive backfill, only newly-observed MACs going forward)
+    even across a later DHCP renewal.
 
-    **Off-LAN guard (2026-09-10, RoadMap finding #3):** discovery
-    watches every interface's neighbour table, including the host's
-    `docker0` bridge, so it observes 172.17.x container addresses and
-    -- before this -- recorded them as real `devices` rows. Any IP
-    outside the configured `local_network` is dropped here, at the one
-    chokepoint every binding-creating discovery source
-    (`controller/discovery.py` snapshots, `controller/rtnetlink_listener.py`)
-    funnels through. An unset `local_network` means the operator has
-    turned the LAN check off (see `matching.ip_in_configured_lan`); in
-    that mode nothing is dropped, same as everywhere else that helper is
-    consulted.
+    **Off-LAN guard:** discovery watches every interface's neighbour
+    table, including the host's `docker0` bridge, so it can observe
+    172.17.x container addresses. Any IP outside the configured
+    `local_network` is dropped here, at the one chokepoint every
+    binding-creating discovery source (`controller/discovery.py`
+    snapshots, `controller/rtnetlink_listener.py`) funnels through. An
+    unset `local_network` means the operator has turned the LAN check
+    off (see `matching.ip_in_configured_lan`); in that mode nothing is
+    dropped, same as everywhere else that helper is consulted.
     """
     import matching  # local: keep common/identity import-light, mirror ip_in_configured_lan's own style
 
@@ -100,16 +91,15 @@ def record_binding(
 
     seen_at = seen_at or db.now_iso()
 
-    # Wrapped in an explicit transaction (fixed 2026-09-02, a real race
-    # found by code review): every statement in _record_binding_locked()
-    # below used to run as its own independent autocommit (common/db.py
-    # opens connections with isolation_level=None), so two
-    # near-simultaneous record_binding() calls for the same IP with
-    # different MACs (plausible: the rtnetlink listener and a periodic
-    # discovery snapshot both observing at once) could each read "no
-    # active conflict" before either wrote its own INSERT, leaving TWO
-    # active=1 device_bindings rows for the same IP --
-    # device_identity.resolve_device()'s `ORDER BY last_seen_at DESC
+    # Wrapped in an explicit transaction: without this, every statement
+    # in _record_binding_locked() below would run as its own independent
+    # autocommit (common/db.py opens connections with
+    # isolation_level=None), so two near-simultaneous record_binding()
+    # calls for the same IP with different MACs (e.g. the rtnetlink
+    # listener and a periodic discovery snapshot both observing at once)
+    # could each read "no active conflict" before either wrote its own
+    # INSERT, leaving TWO active=1 device_bindings rows for the same IP
+    # -- device_identity.resolve_device()'s `ORDER BY last_seen_at DESC
     # LIMIT 1` would then pick one nondeterministically, attributing
     # traffic to the wrong device. `BEGIN IMMEDIATE` acquires SQLite's
     # write lock up front (not deferred to the first write inside), so
@@ -219,9 +209,7 @@ def _record_binding_locked(
             observed_at=seen_at,
             payload=None,
         )
-        # Fixed 2026-09-09, real gap found live investigating "why
-        # doesn't the network sweep show anything on the Events page":
-        # this auto-create was already recorded in network_events (see
+        # This auto-create is already recorded in network_events (see
         # above), but that table has no dashboard page of its own --
         # only this project's own DB-level tooling ever reads it. A
         # brand-new device appearing for the first time is exactly the
@@ -277,27 +265,23 @@ def create_pending_device(conn: sqlite3.Connection, mac_address: str, seen_at: s
     `is_authenticated = 0`, deliberately overriding the `devices`
     table's own schema default of `1`) for a MAC.
 
-    Public (not `_`-prefixed) since 2026-09-11: this used to be a
-    private helper called only from record_binding() above, for a MAC
-    genuinely never seen before (gated by `_mac_has_any_prior_binding()`
-    -- see record_binding()'s own docstring for that "no retroactive
-    backfill" reasoning, which does NOT apply to this function's SECOND
-    caller). `common/device_identity.py`'s `resolve_device()` now also
-    calls this directly, deliberately bypassing that gate, for a real
-    gap found live the same day: deleting a device leaves its
-    `device_bindings` row orphaned (`device_id` NULL via `ON DELETE SET
-    NULL`) rather than deleted, and once `controller/policy_state.py`'s
-    matching fix correctly started routing that orphaned binding's
-    still-active device to the captive portal (PREAUTH, same as any
-    unknown device), the portal's own admin-action AND kid-login
-    handlers hit a second, previously-unreachable gap: `resolve_device()`
-    still required a real `devices` row and returned None, hard-failing
-    "we couldn't identify this device" with no path to ever recover --
-    retrying didn't help, since nothing ever created the missing row.
-    Skipping the "no retroactive backfill" gate here is deliberate: a
-    person is ACTIVELY, explicitly interacting with this exact device
-    on the captive portal right now (signing in, or an admin taking a
-    bypass/ignore/assign action) -- categorically different from
+    Called both from record_binding() above (for a MAC genuinely never
+    seen before, gated by `_mac_has_any_prior_binding()` -- see
+    record_binding()'s own docstring for the "no retroactive backfill"
+    reasoning, which does NOT apply to this function's second caller)
+    and from `common/device_identity.py`'s `resolve_device()`, which
+    calls this directly, deliberately bypassing that gate: deleting a
+    device leaves its `device_bindings` row orphaned (`device_id` NULL
+    via `ON DELETE SET NULL`) rather than deleted, and once that
+    orphaned binding's still-active device is routed to the captive
+    portal (PREAUTH, same as any unknown device), the portal's own
+    admin-action and kid-login handlers need `resolve_device()` to
+    actually produce a `devices` row rather than hard-failing "we
+    couldn't identify this device" with no path to recover. Skipping
+    the "no retroactive backfill" gate here is deliberate: a person is
+    ACTIVELY, explicitly interacting with this exact device on the
+    captive portal right now (signing in, or an admin taking a bypass/
+    ignore/assign action) -- categorically different from
     record_binding()'s own passive, no-human-involved background
     binding refresh, which is what that gate exists to guard against.
     """
@@ -332,10 +316,9 @@ def touch_binding_by_ip(
     only ever observe an IP, never a MAC (AdGuard's query log is the
     only caller today: DNS queries carry no link-layer information), so
     they can never discover a brand-new binding on their own, only
-    confirm an already-known one is still actively in use (RoadMap.md's
-    discovery precedence: "AdGuard query-log observations (confirms
-    active IP usage)"). Contrast with record_binding above, which
-    always has a MAC and can create/reassign bindings.
+    confirm an already-known one is still actively in use. Contrast
+    with record_binding above, which always has a MAC and can create/
+    reassign bindings.
 
     Only updates if `seen_at` is strictly newer than the binding's
     current last_seen_at -- a page of query-log history can include

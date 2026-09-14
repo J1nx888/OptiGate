@@ -1,7 +1,7 @@
-"""controller/adguard_discovery.py: Milestone 4's "AdGuard query-log
-observations (confirms active IP usage)" discovery source. Network
-access always goes through adguard_client, which every test here fakes
--- same pattern as test_controller_adguard_sync.py.
+"""controller/adguard_discovery.py: the AdGuard query-log discovery
+source, which confirms active IP usage. Network access always goes
+through adguard_client, which every test here fakes -- same pattern as
+test_controller_adguard_sync.py.
 """
 from __future__ import annotations
 

@@ -106,9 +106,8 @@ def test_heartbeat_round_trip():
 
 
 def test_heartbeat_parses_consecutive_send_failures():
-    # worker.Worker.ConsecutiveSendFailures, added 2026-08-31 to close
-    # the health-visibility gap a NIC-down test found: a sustained ARP
-    # send failure used to be invisible to the controller entirely.
+    # A sustained ARP send failure must be visible to the controller,
+    # not silently swallowed.
     client, worker_sock = _make_pair()
     try:
         def fake_worker():
@@ -323,14 +322,12 @@ def test_concurrent_calls_from_multiple_threads_do_not_corrupt_the_stream():
 
 
 def test_close_waits_for_an_in_flight_request_instead_of_racing_it():
-    """Regression test for a real race (fixed 2026-09-02): unlike every
-    other WorkerClient method, close() didn't hold self._lock, so it
-    could run concurrently with another thread still blocked mid-request
-    inside _read_frame()'s socket.recv() -- e.g. run()'s _reconnect()
-    closing a client the heartbeat pacer thread is still using.
-    Confirms close() now BLOCKS until an in-flight request's own lock
-    hold ends (here, via that request's own recv() timeout firing),
-    rather than returning immediately and racing it."""
+    """close() must hold self._lock like every other WorkerClient method,
+    so it can't run concurrently with another thread still blocked
+    mid-request inside _read_frame()'s socket.recv() -- e.g. run()'s
+    _reconnect() closing a client the heartbeat pacer thread is still
+    using. Confirms close() BLOCKS until an in-flight request's own lock
+    hold ends, rather than returning immediately and racing it."""
     client, worker_sock = _make_pair()
     client._sock.settimeout(0.3)  # short, so the test doesn't wait long
     try:

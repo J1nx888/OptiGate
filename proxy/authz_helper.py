@@ -8,18 +8,19 @@ sni_helper.py's own trusted/bump/splice checks to run against first.
 
 Protocol (format `%>a %DST %PATH %DATA`): one line per request, four
 percent-encoded fields, respond "OK" or "ERR". The trailing %DATA field is
-always "-" (the `acl authz_allowed external authz_check` line passes no
-static argument) and is otherwise unused -- it must still be declared and
+always "-" and otherwise unused -- it must still be declared and
 consumed, because Squid always appends %DATA to an external_acl_type FORMAT
 that doesn't already include it (see squid.conf.template's comment).
 
-Updated 2026-08-30 for Squid's intercept mode (RoadMap.md's "Squid:
-explicit-proxy-with-login -> transparent intercept" section): %LOGIN is
-gone -- identity is now resolved from `%>a` (the client's source IP) via
+Identity is resolved from `%>a` (the client's source IP) via
 common/device_identity.py's device_bindings-based lookup, same as
 sni_helper.py.
 
-Decision order for a bump-mode domain:
+For a plain-HTTP request, an unconfigured or 'trusted' domain is allowed
+outright and a 'splice' domain gets the same per-user/group/device check
+as sni_helper.py's handle_splice() -- mirroring what would happen over
+HTTPS, since plain HTTP never reaches sni_helper.py's own checks. Only
+'bump'-mode domains go through the full decision order below:
   1. Client's IP must resolve to a known device (any device -- a bare
      device_bindings match, not a user), and be inside the configured LAN.
   2. Domain must be globally allowed, or assigned to this device's user,
@@ -27,52 +28,17 @@ Decision order for a bump-mode domain:
      common/matching.py's device_domain_reason().
   3. If it's the Crunchyroll domain: resolve watch/playback/series requests
      to their parent show via the CMS API (cached) and check the user's
-     show list. CMS metadata-only requests are always allowed (matches v1).
-     Requires a resolved user -- user_shows has no group/device
-     equivalent, see decide()'s own "show_requires_user" case.
+     show list. CMS metadata-only requests are always allowed. Requires a
+     resolved user -- user_shows has no group/device equivalent, see
+     decide()'s own "show_requires_user" case.
   4. Otherwise: the request's path must match one of the domain's
-     configured allowed-paths. **Changed 2026-09-07 (RoadMap.md's dated
-     entry, project owner's explicit direction)**: a domain with ZERO
-     configured paths used to allow every path by default ("admins only
-     need to curate paths for domains where that matters") -- switching a
-     domain to bump mode silently opened its entire site until someone
-     came back and narrowed it. Now a domain with no path rules allows
-     ONLY the bare root ("/") -- see `_path_allowed_or_bare_root()` --
-     so bump mode is deny-by-default beyond the homepage until an admin
-     deliberately adds path rules for whatever else should be reachable.
-     A domain that already has at least one path rule is unaffected --
-     only ITS OWN rules ever mattered for it, before or after this
-     change.
+     configured allowed-paths. A domain with no path rules allows ONLY
+     the bare root ("/") -- see `_path_allowed_or_bare_root()` -- so bump
+     mode is deny-by-default beyond the homepage until an admin adds
+     path rules for whatever else should be reachable. A domain with at
+     least one path rule is unaffected -- only its own rules matter.
 
 Every decision is logged (deduped) via logging_util.
-
-**Fixed 2026-08-31**: step 1/2 used to resolve straight to a `users` row
-(device_identity.resolve_user()) and only ever check
-`is_global or user_has_domain(...)` -- a device assigned to a GROUP (no
-user_id) resolved to no identity at all and was denied everything, and
-even a user-resolved device could never benefit from a group/device-level
-domain grant. See common/matching.py's device_domain_reason() docstring
-for the full bug writeup and RoadMap.md's dated entry.
-
-**Fixed 2026-09-08**: `decide()` used to unconditionally deny anything
-that wasn't `mode == 'bump'` -- correct for a fully-decrypted HTTPS
-request (sni_helper.py's own sni_bump check already filtered to bump-mode
-domains before this ever runs), but wrong for the PLAIN-HTTP case: a
-bump_v4 device's plain-HTTP request to an unconfigured domain, or a
-splice-mode domain it's actually authorized for, was denied here
-outright, even though the exact same domain over HTTPS would have been
-correctly spliced through by sni_helper.py's handle_splice(). This is
-the mechanism that made Netflix -- never configured anywhere -- get
-blocked specifically because bump was on for the visiting device: an
-unconfigured domain is deliberately default-allow at the DNS tier
-(controller/adguard_sync.py's own docstring), and this function was the
-one place that didn't honor that. Now mirrors handle_splice()'s own
-fix: an unconfigured domain is allowed (matching the DNS tier's default),
-a 'trusted' domain is always allowed unchecked (matching sni_helper.py's
-own handle_trusted()), and a 'splice' domain is allowed only if this
-device/user is actually authorized for it -- exactly what would have
-happened over HTTPS. Only 'bump'-mode domains still go through the full
-show/path-level refinement below.
 """
 from __future__ import annotations
 
@@ -96,12 +62,12 @@ def _split_host_port(dst: str) -> str:
 
 def _series_name(conn, series_id: str | None) -> str | None:
     """Best-effort human title for a Crunchyroll series id, stored on the
-    access_log row so the Report page can show the name next to the id
-    (owner request, 2026-09-11). Cheap, indexed, no network: if ANY user
-    has this show approved, `user_shows.series_name` already holds its
-    title. A blocked show nobody has approved returns None here -- the
-    Report page resolves and back-fills that case via cr_api at render
-    time, off the request path."""
+    access_log row so the Report page can show the name next to the id.
+    Cheap, indexed, no network: if ANY user has this show approved,
+    `user_shows.series_name` already holds its title. A blocked show
+    nobody has approved returns None here -- the Report page resolves
+    and back-fills that case via cr_api at render time, off the request
+    path."""
     if not series_id:
         return None
     row = conn.execute(
@@ -117,12 +83,11 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
 
     # Network-tier check first: a request whose source IP is not on the
     # configured LAN is refused regardless of whether it maps to a known
-    # device. Deliberately BEFORE identity resolution (2026-09-10): since
-    # common/identity.record_binding() now rejects off-LAN IPs at
-    # discovery time, an off-LAN client no longer has a device_bindings
-    # row to resolve -- but it must still be denied and logged here as
-    # `outside_lan`, exactly as before, so this check can't depend on a
-    # resolved identity.
+    # device. Deliberately before identity resolution: since
+    # common/identity.record_binding() rejects off-LAN IPs at discovery
+    # time, an off-LAN client has no device_bindings row to resolve, but
+    # must still be denied and logged as `outside_lan` -- so this check
+    # can't depend on a resolved identity.
     if not matching.ip_in_configured_lan(conn, client_ip):
         lan_uid, lan_uname, lan_did = device_identity.log_identity_fields(None, None)
         logging_util.log_access(
@@ -133,10 +98,9 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
 
     # Resolve the DEVICE first, not the user -- a group- or device-only
     # assignment has no `users` row at all, but is still a real identity
-    # (see common/matching.py's device_domain_reason()). Only a source IP
-    # with no active device_bindings row at all (never seen, or stale)
-    # gets the old "no identity" treatment: deny, unlogged, exactly as
-    # before this fix.
+    # (see common/matching.py's device_domain_reason()). A source IP
+    # with no active device_bindings row (never seen, or stale) is
+    # denied, unlogged.
     device = device_identity.resolve_device(conn, client_ip)
     if device is None:
         return False
@@ -147,10 +111,9 @@ def decide(conn, client_ip: str, dst: str, path: str, _data: str = "-") -> bool:
     domain = matching.find_domain(conn, hostname)
 
     if domain is None:
-        # Fixed 2026-09-08 -- see this module's own docstring for the
-        # full writeup: an unconfigured domain is deliberately
-        # default-allow at the DNS tier, so this plain-HTTP path must
-        # not re-deny it just because it isn't mode='bump'.
+        # Unconfigured domains are default-allow at the DNS tier -- this
+        # plain-HTTP path must not re-deny one just because it isn't
+        # mode='bump'.
         logging_util.log_access(
             conn, user_id=user_id, username=username, domain=hostname,
             path=path, allowed=True, reason="unconfigured_domain", device_id=device_id, ip_address=client_ip,
@@ -228,12 +191,10 @@ def _has_any_path_rules(conn, domain_id: int) -> bool:
 def _path_allowed_or_bare_root(conn, domain_id: int, path: str) -> bool:
     """Whether `path` is allowed for `domain_id`'s configured path rules,
     for both the generic bump-domain check above and Crunchyroll's own
-    "OTHER request shape" fallback below. **Changed 2026-09-07** -- see
-    this module's own docstring for the full reasoning: a domain with
-    ZERO configured rows in `domain_paths` used to allow every path;
-    now it allows only the bare root ("/"), deny-by-default otherwise.
-    A domain with at least one rule is unaffected -- delegates entirely
-    to `matching.path_allowed()`, same as before this change."""
+    "OTHER request shape" fallback below. A domain with zero configured
+    rows in `domain_paths` allows only the bare root ("/"),
+    deny-by-default otherwise; a domain with at least one rule delegates
+    entirely to `matching.path_allowed()`."""
     if _has_any_path_rules(conn, domain_id):
         return matching.path_allowed(conn, domain_id, path)
     return path == "/"
@@ -255,15 +216,12 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain, client_ip:
         return False
 
     if request.kind is cr_urls.RequestKind.OTHER:
-        # Not a recognized watch/playback/series/CMS shape. Same
-        # defense-in-depth v1 had: fall back to the configured path
-        # allowlist for this domain instead of allowing blindly, so an
-        # endpoint the classifier doesn't know about isn't automatically
-        # open. Same deny-by-default-beyond-root treatment as the generic
-        # bump-domain check above (2026-09-07) when zero paths are
-        # configured -- for Crunchyroll specifically, defaults.py seeds
-        # this domain with a real path list, so that fallback shouldn't
-        # normally be reached here at all.
+        # Not a recognized watch/playback/series/CMS shape. Falls back
+        # to the configured path allowlist for this domain instead of
+        # allowing blindly, so an endpoint the classifier doesn't know
+        # about isn't automatically open. defaults.py seeds this domain
+        # with a real path list, so this fallback shouldn't normally be
+        # reached.
         if _path_allowed_or_bare_root(conn, domain["id"], path):
             return True
         logging_util.log_access(
@@ -273,10 +231,9 @@ def _decide_crunchyroll(conn, user, hostname: str, path: str, domain, client_ip:
         return False
 
     if request.kind in (cr_urls.RequestKind.SERIES_PAGE, cr_urls.RequestKind.UP_NEXT):
-        # UP_NEXT (added 2026-09-10, RoadMap.md finding #1d) carries a
-        # series id directly in the URL, same as SERIES_PAGE -- no
-        # series_resolve round-trip needed, just the same direct
-        # user_has_show() check.
+        # UP_NEXT carries a series id directly in the URL, same as
+        # SERIES_PAGE -- no series_resolve round-trip needed, just the
+        # same direct user_has_show() check.
         allowed = True
         for series_id in request.ids:
             show_ok = matching.user_has_show(conn, user["id"], series_id)

@@ -1,9 +1,7 @@
-"""common/nic_health.py: the dashboard Health page's "NIC load balancing"
-card (2026-09-12, RoadMap.md's "Item 3 revisited" -- a real production
-sustained-upload failure traced to a single-queue NIC with RPS disabled
-and every interrupt pinned to one core). All functions read plain files
-by path, so these tests build a fake sysfs/procfs tree under tmp_path
-rather than depending on the real host's actual network interfaces.
+"""common/nic_health.py: NIC load-balancing checks used by the dashboard
+Health page. All functions read plain files by path, so these tests build
+a fake sysfs/procfs tree under tmp_path rather than depending on the real
+host's actual network interfaces.
 """
 from __future__ import annotations
 
@@ -59,8 +57,7 @@ def test_rps_enabled_false_when_every_rx_queue_is_all_zero(tmp_path, monkeypatch
 def test_rps_enabled_true_for_a_wide_comma_separated_mask(tmp_path, monkeypatch):
     """A machine with >32 CPUs formats rps_cpus as comma-separated 32-bit
     hex groups -- confirm the "any character outside 0,\" check handles
-    that shape too, not just the single-hex-string case a small box
-    like the real production Beelink actually has."""
+    that shape too, not just the single-hex-string case."""
     monkeypatch.setattr(nic_health, "SYS_CLASS_NET", tmp_path)
     _write(tmp_path / "enp1s0" / "queues" / "rx-0" / "rps_cpus", "1,00000000")
     assert nic_health.rps_enabled("enp1s0") is True

@@ -17,8 +17,7 @@ import db
 from ai_sites_seed import AI_SITE_DOMAINS
 
 # Infrastructure Crunchyroll's site depends on -- global, splice mode (never
-# decrypted, just a host-level pass-through once allowed). Carried over from
-# v1's allowed_sites.txt.
+# decrypted, just a host-level pass-through once allowed).
 GLOBAL_SPLICE_DOMAINS = [
     ("google\\.com", "Google"),
     ("gstatic\\.com", "Google static assets"),
@@ -55,31 +54,24 @@ TRUSTED_DOMAINS = [
 ]
 
 # Crunchyroll's own paths -- defense-in-depth for request shapes the
-# classifier doesn't specifically recognize. Carried over from v1's
-# allowed_paths.txt.
+# classifier doesn't specifically recognize.
 #
-# **2026-09-10 (RoadMap.md finding #1d, docs/design/crunchyroll-trace-
-# 2026-09-10/ANALYSIS.md item 4): the two blanket rules this list used to
-# carry -- `^/playback/v[0-9]+/` and `^/content/v[0-9]+/` -- were removed.**
-# Both predated common/cr_urls.py's PLAYBACK/UP_NEXT classifiers and had
-# turned into a live security gap: any request under either prefix that
-# the classifier didn't specifically recognize fell through to
-# proxy/authz_helper.py's OTHER-kind fallback, which consults exactly this
-# list -- so an unrecognized (or, before UP_NEXT existed, simply
-# unclassified) request under `/content/v.../` was blanket-ALLOWED
-# regardless of show ownership, not denied. `/playback/v.../` is fully
-# covered by PLAYBACK_URL_RE (the hard gate -- no manifest, no video,
-# without passing user_has_show()); `/content/v.../` needs the narrower
-# replacements below instead of one blanket allow, so a *future*
-# unrecognized shape under either prefix now fails CLOSED (denied,
-# `path_not_allowed`) instead of open. Confirmed safe to broaden the
-# `discover/` replacement below despite `/content/v.../discover/up_next/`
-# living under the same prefix: UP_NEXT_URL_RE intercepts and fully gates
-# that shape in common/cr_urls.py's classify() before path rules are ever
-# consulted, and `/discover/up_next/` is also in cr_urls.GUARDED_MARKERS
-# so even an unrecognized variant of it fails closed rather than falling
-# through to this list at all -- the negative lookahead below is a third,
-# belt-and-suspenders layer on top of those two.
+# No blanket `^/playback/v[0-9]+/` or `^/content/v[0-9]+/` rule here:
+# `/playback/v.../` is fully covered by PLAYBACK_URL_RE (the hard gate --
+# no manifest, no video, without passing user_has_show()); a blanket
+# `/content/v.../` rule would let an unrecognized request under that
+# prefix fall through to proxy/authz_helper.py's OTHER-kind fallback
+# (which consults exactly this list) and be allowed regardless of show
+# ownership. The narrower replacements below make an unrecognized shape
+# under either prefix fail CLOSED (denied, `path_not_allowed`) instead
+# of open.
+#
+# The `discover/` rule below excludes `up_next` by name even though
+# `/content/v.../discover/up_next/` lives under the same prefix:
+# UP_NEXT_URL_RE fully gates that shape in common/cr_urls.py's
+# classify() before path rules are ever consulted, and it's also in
+# cr_urls.GUARDED_MARKERS so an unrecognized variant fails closed too --
+# the negative lookahead here is a third, belt-and-suspenders layer.
 CRUNCHYROLL_PATHS = [
     r"^/$", r"^/\?",
     r"^/login", r"^/auth", r"^/api",
@@ -110,69 +102,54 @@ CRUNCHYROLL_PATHS = [
 ]
 
 
-# Phase 8 starter categories. URLs are from The Block List Project
+# Starter categories. URLs are from The Block List Project
 # (https://github.com/blocklistproject/Lists, MIT, actively maintained)
-# for all but "AI" (v2fly/domain-list-community, 2026-09-11 -- see that
-# category's own comment below for why it, and only it, was rebased) --
-# confirmed LIVE 2026-08-31/09-01 (not assumed from its README alone): each
-# fetched, format-checked (AdGuard/adblock rule syntax, matching
-# common/blocklist_parser.py), and entry-counted. Counts shift as the
-# upstream lists update; the ones noted below are what was true when this
-# was written, kept only to explain the is_global/scoped split the
-# dashboard's category routes actually enforce
+# for all but "AI" (v2fly/domain-list-community -- see that category's
+# own comment below for why it, and only it, was rebased). Counts shift
+# as the upstream lists update; the split below is what drives the
+# is_global/scoped behavior the dashboard's category routes enforce
 # (matching.MAX_SCOPED_CATEGORY_DOMAINS = 5000):
-#   - Porn (953,393), Gambling (278,856), Drugs (26,029), Fraud (256,268),
-#     Facebook (22,362) are all already over the threshold -- Everyone-only,
-#     regardless of what an admin later tries to scope them to.
-#   - TikTok (3,725), Twitter/X (1,193), WhatsApp (226) are small enough to
-#     scope to a specific kid/device if wanted.
+#   - Porn, Gambling, Drugs, Fraud, Facebook are all already well over
+#     the threshold -- Everyone-only, regardless of what an admin later
+#     tries to scope them to.
+#   - TikTok, Twitter/X, WhatsApp are small enough to scope to a
+#     specific kid/device if wanted.
 # None are seeded `is_global` by default -- an admin has to actually decide
 # to turn a category on (and for whom) from the Categories page; seeding
 # the row alone blocks nothing. None have any `category_domains` rows yet
 # either -- that only happens once something calls
 # `common/category_fetch.py`'s `fetch_and_sync_category()` (the
 # controller's own daily background loop, or the dashboard's "Sync now"
-# button), same as a freshly-seeded row with no data until its first real
-# fetch.
+# button).
 #
-# No public blocklist exists for "Weapons" (confirmed via research the
-# same session this list was written) -- seeded with subscription_url=
-# None, manual-curation-only, ready for an admin (or a future pass) to
-# add domains to directly from the category's Manage page.
+# No public blocklist exists for "Weapons" -- seeded with
+# subscription_url=None, manual-curation-only, ready for an admin to add
+# domains directly from the category's Manage page.
 _BLOCKLISTPROJECT_ADGUARD = "https://blocklistproject.github.io/Lists/adguard/{}-ags.txt"
 
-# 2026-09-11 (RoadMap.md, project owner's direct request to rebase this
-# list onto the new "Add category from catalog" v2fly integration):
-# checked every category below against v2fly/domain-list-community's
-# own catalog before changing anything, rather than assuming a rebase
-# was a clean swap. Only "AI" actually was:
-#   - AI: v2fly's "AI Services" (category-ai-!cn) resolves to 179 real
-#     domains (confirmed live 2026-09-11) -- a strict upgrade over the
-#     previous subscription_url=None (manual-curation-only, see
-#     AI_SITE_DOMAINS below, which stays seeded alongside this; a
-#     'manual' row and a 'subscription' row coexist fine, same as any
-#     other category that has both).
-#   - Adult: v2fly's "Porn" resolves to only ~6,500 domains vs.
-#     BlockListProject's current ~953,000 (confirmed live 2026-09-11) --
-#     a ~99% coverage drop for the single most safety-critical
-#     category here. Owner's explicit call: NOT worth it for catalog
-#     consistency alone. Left on BlockListProject, unchanged.
+# Checked every category below against v2fly/domain-list-community's own
+# catalog before rebasing anything onto it -- only "AI" turned out to be
+# a clean swap:
+#   - AI: v2fly's "AI Services" (category-ai-!cn) resolves to real
+#     domains, a strict upgrade over the previous subscription_url=None
+#     (manual-curation-only, see AI_SITE_DOMAINS below, which stays
+#     seeded alongside this; a 'manual' row and a 'subscription' row
+#     coexist fine).
+#   - Adult: v2fly's "Porn" list covers far fewer domains than
+#     BlockListProject's current one -- not worth the coverage drop for
+#     the single most safety-critical category here. Left on
+#     BlockListProject, unchanged.
 #   - Gambling/Drugs/Fraud & Scams/Weapons: v2fly has no equivalent
-#     category for any of these at all (confirmed by searching the full
-#     118-entry catalog, not assumed from a quick guess). Owner's
-#     explicit call: keep all four on their current BlockListProject
-#     sources (or, for Weapons, no source at all) rather than drop real
-#     protection with nothing to replace it.
+#     category for any of these at all. Kept on their current
+#     BlockListProject sources (or, for Weapons, no source at all)
+#     rather than drop real protection with nothing to replace it.
 #   - Facebook/TikTok/Twitter/X/WhatsApp: v2fly only offers one combined
 #     "Social Media" category, not per-service ones -- collapsing these
 #     four into it would lose the ability to toggle one platform
-#     without touching the others. Owner's explicit call: keep them
-#     separate, unchanged. (v2fly's combined Social Media category is
-#     still available to any admin who wants it, manually, via the
-#     Categories page's own "Add from catalog" picker.)
-# Do not revisit any of these five decisions without a specific new
-# reason -- they were each checked against real, live catalog data
-# before this comment was written, not assumed.
+#     without touching the others. Kept separate, unchanged. (v2fly's
+#     combined Social Media category is still available to any admin
+#     who wants it, manually, via the Categories page's own "Add from
+#     catalog" picker.)
 DEFAULT_CATEGORIES = [
     ("Adult", _BLOCKLISTPROJECT_ADGUARD.format("porn")),
     ("Gambling", _BLOCKLISTPROJECT_ADGUARD.format("gambling")),
@@ -188,8 +165,7 @@ DEFAULT_CATEGORIES = [
 
 
 def seed(conn) -> None:
-    # `protected` (2026-09-13, RoadMap.md, project owner's explicit
-    # request): these domains -- and the two loops/insert below -- are
+    # `protected`: these domains -- and the two loops/insert below -- are
     # infrastructure the Crunchyroll integration depends on, not sites an
     # admin picked, so they're not deletable from the dashboard and don't
     # show up on the general Domains page at all (see dashboard.py's
@@ -222,13 +198,11 @@ def seed(conn) -> None:
         "ON CONFLICT(pattern) DO UPDATE SET protected = 1",
         (db.now_iso(),),
     )
-    # No separate crunchyrollsvc.com playback-service domain: confirmed
-    # 2026-08-28 against Crunchyroll's own live webpack bundle that
-    # production playback is served from www.crunchyroll.com/playback (the
+    # No separate crunchyrollsvc.com playback-service domain: production
+    # playback is served from www.crunchyroll.com/playback (the
     # cr-play-service.*.crunchyrollsvc.com host is explicitly dev-only in
     # Crunchyroll's own config, never used by real traffic) -- already
-    # covered by the crunchyroll.com domain above. See
-    # docs/review-2026-08-28.md item 1.2.
+    # covered by the crunchyroll.com domain above.
     cr_row = conn.execute(
         "SELECT id FROM domains WHERE pattern = 'crunchyroll\\.com'"
     ).fetchone()
@@ -239,13 +213,13 @@ def seed(conn) -> None:
                 (cr_row["id"], pattern),
             )
 
-    # Real bug, RoadMap.md 2026-09-13: this runs on every proxy container
-    # start/restart, and INSERT OR IGNORE only skips a name that's
-    # CURRENTLY present -- it has no way to tell "never created yet"
-    # apart from "an admin deleted this on purpose" (e.g. "Weapons"),
-    # so a deliberately-removed starter category silently came back on
-    # the very next restart. deleted_category_names is dashboard.py's
-    # own record of every category name an admin has explicitly deleted
+    # This runs on every proxy container start/restart, and INSERT OR
+    # IGNORE only skips a name that's CURRENTLY present -- it has no way
+    # to tell "never created yet" apart from "an admin deleted this on
+    # purpose" (e.g. "Weapons"), so without this check a
+    # deliberately-removed starter category would silently come back on
+    # the next restart. deleted_category_names is dashboard.py's own
+    # record of every category name an admin has explicitly deleted
     # (db.add_deleted_category_name(), written from delete_category()/
     # bulk_delete_categories()) -- checked here so seeding respects it.
     deleted_names = set(db.get_deleted_category_names(conn))

@@ -1,12 +1,12 @@
-"""dashboard/captive_portal_server.py: Phase 4 milestone 3's
-captive-portal login server. Real integration test -- binds an
-ephemeral port and makes real HTTP requests, same style as
-test_block_page_server.py, since a stdlib http.server handler is what's
-actually under test, not something worth mocking. do_POST's DB access
-uses the `conn` fixture's own db.DB_PATH (a process-global db.py
-attribute), so the server's own request-handling threads -- which open
-their own connection per request, see the module's own docstring for
-why -- land on the exact same on-disk temp DB these tests set up.
+"""dashboard/captive_portal_server.py's captive-portal login server.
+Real integration test -- binds an ephemeral port and makes real HTTP
+requests, same style as test_block_page_server.py, since a stdlib
+http.server handler is what's actually under test, not something worth
+mocking. do_POST's DB access uses the `conn` fixture's own db.DB_PATH (a
+process-global db.py attribute), so the server's own request-handling
+threads -- which open their own connection per request, see the
+module's own docstring for why -- land on the exact same on-disk temp
+DB these tests set up.
 """
 from __future__ import annotations
 
@@ -66,14 +66,13 @@ def _get(server, path="/", host_header="captive.apple.com", method="GET"):
 
 
 def _post(server, username, password, label="My Device"):
-    """`label="My Device"` by default (2026-09-14, RoadMap.md: every
-    device-claiming action now requires a name up front) so every
-    existing call site below that doesn't care about the label
-    requirement itself keeps working unmodified. Pass `label=None` to
-    omit the field entirely (an old client / a bare resubmit), or
-    `label=""` to submit it present-but-blank -- both distinct from the
-    default, and both exercised by this file's own label-requirement
-    tests."""
+    """`label="My Device"` by default (every device-claiming action
+    requires a name up front) so every existing call site below that
+    doesn't care about the label requirement itself keeps working
+    unmodified. Pass `label=None` to omit the field entirely (an old
+    client / a bare resubmit), or `label=""` to submit it
+    present-but-blank -- both distinct from the default, and both
+    exercised by this file's own label-requirement tests."""
     fields = {"username": username, "password": password}
     if label is not None:
         fields["label"] = label
@@ -190,9 +189,8 @@ def test_successful_login_authenticates_the_device_and_shows_success(server, con
 
 
 def test_login_matches_username_case_insensitively(server, conn):
-    """Real live-testing feedback (RoadMap.md): a kid typing "Alex" for a
-    household username created as "alex" got a flat "Incorrect username or
-    password" -- nothing else about this login is case-sensitive."""
+    """Nothing else about this login is case-sensitive, so the username
+    lookup shouldn't be either."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     user_id = _add_user(conn, "kid1", "correcthorse")
 
@@ -205,10 +203,9 @@ def test_login_matches_username_case_insensitively(server, conn):
 
 
 def test_successful_login_stores_the_submitted_device_name(server, conn):
-    """2026-09-14, RoadMap.md, project owner's explicit request: every
-    device-claiming action on this portal now also captures a name for
-    the device, since before this a device that arrived here only ever
-    had a bare MAC address to show for itself on the Devices page."""
+    """Every device-claiming action on this portal must also capture a
+    name for the device -- otherwise a device that arrives here has only
+    a bare MAC address to show for itself on the Devices page."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")
 
@@ -270,10 +267,9 @@ def test_login_does_not_overwrite_an_existing_device_name(server, conn):
 
 
 def test_missing_device_name_does_not_spend_the_rate_limit_budget(server, conn):
-    """Same reasoning as the blank-form-submission case (RoadMap.md,
-    2026-09-10): a submission that can never succeed as-is shouldn't
-    burn the shared attempts budget a real guessing attempt is metered
-    against."""
+    """Same reasoning as the blank-form-submission case: a submission
+    that can never succeed as-is shouldn't burn the shared attempts
+    budget a real guessing attempt is metered against."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")
 
@@ -294,10 +290,9 @@ def test_success_page_has_no_bump_reminder_for_a_kid_with_no_other_devices(serve
 
 
 def test_success_page_shows_a_bump_reminder_when_the_same_user_has_a_bump_enabled_device_elsewhere(server, conn):
-    """Design sketch (RoadMap.md): logging in here only ever grants
-    DNS-tier access -- a kid whose usual device has full SSL-Bump
-    refinement would otherwise have no idea why this new device is more
-    limited."""
+    """Logging in here only ever grants DNS-tier access -- a kid whose
+    usual device has full SSL-Bump refinement would otherwise have no
+    idea why this new device is more limited."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     user_id = _add_user(conn, "kid1", "correcthorse")
     conn.execute(
@@ -327,9 +322,8 @@ def test_success_page_bump_reminder_ignores_a_different_users_bump_enabled_devic
 
 
 def test_login_never_sets_bump_enabled(server, conn):
-    """Phase 4's own design sketch: the login flow grants DNS-tier
-    access ONLY, never bump_enabled -- that stays a separate, deliberate
-    admin action."""
+    """The login flow grants DNS-tier access ONLY, never bump_enabled --
+    that stays a separate, deliberate admin action."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")
 
@@ -370,10 +364,9 @@ def test_wrong_password_does_not_authenticate(server, conn):
 
 
 def test_failed_login_records_the_attempting_devices_mac(server, conn):
-    # Real gap fixed 2026-09-07: dashboard.py's pending-devices card
-    # needs to answer "has this device already tried and been denied",
-    # which requires the failed-login event to actually be correlated
-    # to a device -- previously only client_ip/username were recorded.
+    # dashboard.py's pending-devices card needs to answer "has this
+    # device already tried and been denied", which requires the
+    # failed-login event to be correlated to a device.
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")
 
@@ -431,14 +424,14 @@ def test_login_ip_is_looked_up_independent_of_which_device_it_belongs_to(server,
 # ============================================================
 # Brute-force rate limiting -- built alongside the login form itself
 # rather than retrofitted later, per this project's standing
-# security-by-design practice (RoadMap.md's cross-cutting section).
+# security-by-design practice.
 # ============================================================
 
 # Pure sliding-window logic (is_limited/record_failure/clear, window
-# expiry) is now covered by tests/test_rate_limit.py against
+# expiry) is covered by tests/test_rate_limit.py against
 # common/rate_limit.RateLimiter directly, since that's where the logic
-# actually lives (2026-09-02) -- this file keeps only the integration-
-# level coverage below (real HTTP requests through the real handler).
+# actually lives -- this file keeps only the integration-level coverage
+# below (real HTTP requests through the real handler).
 
 
 def test_rate_limit_blocks_further_attempts_after_the_max(server, conn):
@@ -463,9 +456,9 @@ def test_rate_limit_blocks_further_attempts_after_the_max(server, conn):
 
 
 # ============================================================
-# Failed-login visibility on the dashboard's own Events page --
-# added 2026-09-02 alongside the rate-limiter refactor, so an admin has
-# somewhere to see a guessing attack besides docker compose logs.
+# Failed-login visibility on the dashboard's own Events page, so an
+# admin has somewhere to see a guessing attack besides docker compose
+# logs.
 # ============================================================
 
 def test_failed_kid_login_logs_a_system_event(server, conn):
@@ -540,15 +533,13 @@ def test_one_attempt_below_the_limit_still_succeeds_with_the_right_password(serv
 
 
 def test_a_success_does_not_reset_the_shared_failure_count(server, conn):
-    """Regression test for a real bug (fixed 2026-09-02): _LOGIN_LIMITER
-    is deliberately shared between the kid-login form and the portal
-    admin-action form (see _handle_admin_action's own comment), but a
-    prior version cleared it on EITHER surface's success -- so a normal
-    household member's kid login succeeding from a shared/NAT'd IP
-    would silently hand an in-progress admin-password guesser a fresh
-    budget. Neither surface may clear the other's (or even its own)
-    accumulated failures on success anymore; failures only age out of
-    the window on their own."""
+    """_LOGIN_LIMITER is deliberately shared between the kid-login form
+    and the portal admin-action form (see _handle_admin_action's own
+    comment) -- a normal household member's kid login succeeding from a
+    shared/NAT'd IP must not silently hand an in-progress admin-password
+    guesser a fresh budget. Neither surface may clear the other's (or
+    even its own) accumulated failures on success; failures only age
+    out of the window on their own."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _add_user(conn, "kid1", "correcthorse")
     _set_admin_credentials(conn)
@@ -574,9 +565,8 @@ def test_a_success_does_not_reset_the_shared_failure_count(server, conn):
 
 
 # ============================================================
-# Portal-side admin action -- the design sketch's "same portal screen"
-# alternative to Milestone 2's dashboard-based admin path, for an
-# admin physically at the gated device itself.
+# Portal-side admin action -- an alternative to the dashboard-based
+# admin path, for an admin physically at the gated device itself.
 # ============================================================
 
 def test_login_page_shows_the_admin_section(server):
@@ -623,9 +613,8 @@ def test_login_page_shows_a_group_dropdown_when_groups_exist(server, conn):
 
 
 def test_admin_bypass_sets_bypass_login_and_lands_the_device_in_authenticated(server, conn):
-    """End-to-end proof, not just the DB flag: after the fix to
-    common/policy_class.py's classify_device() (2026-08-31), bypass_login
-    alone is enough to actually leave PREAUTH."""
+    """End-to-end proof, not just the DB flag: bypass_login alone must be
+    enough to actually leave PREAUTH via classify_device()."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _set_admin_credentials(conn)
 
@@ -679,11 +668,10 @@ def test_admin_bypass_does_not_ask_for_a_name_when_the_device_already_has_one(se
 
 
 def test_admin_ignore_sets_ignored_and_excludes_the_device_from_filtering(server, conn):
-    """RoadMap.md item 22: bypass alone isn't enough for a device
-    running its own DNS-hijack-detecting security software -- it needs
-    full Ignore, previously only settable from the dashboard's Devices
-    page. This gives an admin standing at the gated device the same
-    one-click option `bypass` already has."""
+    """Bypass alone isn't enough for a device running its own
+    DNS-hijack-detecting security software -- it needs full Ignore. This
+    gives an admin standing at the gated device the same one-click
+    option `bypass` already has."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     _set_admin_credentials(conn)
 

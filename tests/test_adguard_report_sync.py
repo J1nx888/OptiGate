@@ -114,10 +114,9 @@ def test_writes_a_blocked_row_for_a_category_domain_hard_deny(conn, monkeypatch)
 
 
 def test_ordinary_allowed_lookup_from_a_known_device_writes_an_allowed_row(conn, monkeypatch):
-    """Finding #9: an entry whose answer is a real external IP, not the
-    block page -- the overwhelmingly common case -- from a device this
-    project tracks now DOES produce a Report row, just an allowed
-    (dns_tier_allowed) one, not a block."""
+    """An entry whose answer is a real external IP, not the block page --
+    the overwhelmingly common case -- from a tracked device must still
+    produce a Report row, just an allowed (dns_tier_allowed) one."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     monkeypatch.setattr(
         adguard_report_sync.adguard_client, "get_query_log",
@@ -147,12 +146,11 @@ def test_ordinary_allowed_lookup_from_an_unknown_device_writes_nothing(conn, mon
 
 
 def test_repeated_lookups_of_different_subdomains_collapse_into_one_allowed_row(conn, monkeypatch):
-    """The coarse site-key dedupe (finding #9) means a page that fans out
-    to a dozen subdomains of the same site collapses to one row within
-    log_access()'s 5-minute window, instead of a dozen. `written` counts
-    entries classified as loggable, same "not necessarily a new DB row"
-    semantics the hard-deny path above already has (log_access()'s own
-    dedupe decides that) -- the actual row count is the real assertion."""
+    """The coarse site-key dedupe means a page that fans out to a dozen
+    subdomains of the same site collapses to one row within
+    log_access()'s 5-minute window. `written` counts entries classified
+    as loggable, not DB rows written -- the row count is the real
+    assertion here."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
     monkeypatch.setattr(
         adguard_report_sync.adguard_client, "get_query_log",

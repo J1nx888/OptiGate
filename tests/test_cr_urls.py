@@ -42,8 +42,8 @@ def test_playback_via_manifest_prefix():
 
 
 def test_up_next_happy_path():
-    """RoadMap.md finding #1d: the "continue watching" feed carries the
-    series id directly in the path -- confirmed live 2026-09-10."""
+    """The "continue watching" feed carries the series id directly in
+    the path."""
     result = cr_urls.classify("https://www.crunchyroll.com/content/v2/discover/up_next/GYEXQKJG6")
     assert result.kind is RequestKind.UP_NEXT
     assert result.ids == ("GYEXQKJG6",)

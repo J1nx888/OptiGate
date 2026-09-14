@@ -97,22 +97,17 @@ class TokenManager:
 def series_id_of(entry: dict[str, Any]) -> str | None:
     """Return the parent series ID for a CMS object entry, or None if unknown.
 
-    Verified 2026-08-28 against real /content/v2/cms/objects/ responses
-    (GH #3): an 'episode' entry has episode_metadata.series_id; a 'series'
-    entry has no series_id-shaped field at all, only its own id;
-    season_metadata has no series_id field in the current API at all -- the
-    parent series is only present as the first half of a pipe-delimited
-    `identifier` string ("SERIESID|SEASONCODE"), which isn't reliable
-    enough to parse here, and isn't needed anyway since series_resolve.py
-    never looks up a season object in practice (only episode/playback
-    objects). The season_metadata.series_id branch was removed on that
-    basis. Only episode, season, and series types were sampled, though --
-    Crunchyroll's catalog also has movie/musicvideo/concert objects, which
-    could in principle reach this via a playback URL. The top-level
-    `series_id` fallback stays for that unverified-but-plausible case: it
-    never fired on any sampled entry, but costs nothing when absent, and
-    protects against silently failing closed on real content Crunchyroll
-    ships that this project just hasn't hit in practice.
+    An 'episode' entry has episode_metadata.series_id; a 'series' entry
+    has no series_id-shaped field, only its own id. season_metadata has
+    no series_id field in the current API -- the parent series is only
+    present as the first half of a pipe-delimited `identifier` string
+    ("SERIESID|SEASONCODE"), which isn't reliable enough to parse here,
+    and isn't needed since series_resolve.py never looks up a season
+    object directly (only episode/playback objects). The top-level
+    `series_id` fallback covers movie/musicvideo/concert object types
+    that could reach this via a playback URL -- costs nothing when
+    absent, and avoids silently failing closed on content this hasn't
+    been checked against.
     """
     episode_metadata = entry.get("episode_metadata")
     if isinstance(episode_metadata, dict):
@@ -120,8 +115,7 @@ def series_id_of(entry: dict[str, Any]) -> str | None:
         if isinstance(series_id, str) and series_id:
             return series_id.upper()
 
-    # Unverified against a real payload (no sampled entry had this), but
-    # cheap insurance for object types not sampled -- see docstring.
+    # Cheap fallback for object types not covered above -- see docstring.
     own_parent = entry.get("series_id")
     if isinstance(own_parent, str) and own_parent:
         return own_parent.upper()

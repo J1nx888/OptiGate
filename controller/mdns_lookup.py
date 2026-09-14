@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Best-effort device hostname discovery via mDNS reverse-PTR queries --
-RoadMap.md, 2026-09-11: the project owner's own request, after being
-asked to scope "pre-authentication" down to just "let me see the
-device type that's trying to connect" -- the "Devices awaiting login"
-card gets a Manufacturer column (common/oui_lookup.py, a pure offline
-MAC-prefix lookup, no networking involved) and a Hostname column, which
-this module feeds.
+"""Best-effort device hostname discovery via mDNS reverse-PTR queries,
+feeding the "Devices awaiting login" card's Hostname column (alongside
+the Manufacturer column from common/oui_lookup.py's offline MAC-prefix
+lookup).
 
 Distinct from every other controller/*.py discovery source: none of
 them can produce a human-readable device name at all (rtnetlink/
@@ -205,16 +202,14 @@ def reverse_lookup(ipv4_address: str, timeout: float = 1.0) -> str | None:
             except (socket.timeout, OSError):
                 return None
             if addr[0] != ipv4_address:
-                # Fixed 2026-09-11, found by code review: mDNS is a
-                # shared multicast channel, and this query's QU bit (see
-                # module docstring) asks the real responder to reply by
-                # unicast straight back to this socket -- so a legitimate
-                # answer always arrives FROM ipv4_address itself. Without
-                # this check, any other host on the segment answering
-                # with a PTR record matching the expected reverse-arpa
-                # name (a forged reply racing the real device, or just an
-                # unrelated bystander packet) was trusted and written
-                # into device_bindings.hostname as if it came from the
+                # mDNS is a shared multicast channel, and this query's
+                # QU bit (see module docstring) asks the real responder
+                # to reply by unicast straight back to this socket -- so
+                # a legitimate answer always arrives FROM ipv4_address
+                # itself. Without this check, a forged reply or
+                # unrelated bystander packet matching the expected
+                # reverse-arpa name could be written into
+                # device_bindings.hostname as if it came from the
                 # device we actually asked.
                 continue
             try:

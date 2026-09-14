@@ -1,13 +1,9 @@
 """controller/network_sweep.py: the active whole-subnet discovery sweep
-that closes the "silent device is invisible forever" gap (RoadMap.md's
-2026-09-08 dated entry). Reuses active_scan.nudge() directly rather
-than re-implementing the UDP-nudge trick, so these tests fake the
-network the exact same way tests/test_controller_active_scan.py
-already does: monkeypatching active_scan.socket.socket with a fake
-that records what it was asked to send, never touching a real network.
-The UDP-nudge technique itself was separately confirmed live against a
-real kernel (see active_scan.py's own module docstring) -- not
-re-verified here.
+that finds silent devices a passive listener would never see. Reuses
+active_scan.nudge() rather than re-implementing the UDP-nudge trick, so
+these tests fake the network the same way tests/test_controller_active_scan.py
+does: monkeypatching active_scan.socket.socket with a fake that records
+what it was asked to send, never touching a real network.
 """
 from __future__ import annotations
 
@@ -270,8 +266,8 @@ def test_run_loop_run_now_bypasses_disabled_and_interval(conn, monkeypatch):
 
 
 def test_run_loop_run_now_logs_a_system_events_info_row(conn, monkeypatch):
-    """Fixed 2026-09-09, real gap found live: clicking "Run now" visibly
-    did something, but nothing showed up on the Events page at all."""
+    """Clicking "Run now" must produce a visible system-events row, not
+    just a silent background action."""
     _reset_fake_socket(monkeypatch)
     db.set_setting(conn, "local_network", "192.168.1.0/30")
     conn.commit()
@@ -295,10 +291,8 @@ def test_run_loop_run_now_logs_a_system_events_info_row(conn, monkeypatch):
 
 
 def test_run_loop_automatic_sweep_does_not_log_a_system_event(conn, monkeypatch):
-    """The 'info' severity is deliberately scoped to an explicit admin
-    action, not the automatic schedule -- an automatic sweep completing
-    must stay just as silent on the Events page as it always has been,
-    matching the "not a firehose" principle this table was built on."""
+    """The 'info' severity is scoped to explicit admin actions only --
+    an automatic sweep completing must stay silent on the Events page."""
     _reset_fake_socket(monkeypatch)
     db.set_setting(conn, "local_network", "192.168.1.0/30")
     conn.commit()

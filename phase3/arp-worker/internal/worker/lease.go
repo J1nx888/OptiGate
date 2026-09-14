@@ -43,9 +43,8 @@ func (lm *LeaseMonitor) leaseDuration() time.Duration {
 // Heartbeat resets the lease clock. Call this whenever a valid
 // "heartbeat" IPC message arrives from the controller. A heartbeat
 // received after the lease has already expired is deliberately a
-// no-op -- see the RoadMap.md requirement that a worker must not
-// auto-resume a stale generation, only a Rearm following a fresh
-// replace_targets can do that.
+// no-op -- a worker must not auto-resume a stale generation on its
+// own; only a Rearm following a fresh replace_targets can do that.
 func (lm *LeaseMonitor) Heartbeat() {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()

@@ -1,15 +1,12 @@
 """controller/main.py: _resolve_adguard_credentials() and main()'s
 credential-requirement check.
 
-Background (RoadMap.md, 2026-09-10): the controller used to take its
-AdGuard admin credentials as --adguard-username/--adguard-password,
-filled from .env by docker-compose.yml. The dashboard, meanwhile, stores
-them in the `adguard_username`/`adguard_password` settings rows and keeps
-AdGuardHome.yaml's own hash in sync with those. The two drifted the first
-time an admin changed the password from the dashboard -- the controller
-kept sending the old one, 401ing on every cycle, which tripped AdGuard's
-brute-force lockout and locked the dashboard out too. The fix makes the
-DB settings the single source of truth for the controller as well.
+The DB settings (`adguard_username`/`adguard_password`, the same ones
+the dashboard writes and keeps AdGuardHome.yaml's hash in sync with) are
+the single source of truth for the controller's AdGuard credentials,
+with CLI flags only as an override -- if the controller instead cached
+its own copy, it would drift from a password changed via the dashboard
+and start 401ing on every cycle.
 """
 from __future__ import annotations
 

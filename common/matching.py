@@ -97,21 +97,18 @@ def _search_in_subprocess(rx: re.Pattern[str], text: str) -> bool:
 
 
 def _search_with_timeout(rx: re.Pattern[str], text: str) -> bool:
-    """Same as rx.search(text) is not None, but bounded -- added
-    2026-09-02 after code review flagged that domain_paths patterns are
-    admin-supplied and dashboard.py's own validation only confirms
-    re.compile() succeeds, never rejecting a catastrophic-backtracking
-    shape (e.g. a pattern with nested/overlapping quantifiers). Python's
-    stdlib `re` has no linear-time guarantee the way RE2 does, and this
-    project's common/ modules are deliberately stdlib-only (see
-    common/auth.py's own docstring on why -- the proxy container must
-    never need pip), so a third-party guaranteed-linear engine isn't an
-    option here.
+    """Same as rx.search(text) is not None, but bounded: domain_paths
+    patterns are admin-supplied and only validated by re.compile()
+    succeeding, never checked for a catastrophic-backtracking shape
+    (e.g. nested/overlapping quantifiers). Python's stdlib `re` has no
+    linear-time guarantee the way RE2 does, and this project's common/
+    modules are deliberately stdlib-only (see common/auth.py's own
+    docstring on why -- the proxy container must never need pip), so a
+    third-party guaranteed-linear engine isn't an option here.
 
-    Returns bool, not re.Match, since 2026-09-12 (see below) -- every
-    call site only ever checked truthiness, and a real re.Match object
-    isn't picklable across the subprocess boundary the non-main-thread
-    path now uses.
+    Returns bool, not re.Match -- every call site only ever checks
+    truthiness, and a real re.Match object isn't picklable across the
+    subprocess boundary the non-main-thread path uses.
 
     The actual attacker-facing risk: proxy/authz_helper.py's decide()
     (the only hot-path caller, via path_allowed() below) runs this
@@ -129,20 +126,15 @@ def _search_with_timeout(rx: re.Pattern[str], text: str) -> bool:
     doesn't exist there -- fine, since proxy/ only ever actually runs on
     Linux, see AGENTS.md).
 
-    **Real gap found 2026-09-11, fixed 2026-09-12**: the non-main-thread
-    case (`signal.signal()` raises ValueError there) used to fall back
-    to that SAME unguarded search -- silently disabling the ReDoS guard
-    entirely, not just failing to bound it as tightly. This wasn't a
-    hypothetical "future caller" any more by the time it was found:
-    find_categories_for_hostname() below is already called live from
+    On a non-main thread (`signal.signal()` raises ValueError there),
+    routes to _search_in_subprocess() instead of an unguarded search --
+    see that function's own comment for why a process. This matters
+    because find_categories_for_hostname() below is called live from
     dashboard.py's route handlers and adguard_report_sync.py, both
-    running on waitress's multi-threaded worker pool. Now routes to
-    _search_in_subprocess() instead -- see its own comment for why a
-    process rather than just accepting the unguarded search. A timeout
-    (either path) denies (fails closed), consistent with this project's
-    fail-closed convention (see docs/architecture/overview.md's
-    "everything is fail-closed by convention" section) rather than
-    treating an unmatchable-in-time pattern as an allow.
+    running on waitress's multi-threaded worker pool. A timeout (either
+    path) denies (fails closed), consistent with this project's
+    fail-closed convention, rather than treating an unmatchable-in-time
+    pattern as an allow.
     """
     if not hasattr(signal, "SIGALRM"):
         return rx.search(text) is not None
@@ -212,10 +204,7 @@ def user_has_domain(conn: sqlite3.Connection, user_id: int, domain_id: int) -> b
 
 def group_has_domain(conn: sqlite3.Connection, group_id: int, domain_id: int) -> bool:
     """group_domains mirrors user_domains exactly. Consulted by proxy
-    enforcement via device_domain_reason() below (fixed 2026-08-31 -- this
-    function existed since the v2 roadmap groundwork but was never actually
-    called from any enforcement path until then; see that function's own
-    docstring for the bug this closed)."""
+    enforcement via device_domain_reason() below."""
     row = conn.execute(
         "SELECT 1 FROM group_domains WHERE group_id = ? AND domain_id = ?",
         (group_id, domain_id),
@@ -226,8 +215,7 @@ def group_has_domain(conn: sqlite3.Connection, group_id: int, domain_id: int) ->
 def device_has_domain(conn: sqlite3.Connection, device_id: int, domain_id: int) -> bool:
     """device_domains grants one specific device access directly,
     independent of any user/group assignment. Consulted by proxy
-    enforcement via device_domain_reason() below (fixed 2026-08-31, same
-    as group_has_domain() above)."""
+    enforcement via device_domain_reason() below."""
     row = conn.execute(
         "SELECT 1 FROM device_domains WHERE device_id = ? AND domain_id = ?",
         (device_id, domain_id),
@@ -242,27 +230,17 @@ def device_domain_reason(conn: sqlite3.Connection, device: sqlite3.Row, domain: 
     group_id), then per-device direct assignment -- the first thing that
     matches wins.
 
-    **Fixed 2026-08-31 -- a real bug, found while scoping tighter Squid/
-    AdGuard integration (see RoadMap.md's dated entry)**: proxy/authz_helper.py
-    and proxy/sni_helper.py used to resolve identity via
-    device_identity.resolve_user() (an INNER JOIN on devices.user_id) and
-    then only ever check `is_global or user_has_domain(...)` inline -- so a
-    device assigned to a GROUP (user_id NULL) resolved to no identity at
-    all and was denied everything before even reaching a domain check, and
-    even a device that DID resolve to a user could never benefit from a
-    group_domains or device_domains grant, because nothing ever called
-    group_has_domain()/device_has_domain() at all. This function is the
-    single shared replacement for that old inline check, used by both proxy
-    helpers (which now resolve the *device* first, see
+    The single shared source of truth for this check, used by both proxy
+    helpers (which resolve the *device* first, see
     device_identity.resolve_device()) and controller/adguard_sync.py's
     build_splice_deny_rules() -- one place that knows all four axes, so
     Squid and AdGuard can never drift out of sync on what "authorized"
-    means again.
+    means.
 
     Returns a reason string (not a bare bool) so callers get their log
     line's reason for free, matching the existing "global_domain"/
     "user_domain" vocabulary and extending it with "group_domain"/
-    "device_domain" for the two axes this fix newly wires up.
+    "device_domain" for the other two axes.
     """
     if domain["is_global"]:
         return "global_domain"
@@ -275,32 +253,31 @@ def device_domain_reason(conn: sqlite3.Connection, device: sqlite3.Row, domain: 
     return None
 
 
-# Phase 8, confirmed live 2026-08-31: real category blocklists range from
-# tens to ~953K domains. Scoping a list that size to a subset of clients
-# via AdGuard's `$client=` custom-rule modifier is exactly what AdGuard's
-# own team calls "unworkable" for per-client blocklist assignment
-# (AdguardTeam/AdGuardHome#8103) -- a category at or under this many
-# domains can be assigned to a specific user/group/device
-# (controller/adguard_sync.py's build_category_deny_rules(), same
-# `$client=` mechanism as domain-level rules); a category over it can only
-# ever be `is_global` (enforced by dashboard/dashboard.py's category
-# routes), pushed to AdGuard as one of its OWN native filter subscriptions
-# instead (controller/adguard_sync.py's sync_category_subscriptions()).
-# Shared here (not just in adguard_sync.py) since dashboard.py -- a
-# separate container image, see tests/conftest.py's own note on what's
-# copied where -- needs the same number for its own validation and can
+# Real category blocklists range from tens to ~953K domains. Scoping a
+# list that size to a subset of clients via AdGuard's `$client=` custom-rule
+# modifier is exactly what AdGuard's own team calls "unworkable" for
+# per-client blocklist assignment (AdguardTeam/AdGuardHome#8103) -- a
+# category at or under this many domains can be assigned to a specific
+# user/group/device (controller/adguard_sync.py's
+# build_category_deny_rules(), same `$client=` mechanism as domain-level
+# rules); a category over it can only ever be `is_global` (enforced by
+# dashboard/dashboard.py's category routes), pushed to AdGuard as one of
+# its OWN native filter subscriptions instead
+# (controller/adguard_sync.py's sync_category_subscriptions()). Shared
+# here (not just in adguard_sync.py) since dashboard.py -- a separate
+# container image -- needs the same number for its own validation and can
 # only import from common/.
 MAX_SCOPED_CATEGORY_DOMAINS = 5000
 
 
 def category_applies_to_device(conn: sqlite3.Connection, device: sqlite3.Row, category: sqlite3.Row) -> bool:
-    """Whether `category` is blocked for `device` -- Phase 8's category
-    model, the OPPOSITE polarity from device_domain_reason() above (that's
-    an allow-list; this is a block-list). True if `category.is_global`, or
-    device's user/group/id has a row in category_users/category_groups/
-    category_devices. Mirrors device_domain_reason()'s explicit per-axis
-    style rather than one generic parameterized helper, matching this
-    module's own established idiom."""
+    """Whether `category` is blocked for `device` -- the OPPOSITE polarity
+    from device_domain_reason() above (that's an allow-list; this is a
+    block-list). True if `category.is_global`, or device's user/group/id
+    has a row in category_users/category_groups/category_devices. Mirrors
+    device_domain_reason()'s explicit per-axis style rather than one
+    generic parameterized helper, matching this module's own established
+    idiom."""
     if category["is_global"]:
         return True
     if device["user_id"] is not None:
@@ -331,10 +308,7 @@ def category_applies_to_device(conn: sqlite3.Connection, device: sqlite3.Row, ca
 # so a raw (unescaped-context) `*`, `+`, `?`, `(`, `|`, or `[` is a
 # reliable signal this row is a genuine custom pattern, not a plain
 # domain. Used by find_categories_for_hostname()'s slow path below to
-# cheaply skip the overwhelming majority of rows (confirmed live
-# 2026-09-07: every category_fetch.py-synced row and every
-# seed_defaults.py-seeded row, including the AI category's 1,195-domain
-# manual snapshot, is a plain literal -- this GLOB matches none of them).
+# cheaply skip the overwhelming majority of rows.
 _COMPLEX_PATTERN_GLOB = "*[*+?(|[]*"
 
 
@@ -356,18 +330,12 @@ def find_categories_for_hostname(conn: sqlite3.Connection, hostname: str) -> lis
     i.e. would block it, once that category is actually assigned to
     someone (is_global, or via category_users/groups/devices; this
     function doesn't check that part, only "is this domain a member").
-    Backs the Categories page's cross-category lookup tool (added
-    2026-09-06: an admin found the same domain, e.g. facebook.com,
-    plausibly listed in more than one category -- Facebook AND Gambling,
-    say -- and had no way to check that from the UI short of opening
-    every category one at a time).
+    Backs the Categories page's cross-category lookup tool, letting an
+    admin check whether a domain (e.g. facebook.com) is listed in more
+    than one category without opening each one individually.
 
-    **Performance-rewritten 2026-09-07** (real bug found by live user
-    testing: a search against this project's actual seeded data --
-    Adult alone has 953,197 domains -- took up to 51 seconds for a
-    miss, since the original version fetched and regex-compiled/matched
-    every single `category_domains` row across every category, one at a
-    time, in Python). Now two passes instead of one linear scan:
+    Two passes instead of one linear scan, since a single category can
+    have hundreds of thousands of domains:
 
     1. **Fast path**: every candidate suffix of `hostname`
        (`_candidate_exact_patterns()`) is re.escape()'d and checked via
@@ -377,15 +345,14 @@ def find_categories_for_hostname(conn: sqlite3.Connection, hostname: str) -> lis
        `_domain_regex()`'s suffix-anchored semantics for any row that's
        a plain literal domain. This alone resolves essentially every
        real row: every `category_fetch.py`-synced and
-       `seed_defaults.py`-seeded row (100% of this project's actual
-       data) is a plain `re.escape()`d literal.
+       `seed_defaults.py`-seeded row is a plain `re.escape()`d literal.
     2. **Slow path**, only for categories the fast path didn't already
        match: real `_domain_regex()` + `_search_with_timeout()`
-       evaluation (the original approach), but scoped to just the rows
-       flagged by `_COMPLEX_PATTERN_GLOB` as NOT looking like a plain
-       literal -- a hand-typed custom regex the fast path can't
-       recognize via exact equality. This is a tiny fraction of rows in
-       any real deployment, so the remaining linear scan stays cheap.
+       evaluation, but scoped to just the rows flagged by
+       `_COMPLEX_PATTERN_GLOB` as NOT looking like a plain literal -- a
+       hand-typed custom regex the fast path can't recognize via exact
+       equality. This is a tiny fraction of rows in any real deployment,
+       so the remaining linear scan stays cheap.
 
     Flags a match that's also covered by that category's own
     `category_overrides` (an admin-added exception -- the category's
@@ -424,7 +391,7 @@ def find_categories_for_hostname(conn: sqlite3.Connection, hostname: str) -> lis
         # re.escape()'d by construction, so it can NEVER match the
         # complex-pattern GLOB -- only a hand-typed manual addition
         # ever could. Subscription rows are the huge majority of real
-        # data (Adult alone: 953,197), so skipping them here matters.
+        # data, so skipping them here matters.
         id_placeholders = ",".join("?" for _ in still_unmatched)
         for row in conn.execute(
             f"SELECT category_id, pattern FROM category_domains "
@@ -458,12 +425,11 @@ def schedule_applies_to_target(
 ) -> bool:
     """Whether `schedule` targets this user/group/device -- same
     is_global-or-junction-table logic schedule_applies_to_device() below
-    used to implement directly against a device row; pulled out into its
-    own function (2026-09-06) so a caller that only has a user id (no
-    specific device in hand -- e.g. the user detail page's "what's active
-    for this kid right now" display) doesn't need to fabricate one. Says
-    nothing about whether the schedule's time window is currently active
-    -- see common/schedule_eval.py's schedule_is_active() for that, a
+    uses, but for a caller that only has a user id (no specific device in
+    hand -- e.g. the user detail page's "what's active for this kid right
+    now" display) and doesn't need to fabricate one. Says nothing about
+    whether the schedule's time window is currently active -- see
+    common/schedule_eval.py's schedule_is_active() for that, a
     deliberately separate concern (this is "who," that is "when")."""
     if schedule["is_global"]:
         return True

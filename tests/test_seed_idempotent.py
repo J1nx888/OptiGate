@@ -34,11 +34,10 @@ def test_seed_is_idempotent_on_row_counts(conn):
 
 
 def test_seed_does_not_resurrect_an_explicitly_deleted_default_category(conn):
-    """Real bug, RoadMap.md 2026-09-13: seed() runs on every proxy
-    container start/restart, and its own INSERT OR IGNORE can't tell
-    "never created yet" apart from "an admin deleted this on purpose" --
-    a deleted starter category (e.g. "Weapons") silently came back on
-    the very next restart. db.add_deleted_category_name() is
+    """seed() runs on every proxy container start/restart, and its own
+    INSERT OR IGNORE can't tell "never created yet" apart from "an admin
+    deleted this on purpose" -- a deleted starter category must not come
+    back on the next restart. db.add_deleted_category_name() is
     dashboard.py's own record of an explicit delete; seed() must skip
     re-inserting any name recorded there."""
     seed_defaults.seed(conn)
@@ -74,12 +73,12 @@ def test_subscription_categories_have_no_domains_until_first_sync(conn):
     """Every subscription-based starter category gets no category_domains
     rows until something actually calls common/category_fetch.py's
     fetch_and_sync_category() (the controller's own daily loop, or the
-    dashboard's "Sync now" button). AI is deliberately excluded from this
-    check (unlike before 2026-09-11): it's the one category that carries
-    BOTH a real subscription_url (v2fly's AI Services, rebased the same
-    day) AND a manual domain snapshot seeded with its domains already in
-    place -- see test_ai_category_seeded_with_manual_and_subscription_source
-    below for that hybrid case specifically."""
+    dashboard's "Sync now" button). AI is excluded from this check
+    because it's the one category that carries BOTH a real
+    subscription_url AND a manual domain snapshot seeded with its
+    domains already in place -- see
+    test_ai_category_seeded_with_manual_and_subscription_source below
+    for that hybrid case specifically."""
     seed_defaults.seed(conn)
     conn.commit()
     subscribed_ids = [
@@ -96,15 +95,11 @@ def test_subscription_categories_have_no_domains_until_first_sync(conn):
 
 
 def test_ai_category_seeded_with_manual_and_subscription_source(conn):
-    """2026-09-11 (RoadMap.md, project owner's request to rebase the
-    default category seed onto the new v2fly catalog): AI was the one
-    category with a clean v2fly equivalent (AI Services, category-ai-!cn,
-    confirmed live to resolve to 179 real domains) -- it now carries a
-    real subscription_url ON TOP OF (not instead of) the pre-existing
-    one-time manual snapshot (defaults/ai_sites_seed.py, sourced from
-    Microsoft Purview's published AI-sites list), which stays exactly as
-    it was: a 'manual' row and a 'subscription' row-to-be coexist fine on
-    the same category, same as any other category with both."""
+    """AI carries a real subscription_url (v2fly's AI Services,
+    category-ai-!cn) ON TOP OF (not instead of) the pre-existing
+    one-time manual snapshot (defaults/ai_sites_seed.py) -- a 'manual'
+    row and a 'subscription' row-to-be must coexist fine on the same
+    category, same as any other category with both."""
     import category_catalog_sync
 
     seed_defaults.seed(conn)
@@ -124,13 +119,11 @@ def test_ai_category_seeded_with_manual_and_subscription_source(conn):
 
 
 def test_adult_category_deliberately_stays_on_blocklistproject(conn):
-    """2026-09-11 explicit decision, not an oversight: v2fly's own Porn
-    category resolves to ~99% fewer domains than BlockListProject's
-    current Adult list (confirmed live) -- a real coverage regression for
-    the single most safety-critical category here, so this one was NOT
-    rebased despite AI being rebased the same session. Regression guard
-    against someone "finishing the rebase" later without re-checking that
-    tradeoff."""
+    """v2fly's own Porn category resolves to far fewer domains than
+    BlockListProject's current Adult list -- a real coverage regression
+    for the single most safety-critical category here, so this one must
+    stay on BlockListProject. Guards against someone "finishing the
+    rebase" later without re-checking that tradeoff."""
     seed_defaults.seed(conn)
     conn.commit()
     row = conn.execute("SELECT subscription_url FROM categories WHERE name = 'Adult'").fetchone()
@@ -139,10 +132,10 @@ def test_adult_category_deliberately_stays_on_blocklistproject(conn):
 
 
 def test_gambling_drugs_fraud_and_weapons_are_not_rebased(conn):
-    """2026-09-11 explicit decision: v2fly has no equivalent category for
-    any of these four at all -- rebasing would drop real protection with
-    nothing to replace it. Weapons keeps subscription_url=None (no public
-    list exists for it at all, from either source)."""
+    """v2fly has no equivalent category for any of these four -- rebasing
+    would drop real protection with nothing to replace it. Weapons keeps
+    subscription_url=None (no public list exists for it from either
+    source)."""
     seed_defaults.seed(conn)
     conn.commit()
     for name in ("Gambling", "Drugs", "Fraud & Scams"):
@@ -153,12 +146,10 @@ def test_gambling_drugs_fraud_and_weapons_are_not_rebased(conn):
 
 
 def test_facebook_tiktok_twitter_whatsapp_stay_separate_not_collapsed(conn):
-    """2026-09-11 explicit decision: v2fly only offers one combined
-    'Social Media' category -- collapsing these four into it would lose
-    per-platform toggling. Each must still exist as its own category on
-    its original BlockListProject source (still available manually via
-    the Categories page's own "Add from catalog" picker for an admin who
-    wants the all-in-one version instead)."""
+    """v2fly only offers one combined 'Social Media' category --
+    collapsing these four into it would lose per-platform toggling. Each
+    must still exist as its own category on its original BlockListProject
+    source."""
     seed_defaults.seed(conn)
     conn.commit()
     for name in ("Facebook", "TikTok", "Twitter/X", "WhatsApp"):
@@ -244,11 +235,10 @@ def test_seed_twice_leaves_admin_edits_untouched(conn):
 
 
 def test_seed_marks_global_splice_and_trusted_domains_protected(conn):
-    """2026-09-13, RoadMap.md: these are infrastructure the Crunchyroll
-    integration depends on, not an admin's own pick -- delete_domain()/
-    bulk_delete_domains() refuse to remove a protected=1 row, and the
-    Domains page hides them entirely (they live on the Crunchyroll
-    integration page instead)."""
+    """These are infrastructure the Crunchyroll integration depends on,
+    not an admin's own pick -- delete_domain()/bulk_delete_domains()
+    refuse to remove a protected=1 row, and the Domains page hides them
+    entirely (they live on the Crunchyroll integration page instead)."""
     seed_defaults.seed(conn)
     conn.commit()
     for pattern, _note in seed_defaults.GLOBAL_SPLICE_DOMAINS + seed_defaults.TRUSTED_DOMAINS:
@@ -284,7 +274,7 @@ def test_seed_marks_crunchyroll_domain_protected(conn):
 
 
 def test_crunchyrollcdn_is_trusted_not_splice(conn):
-    """S2.2: crunchyrollcdn.com must end up 'trusted', not silently dropped
+    """crunchyrollcdn.com must end up 'trusted', not silently dropped
     into 'splice' by being listed in both domain lists."""
     seed_defaults.seed(conn)
     conn.commit()
@@ -308,11 +298,9 @@ def test_crunchyroll_domain_seeded_as_global_bump(conn):
 
 
 def test_crunchyrollsvc_playback_host_is_not_seeded(conn):
-    """S1.2, resolved 2026-08-28: confirmed against Crunchyroll's own live
-    webpack bundle that production playback is served from
-    www.crunchyroll.com/playback (already covered by the crunchyroll.com
-    domain) -- crunchyrollsvc.com is dev-only in Crunchyroll's own config
-    and must NOT be seeded as a separate domain."""
+    """Production playback is served from www.crunchyroll.com/playback
+    (already covered by the crunchyroll.com domain) -- crunchyrollsvc.com
+    is dev-only and must NOT be seeded as a separate domain."""
     seed_defaults.seed(conn)
     conn.commit()
     row = conn.execute(
@@ -332,9 +320,8 @@ def test_crunchyroll_paths_attached_to_crunchyroll_domain_only(conn):
 
 
 def test_crunchyroll_personalization_path_is_allowed(conn):
-    """GH #4: the 'Top 10'-style recommendation API was blocked by the
-    path allowlist -- confirmed on a real device -- since it wasn't in
-    CRUNCHYROLL_PATHS."""
+    """The 'Top 10'-style recommendation API must be reachable through
+    the path allowlist."""
     import matching
 
     seed_defaults.seed(conn)

@@ -56,11 +56,9 @@ def test_unauthenticated_device_goes_in_unauthenticated_set(conn):
 
 
 def test_bypass_login_device_lands_in_authenticated_set_end_to_end(conn):
-    """Regression test for a real bug found 2026-08-31: this query
-    never even SELECTed bypass_login, so classify_device() could never
-    have honored it regardless of its own logic -- a bypass_login
-    device stayed stuck in 'unauthenticated' forever. Full pipeline
-    proof, not just the pure classify_device() unit test."""
+    """This query must actually SELECT bypass_login, not just have
+    classify_device() honor it in theory -- full pipeline proof, not
+    just the pure classify_device() unit test."""
     _add_device(conn, "aa:bb:cc:dd:ee:01", is_authenticated=0, bypass_login=1)
     _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")
     policy = compute_desired_policy(conn)
@@ -77,10 +75,9 @@ def test_ignored_device_goes_in_bypass_set_even_if_unauthenticated(conn):
 
 
 def test_device_in_an_ignored_group_goes_in_bypass_set(conn):
-    """Group-level ignore (added 2026-09-07, db.py's schema comment on
-    groups.ignored) -- full pipeline proof that the query's new LEFT
-    JOIN + group_ignored plumbing actually reaches classify_device(),
-    not just the pure unit test in test_policy_class.py."""
+    """Full pipeline proof that the query's LEFT JOIN + group_ignored
+    plumbing actually reaches classify_device(), not just the pure unit
+    test in test_policy_class.py."""
     conn.execute("INSERT INTO groups (name, ignored, created_at) VALUES ('IoT', 1, ?)", (db.now_iso(),))
     conn.commit()
     group_id = conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
@@ -150,13 +147,12 @@ def test_bump_enabled_but_ignored_device_is_excluded_from_bump(conn):
 
 
 def test_brand_new_mac_with_no_pre_existing_devices_row_lands_in_unauthenticated(conn):
-    """End-to-end proof of the Phase 4 gap fix, 2026-08-31: a MAC with
-    NO devices row created ahead of time (unlike every other test in
-    this file, which pre-creates one via _add_device) still ends up
-    gated in the unauthenticated_v4 set on its very first observation,
-    since identity.record_binding() now auto-creates a PREAUTH devices
-    row for it -- not silently excluded from every set the way a
-    device_id = NULL binding used to be."""
+    """A MAC with NO devices row created ahead of time (unlike every
+    other test in this file, which pre-creates one via _add_device)
+    must still end up gated in the unauthenticated_v4 set on its very
+    first observation, since identity.record_binding() auto-creates a
+    PREAUTH devices row for it -- not silently excluded from every set
+    the way a device_id = NULL binding would be."""
     identity.record_binding(conn, "aa:bb:cc:dd:ee:99", "192.168.1.99", source="rtnetlink")
     policy = compute_desired_policy(conn)
     assert policy["unauthenticated"] == ["192.168.1.99"]
@@ -165,14 +161,12 @@ def test_brand_new_mac_with_no_pre_existing_devices_row_lands_in_unauthenticated
 
 
 def test_deleting_a_device_lands_its_orphaned_binding_in_unauthenticated_not_nowhere(conn):
-    """Real gap found live 2026-09-11 (see this module's own dated
-    comment): deleting a device row used to make its still-active
-    binding vanish from every set -- device_bindings.device_id goes
-    NULL (ON DELETE SET NULL) and the old INNER JOIN dropped it
-    entirely, which functioned as an unconditional bypass (no set
-    membership means no nftables rule restricts it at all). It must now
-    fall back to the same safe PREAUTH/unauthenticated treatment a
-    genuinely-new device gets."""
+    """Deleting a device row must not make its still-active binding
+    vanish from every set -- device_bindings.device_id goes NULL (ON
+    DELETE SET NULL), and dropping it entirely would function as an
+    unconditional bypass (no set membership means no nftables rule
+    restricts it at all). It must instead fall back to the same safe
+    PREAUTH/unauthenticated treatment a genuinely-new device gets."""
     device = _add_device(conn, "aa:bb:cc:dd:ee:01", is_authenticated=1)
     _bind(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21")
     conn.execute("DELETE FROM devices WHERE id = ?", (device["id"],))
@@ -258,7 +252,7 @@ def test_write_desired_policy_persists_and_upserts(conn):
     assert count == 1, "expected a single upserted singleton row, not a new row per write"
 
 
-# --------------------------------------- Phase 8: scheduled full-lockout overlay
+# --------------------------------------- scheduled full-lockout overlay
 
 def _add_lockout_schedule(conn, name="Bedtime", is_global=1, days="mon", start="21:00", end="06:00"):
     conn.execute(
@@ -304,7 +298,7 @@ def test_ignored_device_stays_bypass_even_during_an_active_lockout_schedule(conn
 
 def test_manually_quarantined_device_is_unaffected_by_schedule_state_either_way(conn):
     # No lockout schedule at all -- a manual quarantine must still hold on
-    # its own, independent of Phase 8 ever having been configured.
+    # its own, independent of any schedule ever having been configured.
     _add_device(conn, "aa:bb:cc:dd:ee:03", quarantined_at=db.now_iso())
     _bind(conn, "aa:bb:cc:dd:ee:03", "192.168.1.23")
     policy = compute_desired_policy(conn, now=_OUTSIDE_LOCKOUT)
@@ -318,12 +312,11 @@ def test_manually_quarantined_device_is_unaffected_by_schedule_state_either_way(
 
 
 def test_bump_enabled_device_under_an_active_lockout_is_excluded_from_bump(conn):
-    """Regression test for a real bug (fixed 2026-09-02): the bump_v4
-    membership check used to be computed from the device's raw
-    classify_device() result, blind to the QUARANTINE overlay this
-    function applies for an active lockout_all schedule -- so a
+    """The bump_v4 membership check must account for the QUARANTINE
+    overlay this function applies for an active lockout_all schedule,
+    not just the device's raw classify_device() result -- otherwise a
     bump-enabled, otherwise-authenticated device caught in a bedtime
-    lockout used to land in BOTH the quarantine set AND the bump set at
+    lockout would land in BOTH the quarantine set AND the bump set at
     once, violating bump_eligible()'s own documented invariant."""
     _add_lockout_schedule(conn)
     _add_device(conn, "aa:bb:cc:dd:ee:06", is_authenticated=1, bump_enabled=1)

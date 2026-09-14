@@ -1,5 +1,5 @@
 """controller/health.py: interception_runtime health reporting for the
-controller<->ARP-worker pipeline (Milestone 6)."""
+controller<->ARP-worker pipeline."""
 from __future__ import annotations
 
 from health import report_fail_open, report_healthy, report_repair_only
@@ -44,18 +44,18 @@ def test_report_healthy_after_fail_open_clears_reason(conn):
 
 
 # ============================================================
-# report_fail_open's optional applied_generation (added 2026-08-31 for
-# controller/main.py's sustained-ARP-send-failure report -- a cycle
-# where reconciliation genuinely succeeded but fail_open is reported
-# for an orthogonal reason, so there IS a fresh, true generation to
-# preserve, unlike the reconcile-cycle-itself-failed callers above.)
+# report_fail_open's optional applied_generation: covers
+# controller/main.py's sustained-ARP-send-failure report, a cycle where
+# reconciliation genuinely succeeded but fail_open is reported for an
+# orthogonal reason, so there IS a fresh, true generation to preserve,
+# unlike the reconcile-cycle-itself-failed callers above.
 # ============================================================
 
 def test_report_fail_open_with_explicit_generation_writes_it_on_first_ever_row(conn):
-    """Regression test for the real bug this fix's own integration test
-    caught: a bare report_fail_open() on a brand-new row (no prior
-    report_healthy call) let applied_generation default to 0, silently
-    understating a real, true value on the very first fail_open cycle."""
+    """Regression test: a bare report_fail_open() on a brand-new row (no
+    prior report_healthy call) must not let applied_generation default
+    to 0, silently understating a real, true value on the very first
+    fail_open cycle."""
     report_fail_open(conn, "arp-worker: 5 consecutive ARP send failures", applied_generation=1)
     row = _row(conn)
     assert row["mode"] == "fail_open"
@@ -90,14 +90,13 @@ def test_report_repair_only_sets_mode_and_reason(conn):
 
 
 # ============================================================
-# Real production incident, 2026-09-11: a health-status write itself
-# failing (e.g. sqlite3.OperationalError: database is locked, on a real
-# box with several containers hitting the shared DB at once) used to
-# propagate straight out of these functions -- most dangerously when
-# called from an except block already handling some OTHER failure
-# (controller/main.py's run_cycle()), where the second exception had
-# nowhere to go and killed the entire caller. None of these three
-# functions may ever raise, regardless of what the connection does.
+# A health-status write itself failing (e.g. sqlite3.OperationalError:
+# database is locked, with several containers hitting the shared DB at
+# once) must never propagate out of these functions -- most dangerously
+# when called from an except block already handling some OTHER failure
+# (controller/main.py's run_cycle()), where the second exception would
+# have nowhere to go and would kill the entire caller. None of these
+# three functions may ever raise, regardless of what the connection does.
 # ============================================================
 
 def test_report_healthy_never_raises_even_if_the_write_fails(conn, caplog):

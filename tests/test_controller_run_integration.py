@@ -1,16 +1,15 @@
 """controller/main.py: run() end-to-end, including the
-reconnect-on-WorkerConnectionError path (Milestone 9). Uses a real
-listening AF_UNIX socket (not a socketpair) since run() calls
-WorkerClient.connect(path) itself, both for the initial connection and
-for the reconnect attempt -- a socketpair can't be reconnected to by
-path the way a real bind()+listen() socket can.
+reconnect-on-WorkerConnectionError path. Uses a real listening AF_UNIX
+socket (not a socketpair) since run() calls WorkerClient.connect(path)
+itself, both for the initial connection and for the reconnect attempt --
+a socketpair can't be reconnected to by path the way a real
+bind()+listen() socket can.
 
-This is a genuine integration test: real signals (run() must be
-invoked from the main thread, since signal.signal() only works there),
-real threads (the heartbeat pacer running concurrently with the main
-loop -- exactly the condition that surfaced the need for WorkerClient's
-internal lock, see ipc_client.py's own note), and a real simulated
-worker crash-and-restart.
+This is a genuine integration test: real signals (run() must be invoked
+from the main thread, since signal.signal() only works there), real
+threads (the heartbeat pacer running concurrently with the main loop --
+see ipc_client.py's own note on why that requires an internal lock),
+and a real simulated worker crash-and-restart.
 """
 from __future__ import annotations
 
@@ -162,18 +161,14 @@ def test_run_reconnects_after_worker_dies_then_shuts_down_cleanly(tmp_path, conn
 def test_run_reconnects_when_only_the_heartbeat_notices_a_dead_worker(
     tmp_path, conn, restore_signal_handlers
 ):
-    """A real gap found 2026-08-30 during this project's first live-
-    container verification pass: _desired_state_provider() below always
-    returns the SAME DesiredState, so after the first successful
-    replace_targets, reconcile() correctly returns None on every later
-    cycle (nothing changed, nothing to send) -- run_cycle() therefore
-    never touches the connection again at all. If the worker dies at
-    that point, only the heartbeat pacer -- which touches the
-    connection every single cycle regardless of desired state -- can
-    ever notice. This is exactly what happened live: `docker restart`
-    on the arp-worker container left the controller heartbeating into a
-    dead pipe indefinitely, since heartbeat failures used to only be
-    logged, never acted on.
+    """_desired_state_provider() below always returns the SAME
+    DesiredState, so after the first successful replace_targets,
+    reconcile() correctly returns None on every later cycle (nothing
+    changed, nothing to send) -- run_cycle() therefore never touches the
+    connection again at all. If the worker dies at that point, only the
+    heartbeat pacer -- which touches the connection every single cycle
+    regardless of desired state -- can ever notice, so heartbeat failures
+    must actively trigger a reconnect, not just get logged.
     """
     sock_path = str(tmp_path / "worker.sock")
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -262,13 +257,12 @@ def test_run_reconnects_when_only_the_heartbeat_notices_a_dead_worker(
 def test_run_with_discovery_interval_populates_device_bindings_on_a_separate_thread(
     tmp_path, conn, monkeypatch, restore_signal_handlers
 ):
-    """Milestone 4's discovery loop, wired into run() (2026-08-30): a real
-    background thread, opening its own sqlite3.Connection internally
-    (see discovery.run_loop's own docstring for why it must build that
-    connection itself rather than being handed health_conn/policy_conn),
-    running concurrently with the main reconcile loop and the heartbeat
-    pacer -- three threads sharing one process, the exact condition this
-    integration test file exists to exercise for real rather than assume.
+    """discovery.run_loop wired into run(): a real background thread,
+    opening its own sqlite3.Connection internally (see discovery.run_loop's
+    own docstring for why it must build that connection itself rather than
+    being handed health_conn/policy_conn), running concurrently with the
+    main reconcile loop and the heartbeat pacer -- three threads sharing
+    one process.
     """
     monkeypatch.setattr(
         discovery, "run_ip_neigh_show",
@@ -351,14 +345,12 @@ def test_run_with_enable_rtnetlink_populates_device_bindings_on_a_separate_threa
     tmp_path, conn, monkeypatch, restore_signal_handlers
 ):
     """Same shape as the discovery test above, but for
-    controller/rtnetlink_listener.py's live listener (added 2026-08-30)
-    -- a fourth concurrent thread (heartbeat pacer, discovery snapshot
-    disabled here via discovery_interval=None, rtnetlink listener, main
-    reconcile loop), still sharing one process. pyroute2 is faked via
-    sys.modules injection (see test_controller_rtnetlink_listener.py's
-    own comment on why -- it's Linux-only and this suite also runs on
-    this project's Windows dev machine, though this whole file is
-    AF_UNIX-gated anyway)."""
+    controller/rtnetlink_listener.py's live listener -- a fourth
+    concurrent thread (heartbeat pacer, discovery snapshot disabled here
+    via discovery_interval=None, rtnetlink listener, main reconcile loop),
+    still sharing one process. pyroute2 is faked via sys.modules injection
+    since it's Linux-only and this suite also runs on Windows (see
+    test_controller_rtnetlink_listener.py's own comment)."""
     fake_module = types.ModuleType("pyroute2")
 
     class _FakeIPRoute:
@@ -465,16 +457,14 @@ def test_run_reports_fail_open_when_heartbeat_reports_sustained_arp_send_failure
     tmp_path, conn, restore_signal_handlers
 ):
     """End-to-end version of test_controller_run_cycle.py's
-    consecutive_send_failures test: this one drives it through the
-    REAL heartbeat pacer thread (main.py's arp_send_health dict) into
+    consecutive_send_failures test: this one drives it through the REAL
+    heartbeat pacer thread (main.py's arp_send_health dict) into
     run_cycle's reconciliation loop, rather than passing the value
-    directly as a parameter -- exercising the actual cross-thread
-    wiring added 2026-08-31 to close the health-visibility gap a
-    NIC-down test against a real veth harness found. The fake worker
-    behaves perfectly normally for replace_targets (reconciliation
-    itself succeeds) but reports a high consecutive_send_failures on
-    every heartbeat_ack, matching what a real worker would report
-    while its bound interface is down.
+    directly as a parameter, exercising the actual cross-thread wiring.
+    The fake worker behaves perfectly normally for replace_targets
+    (reconciliation itself succeeds) but reports a high
+    consecutive_send_failures on every heartbeat_ack, matching what a
+    real worker would report while its bound interface is down.
     """
     sock_path = str(tmp_path / "worker.sock")
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

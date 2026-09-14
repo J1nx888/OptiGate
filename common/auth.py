@@ -35,9 +35,9 @@ def verify_admin_credentials(
 ) -> bool:
     """The one admin-credential check shared by `dashboard/dashboard.py`'s
     HTTP-Basic admin login and `dashboard/captive_portal_server.py`'s
-    portal-side admin action (added 2026-08-31) -- factored out here
-    instead of each keeping its own copy, so there is exactly one place
-    that decides what counts as valid admin credentials.
+    portal-side admin action -- factored out here instead of each keeping
+    its own copy, so there is exactly one place that decides what counts
+    as valid admin credentials.
 
     Deliberately takes the expected username/hash as plain arguments
     rather than a DB connection -- this module stays stdlib-only, zero
@@ -46,9 +46,7 @@ def verify_admin_credentials(
     `admin_password_hash` is the caller's job.
 
     `expected_username`/`expected_hash` being falsy (no admin account
-    configured yet, a state that shouldn't normally exist post-bootstrap
-    but is handled explicitly rather than assumed away) always fails
-    closed.
+    configured yet) always fails closed.
     """
     if not expected_username or not expected_hash:
         return False

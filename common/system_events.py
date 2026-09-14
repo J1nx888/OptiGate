@@ -3,21 +3,16 @@
 admin has something to look at from the dashboard's own Events page
 instead of needing `docker compose logs` and SSH access.
 
-Added 2026-09-01, ahead of G1 real-network testing: every long-running
-periodic loop in `controller/main.py` (AdGuard sync, category
-subscription fetch, active ARP scan, discovery, ...) already reports a
+Every long-running periodic loop in `controller/main.py` (AdGuard sync,
+category subscription fetch, active ARP scan, discovery, ...) reports a
 failure via `controller/periodic.py`'s `PeriodicTask` `on_error`
-callback -- previously that only ever reached Python's own `logging`
-(container stdout), invisible from the dashboard entirely. This module
-gives the exact same failures (and now, via `PeriodicTask`'s new
-`on_success` hook, the failure->success "recovery" transition) a
-persistent, dashboard-visible home, without inventing a second
-error-reporting mechanism to keep in sync with the first -- `log.warning`
-calls stay exactly where they are; this is layered alongside them, not
-instead of them.
+callback, and its `on_success` hook reports the failure->success
+"recovery" transition. This module gives those a persistent,
+dashboard-visible home without inventing a second error-reporting
+mechanism to keep in sync with `log.warning` calls -- this is layered
+alongside stdlib logging, not instead of it.
 
-Deliberately NOT a firehose (project owner's own scope decision,
-2026-09-01): only real failures and the recovery that ends them are
+Deliberately NOT a firehose: only real failures and the recovery that ends them are
 recorded, never a routine successful cycle -- logging every success
 would make this table pure noise within hours on a household network
 where most cycles succeed. `failure_recovery_callbacks()` below is what
@@ -29,20 +24,17 @@ implicitly and correctly ends whatever failure streak it was mid-way
 through (a fresh process starting up and immediately succeeding is not,
 itself, a notable "recovery" worth a row).
 
-**`'info'` severity, added 2026-09-09** (real gap found live: clicking
-"Run now" on the network discovery sweep visibly did something, but
-nothing showed up here at all): deliberately narrow, not a general
-"log routine success" escape hatch that would reopen the firehose
-question above. Its callers are all genuinely rare, admin-relevant,
-one-off events, not a periodic cycle succeeding:
-`controller/network_sweep.py`'s manual "Run now" trigger completing
-(an explicit admin action, not the automatic hourly schedule),
-`common/identity.py`'s `record_binding()` recording a genuinely
-brand-new device for the first time (not a routine binding refresh),
-and `dashboard/captive_portal_server.py` recording a successful
-portal login (a device joins the filtered network once -- the
-counterpart to the failed-attempt rows that surface already exists).
-Requires a real schema migration (`common/db.py`'s `_migrate()`) since
+`'info'` severity is deliberately narrow, not a general "log routine
+success" escape hatch that would reopen the firehose concern above. Its
+callers are all genuinely rare, admin-relevant, one-off events, not a
+periodic cycle succeeding: `controller/network_sweep.py`'s manual "Run
+now" trigger completing (an explicit admin action, not the automatic
+hourly schedule), `common/identity.py`'s `record_binding()` recording a
+genuinely brand-new device for the first time (not a routine binding
+refresh), and `dashboard/captive_portal_server.py` recording a
+successful portal login (the counterpart to the failed-attempt rows
+that surface already exists). Requires a real schema migration
+(`common/db.py`'s `_migrate()`) since
 SQLite's `CHECK` constraints can't be altered in place -- see that
 migration's own comment for why this differs from
 `interception_runtime.nft_mode`'s own precedent of skipping the CHECK
@@ -60,20 +52,12 @@ log = logging.getLogger(__name__)
 
 _VALID_SEVERITIES = ("error", "recovery", "info")
 
-# Added 2026-09-02, closing a real gap found by code review: this
-# table's own original design (see this module's docstring above) was
-# "not a firehose" purely by construction -- only real failures and
-# their recovery ever get a row, never a routine successful cycle --
-# which was a sound bound when every writer was an organic operational
-# loop. Once dashboard.py/captive_portal_server.py started also writing
-# here for failed login attempts (still rate-limited to a handful per
-# minute per surface per IP, but never fully blocked, only throttled),
-# this table gained its first ATTACKER-CONTROLLED writer: someone who
-# never once succeeds can still grow it indefinitely just by repeatedly
-# failing a login. No cap or pruning existed anywhere -- EVENT_DISPLAY_LIMIT
-# on the /events page only ever bounded what's DISPLAYED, never what's
-# stored. This caps the table itself, independent of who's writing to
-# it or why.
+# dashboard.py/captive_portal_server.py write here for failed login
+# attempts (rate-limited but never fully blocked, only throttled), which
+# makes this table's writes partly ATTACKER-CONTROLLED: someone who never
+# once succeeds can still grow it indefinitely just by repeatedly failing
+# a login. EVENT_DISPLAY_LIMIT on the /events page only bounds what's
+# DISPLAYED, never what's stored -- this caps the table itself.
 _MAX_STORED_EVENTS = 5000
 
 
@@ -130,20 +114,13 @@ def failure_recovery_callbacks(source: str) -> tuple[Callable[[Exception], None]
     thread, not necessarily the same one that opened whatever
     connection the loop's task body itself uses internally).
 
-    **Real production incident, 2026-09-11**: `on_error`/`on_success`
-    below used to let `log_event()`'s own `conn.execute()` raise
-    straight through them. On a real box with several containers
-    hitting the shared DB at once, that write can itself fail with
-    `sqlite3.OperationalError: database is locked` -- which is exactly
-    what happened live: `adguard_sync`'s periodic task hit an unrelated
-    real error, this `on_error` tried to record THAT failure, the
-    recording write itself hit lock contention, and the resulting
-    uncaught exception killed the whole background thread outright
-    (`controller/periodic.py`'s own docstring has the fuller incident
-    writeup and the matching fix on that side of the boundary). Both
-    callbacks below now catch and log via stdlib `logging` (never the
-    DB) instead of letting a failure to RECORD a failure become a
-    second, worse failure.
+    Both callbacks below catch and log via stdlib `logging` (never the
+    DB) rather than letting `log_event()`'s own `conn.execute()` raise
+    straight through: on a box with several containers hitting the
+    shared DB at once, that write can itself fail with
+    `sqlite3.OperationalError: database is locked`, and a failure to
+    RECORD a failure must never become a second, worse failure that
+    kills the whole background thread.
     """
     state = {"failing": False}
 

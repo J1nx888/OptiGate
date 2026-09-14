@@ -1,8 +1,8 @@
-"""controller/main.py: _purge_offlan_discovery_junk() -- the one-time
-cleanup for RoadMap 2026-09-10 finding #3. Before
-identity.record_binding() filtered non-LAN IPs, the discovery loop
-recorded Docker-bridge (172.17.x) addresses off docker0 as real
-`devices` rows. This deletes exactly those, and nothing else.
+"""controller/main.py: _purge_offlan_discovery_junk() -- a one-time
+cleanup for Docker-bridge (172.17.x) addresses off docker0 that the
+discovery loop recorded as real `devices` rows before
+identity.record_binding() started filtering non-LAN IPs. Deletes
+exactly those, and nothing else.
 """
 from __future__ import annotations
 

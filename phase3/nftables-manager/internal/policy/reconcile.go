@@ -19,10 +19,8 @@ func (d SetDiff) Empty() bool {
 // line with desired. Only sets that actually differ appear in the
 // returned map -- an unchanged set is omitted entirely (not included
 // with an Empty() diff), so callers can build an atomic transaction
-// from exactly (and only) what changed. Mirrors the ARP worker's own
-// "idempotent reconciliation" requirement (RoadMap.md Milestone 3) on
-// the firewall side: re-running this against unchanged state must be
-// a true no-op, not a needless empty transaction.
+// from exactly (and only) what changed, and re-running against
+// unchanged state is a true no-op, not a needless empty transaction.
 //
 // Callers should pass desired through ResolveConflicts first --
 // Reconcile itself does not check for an IP appearing in more than one

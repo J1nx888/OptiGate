@@ -34,12 +34,11 @@ def _events(conn):
 # ------------------------------------------------------------- new bindings
 
 def test_new_mac_auto_creates_a_pending_devices_row_and_event(conn):
-    """Phase 4 addition, 2026-08-31: a genuinely brand-new MAC (no
-    devices row, no prior device_bindings row at all) gets a fresh,
-    unassociated devices row auto-created for it, is_authenticated=0
-    (PREAUTH) -- see record_binding's own docstring for why this
-    closes a real gap (an unassociated device previously got NO
-    interception at all, invisible to desired_state.py's own JOIN)."""
+    """A genuinely brand-new MAC (no devices row, no prior
+    device_bindings row at all) gets a fresh, unassociated devices row
+    auto-created for it, is_authenticated=0 (PREAUTH) -- an
+    unassociated device otherwise gets no interception at all, invisible
+    to desired_state.py's own JOIN."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink", seen_at="2026-08-29T00:00:00Z")
 
     rows = _bindings(conn)
@@ -67,13 +66,11 @@ def test_new_mac_auto_creates_a_pending_devices_row_and_event(conn):
 
 
 def test_new_mac_auto_create_also_logs_a_system_events_info_row(conn):
-    """Fixed 2026-09-09, real gap found live: device_auto_created was
-    already recorded in network_events (see the test above), but that
-    table has no dashboard page of its own -- an admin had no way to
-    see "a new device just showed up" without querying the DB directly.
-    Deliberately checks this fires regardless of `source` (not just for
-    the network sweep) -- any discovery path finding a genuinely new
-    device is equally worth surfacing."""
+    """device_auto_created is also recorded in network_events (see the
+    test above), but that table has no dashboard page of its own, so a
+    new device also needs a system_events row to be visible to an admin.
+    Checks this fires regardless of `source` -- any discovery path
+    finding a genuinely new device is equally worth surfacing."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink", seen_at="2026-08-29T00:00:00Z")
 
     rows = conn.execute("SELECT * FROM system_events").fetchall()
@@ -87,8 +84,7 @@ def test_new_mac_auto_create_also_logs_a_system_events_info_row(conn):
 def test_a_second_binding_for_an_existing_device_does_not_log_a_system_event(conn):
     """Only the genuinely-new-device case is an 'info'-worthy event --
     every subsequent ordinary binding (a DHCP renewal, a second IP) must
-    stay silent, matching system_events.py's own "not a firehose"
-    scope."""
+    stay silent."""
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink", seen_at="2026-08-29T00:00:00Z")
     identity.record_binding(conn, MAC_A, IP_2, source="rtnetlink", seen_at="2026-08-29T00:05:00Z")
 
@@ -114,12 +110,10 @@ def test_new_mac_on_a_second_ever_binding_still_does_not_auto_associate(conn):
 
 
 def test_an_already_known_unassociated_mac_is_never_retroactively_auto_created(conn):
-    """Grandfather clause, per the explicit 2026-08-31 product decision
-    (no retroactive backfill -- see record_binding's own docstring): a
-    MAC that already had a device_bindings row (even an inactive,
-    long-superseded one) BEFORE this feature shipped must never get a
-    devices row auto-created for it later, even across a normal DHCP
-    renewal -- only a MAC with NO prior binding at all qualifies."""
+    """No retroactive backfill: a MAC that already had a device_bindings
+    row (even an inactive, long-superseded one) must never get a devices
+    row auto-created for it later, even across a normal DHCP renewal --
+    only a MAC with NO prior binding at all qualifies."""
     # Simulates a pre-existing, already-known-but-unassociated binding,
     # as if written by a version of this code before the auto-create
     # fix existed: a real device_bindings row with device_id NULL.
@@ -279,8 +273,8 @@ def test_record_network_event_stores_arbitrary_payload_as_json(conn):
 
 
 # ------------------------------------------------------------- touch_binding_by_ip
-# (Milestone 4's AdGuard query-log discovery source -- see
-# controller/adguard_discovery.py, which is the one real caller.)
+# (AdGuard query-log discovery source -- see controller/adguard_discovery.py,
+# which is the one real caller.)
 
 def test_touch_binding_by_ip_refreshes_last_seen_at_for_an_active_binding(conn):
     identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink", seen_at="2026-08-29T00:00:00Z")
@@ -334,38 +328,28 @@ def test_touch_binding_by_ip_ignores_an_inactive_binding_for_the_same_ip(conn):
 
 
 # ============================================================
-# Concurrency -- fixed 2026-09-02, a real race found by code review
+# Concurrency
 # ============================================================
 
 def test_record_binding_never_leaves_two_active_bindings_for_one_ip(conn, monkeypatch):
-    """Regression test for a real bug: record_binding()'s conflict
-    check (is this IP already actively bound to a DIFFERENT mac?) and
-    its own write used to run as separate autocommit statements
-    (common/db.py opens with isolation_level=None) with nothing making
-    the two atomic. Two near-simultaneous callers observing the SAME IP
-    for two DIFFERENT, both-brand-new MACs could each read "no active
-    conflict" before either had written its own row, so neither
-    deactivated the other -- leaving TWO active=1 device_bindings rows
-    for one IP, an invariant nothing else in this codebase expects to
-    ever be violated (device_identity.resolve_device()'s `ORDER BY
-    last_seen_at DESC LIMIT 1` picks one of the two nondeterministically).
+    """record_binding()'s conflict check (is this IP already actively
+    bound to a DIFFERENT mac?) and its own write must be atomic. Two
+    near-simultaneous callers observing the SAME IP for two DIFFERENT,
+    both-brand-new MACs could otherwise each read "no active conflict"
+    before either had written its own row, leaving TWO active=1
+    device_bindings rows for one IP -- an invariant nothing else in this
+    codebase expects to ever be violated.
 
-    Deterministic, not a hope-the-scheduler-cooperates race:
+    Made deterministic rather than a hope-the-scheduler-cooperates race:
     MAC_A's thread is paused (via a monkeypatched
-    _existing_device_id_for_mac, the read that runs right after both
-    conflict checks and before any write for a brand-new IP with no
-    prior bindings) after it has already read "no conflict" but before
-    it writes anything. MAC_B's thread is only started once MAC_A is
-    confirmed paused there. Pre-fix, nothing stops MAC_B from running
-    to completion in the meantime (it also reads "no conflict" and
-    writes its own active row) before MAC_A is released to write its
-    own -- reproducing the bug on every run. Post-fix, MAC_B blocks
+    _existing_device_id_for_mac, the read that runs right after the
+    conflict check and before any write) after it has already read "no
+    conflict" but before it writes anything. MAC_B's thread only starts
+    once MAC_A is confirmed paused there. Correct behavior: MAC_B blocks
     inside its own BEGIN IMMEDIATE (MAC_A's transaction still holds the
     write lock) until MAC_A is released and commits, at which point
-    MAC_B's own (now-unblocked) read correctly sees MAC_A's committed
-    row as the real conflict and deactivates it -- no deadlock either
-    way, since MAC_B never itself waits on a signal only MAC_A's own
-    completion can provide."""
+    MAC_B's own read correctly sees MAC_A's committed row as the real
+    conflict and deactivates it."""
     import identity as identity_module
 
     mac_a_paused = threading.Event()
@@ -415,15 +399,15 @@ def test_record_binding_never_leaves_two_active_bindings_for_one_ip(conn, monkey
     )
 
 
-# --------------------------------------------- off-LAN guard (RoadMap #3)
+# --------------------------------------------- off-LAN guard
 
 DOCKER_MAC = "02:42:ac:11:00:02"
 DOCKER_IP = "172.17.0.2"
 
 
 def test_record_binding_ignores_an_off_lan_ip(conn):
-    """RoadMap 2026-09-10 finding #3: discovery watching docker0 must not
-    turn a 172.17.x container address into a devices row."""
+    """Discovery watching docker0 must not turn a 172.17.x container
+    address into a devices row."""
     db.set_setting(conn, "local_network", "192.168.1.0/24")
     identity.record_binding(conn, DOCKER_MAC, DOCKER_IP, source="snapshot")
     assert _bindings(conn) == []

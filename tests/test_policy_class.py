@@ -35,12 +35,9 @@ def test_unauthenticated_device_is_preauth():
 
 
 def test_bypass_login_device_is_authenticated_even_when_not_logged_in():
-    """Regression test for a real bug found 2026-08-31: classify_device()
-    never consulted bypass_login at all, so a device an admin marked
-    bypass_login stayed stuck in PREAUTH forever -- still redirected to
-    the captive portal on every request -- contradicting both the
-    dashboard's own hint text and RoadMap.md's design sketch, both of
-    which describe bypass_login as exempting a device from the gate."""
+    """Regression test: classify_device() must consult bypass_login --
+    a device an admin marked bypass_login must not stay stuck in
+    PREAUTH, redirected to the captive portal on every request."""
     row = _row(is_authenticated=0, bypass_login=1)
     assert classify_device(row) == PolicyClass.AUTHENTICATED
 
@@ -63,9 +60,8 @@ def test_quarantine_beats_authentication_state():
 
 
 # ============================================================
-# group_ignored (added 2026-09-07, project owner's explicit request for
-# a group-level "ignore mode" -- db.py's schema comment on
-# groups.ignored)
+# group_ignored -- a group-level "ignore mode" (db.py's schema comment
+# on groups.ignored)
 # ============================================================
 
 def test_group_ignored_is_bypass_even_when_devices_ignored_is_0():
@@ -114,7 +110,7 @@ def test_bump_eligible_false_when_flag_not_set():
 
 def test_bump_eligible_false_for_preauth_device_even_with_flag_set():
     # A device that hasn't logged in yet has no DNS-tier access at all --
-    # it can't be bump-eligible before that, per RoadMap.md's Phase 4 flow.
+    # it can't be bump-eligible before that.
     assert bump_eligible(_row(is_authenticated=0, bump_enabled=1)) is False
 
 

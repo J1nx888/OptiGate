@@ -3,8 +3,7 @@
 generation already matches desired state, and if not, what the next
 generation number should be. Pure functions, no I/O -- see
 controller/main.py for the loop that drives this against a real
-WorkerClient, and controller/reconcile is what makes that loop's
-"idempotent reconciliation" requirement (RoadMap.md Milestone 3) concrete.
+WorkerClient.
 """
 from __future__ import annotations
 
@@ -17,10 +16,8 @@ from ipc_client import Target
 class DesiredState:
     """What the controller wants poisoned right now.
 
-    Built (eventually) from device_bindings + devices.is_authenticated /
-    bypass_v4 rules -- that's Milestone 4 (identity model) work, not yet
-    wired up. See controller/main.py's placeholder_desired_state for the
-    current stand-in.
+    Built from device_bindings + devices.is_authenticated / bypass_v4
+    rules -- see controller/desired_state.py's db_backed_desired_state.
     """
 
     gateway: Target

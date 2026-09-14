@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Milestone 4's final discovery source: active, rate-limited ARP
-scanning -- "only when stale or onboarding a new device"
-(docs/design/phase3-technical-design.md's discovery precedence list).
+"""Active, rate-limited ARP scanning -- "only when stale or onboarding
+a new device."
 
 Distinct from every other controller/*discovery*.py module in this
 codebase: those all passively observe something else's traffic
@@ -12,22 +11,18 @@ kernel's own neighbor-resolution state machine for a specific,
 already-known-but-stale IP -- rather than just reading in a signal
 that already exists on its own.
 
-**Design decision, confirmed live against a real kernel on the
-smoke-test VM (2026-08-31) before this was written -- see RoadMap.md's
-dated entry for the full transcript:** the controller deliberately
-holds no CAP_NET_RAW (only phase3/arp-worker does), so it cannot send
-a real ARP request itself. It doesn't need to: opening a plain UDP
-socket and sendto()-ing a closed port on the target IP is enough to
-force the kernel's routing layer to (re)resolve that destination's
-link-layer address as a side effect, even though the "connection"
-itself always fails (a real ICMP port-unreachable, delivered
-asynchronously, never surfaces as a Python exception on this send).
-Confirmed live for both shapes this module needs: a completely absent
-neighbor entry (transitions to INCOMPLETE -- the kernel attempting a
-fresh resolution) and an already-stale one (kicks off re-verification)
--- no new op on phase3/arp-worker's IPC protocol (protocol.go/
-dispatch.go) needed, keeping the controller/worker privilege split
-unchanged.
+The controller deliberately holds no CAP_NET_RAW (only phase3/arp-worker
+does), so it cannot send a real ARP request itself. It doesn't need to:
+opening a plain UDP socket and sendto()-ing a closed port on the target
+IP is enough to force the kernel's routing layer to (re)resolve that
+destination's link-layer address as a side effect, even though the
+"connection" itself always fails (a real ICMP port-unreachable,
+delivered asynchronously, never surfaces as a Python exception on this
+send). This works for both shapes this module needs: a completely
+absent neighbor entry (transitions to INCOMPLETE -- the kernel
+attempting a fresh resolution) and an already-stale one (kicks off
+re-verification) -- no new op on phase3/arp-worker's IPC protocol
+needed, keeping the controller/worker privilege split unchanged.
 
 This module ONLY ever nudges -- it never itself writes
 device_bindings. Any resulting resolution (the device is genuinely
@@ -62,9 +57,7 @@ log = logging.getLogger("controller.active_scan")
 # Any closed UDP port works -- nothing is expected to be listening
 # there, and the port number itself carries no meaning beyond being
 # unprivileged (>1024) and vanishingly unlikely to have a real service
-# bound to it on a home LAN device. Confirmed live (see module
-# docstring) that sendto() to this exact shape of destination reliably
-# nudges kernel ARP resolution regardless of which port is used.
+# bound to it on a home LAN device.
 _NUDGE_PORT = 39999
 
 

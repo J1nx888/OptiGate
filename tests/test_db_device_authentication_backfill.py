@@ -1,15 +1,13 @@
 """common/db.py's _migrate(): backfills devices.is_authenticated=1 for any
-device already assigned to a user/group (2026-09-13, RoadMap.md -- a real
-device found live, assigned to a group with a real label, still stuck
-showing on the "Devices awaiting login" card days later).
-
-dashboard.py's update_device()/_batch_assign_devices_to_group() only
-started setting is_authenticated=1 on assignment starting 2026-09-11 ("a
-vouching act"); any device assigned before that date never got the flag
-flipped, since nothing else ever re-checks it. This is a data fix, not a
-schema change, so unlike this project's usual ALTER-TABLE migrations there
-is no "drop the column first" setup -- these tests seed rows directly in
-the shape a pre-fix INSERT would have produced.
+device already assigned to a user/group. dashboard.py's
+update_device()/_batch_assign_devices_to_group() treat assignment as a
+vouching act and set is_authenticated=1 there, but nothing else ever
+re-checks it, so a device assigned before that logic existed can stay
+stuck showing on the "Devices awaiting login" card indefinitely. This is
+a data fix, not a schema change, so unlike this project's usual
+ALTER-TABLE migrations there is no "drop the column first" setup --
+these tests seed rows directly in the shape a pre-fix INSERT would have
+produced.
 """
 from __future__ import annotations
 

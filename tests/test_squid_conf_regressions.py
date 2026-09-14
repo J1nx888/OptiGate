@@ -1,31 +1,18 @@
-"""Regression tests for two real bugs found running against a live Squid
-instance (2026-08-28 smoke test), both in proxy/squid.conf.template.
-Neither is the kind of thing a pure Python unit test of the helper *logic*
-can catch -- both are about Squid's own ACL/protocol semantics -- so these
-tests check the config's text/structure directly instead.
+"""Regression tests for proxy/squid.conf.template's own text/structure --
+Squid's ACL/protocol semantics aren't something a pure Python unit test
+of the helper *logic* can catch, so these tests check the rendered
+config directly instead.
 
-1. Every external_acl_type FORMAT string was missing an explicit %DATA
-   macro. Squid always appends %DATA to an external_acl_type FORMAT unless
-   it's already present (documented Squid behavior), so every helper was
-   receiving one more field on the wire than its registered field_count
-   expected -- every line was rejected as malformed, and every real request
-   fell through to `ssl_bump terminate step2 all`. Fails closed (nothing
-   loads) but the entire SNI/authz decision layer never worked at all.
+1. Every external_acl_type FORMAT string needs an explicit %DATA macro:
+   Squid always appends %DATA to a FORMAT unless it's already present, so
+   an omitted macro means the helper receives one more field on the wire
+   than its registered field_count expects, and the line is rejected as
+   malformed.
 
-2. `http_access allow step1`/`step2`, left bare, also grants access to the
-   real *decrypted* HTTP request that follows a bump decision -- Squid's
-   at_step state doesn't reset after step2 is reached. This bypassed
-   authz_allowed entirely for every bump-mode request (any Crunchyroll show,
-   approved or not) -- fails OPEN, the more serious direction. Fixed by
-   qualifying both with CONNECT, which only matches during the tunnel/
-   negotiation phase.
-
-proxy/basic_auth_helper.py (and the auth_param basic percent-encoding
-regression that used to be tested here) was removed 2026-08-30 along with
-the rest of Squid's explicit-proxy-with-login model -- see RoadMap.md's
-"Squid: explicit-proxy-with-login -> transparent intercept" section. Squid
-now runs in native intercept mode with no per-request login at all, so
-there is nothing left for that helper (or these tests) to cover.
+2. `http_access allow step1`/`step2` must be qualified with CONNECT --
+   left bare, they also grant access to the real *decrypted* HTTP request
+   that follows a bump decision, since Squid's at_step state doesn't
+   reset after step2 is reached.
 """
 from __future__ import annotations
 
@@ -99,18 +86,17 @@ def test_authz_helper_field_count_matches_squid_conf_template(monkeypatch):
 
 
 def test_step_acls_in_http_access_are_qualified_with_connect():
-    """Regression for a real, security-relevant bug found in live testing:
-    a bare `http_access allow step2` (or step1) also grants access to the
-    real *decrypted* HTTP request that follows a bump decision -- Squid's
-    at_step state doesn't reset after step2 is reached, so that request is
-    still evaluated as "at step2" too. This let an authenticated user reach
-    ANY bump-mode content (any Crunchyroll show, approved or not) without
-    ever being checked by authz_allowed. Confirmed against a real Squid
-    instance and fixed by requiring CONNECT alongside step1/step2, which
-    only ever matches during the tunnel/negotiation phase (the decrypted
-    inner request's method is GET/POST/etc., never CONNECT). This test
-    can't reproduce Squid's own ACL semantics, but it stops the fix from
-    being silently reverted to a bare `allow step1`/`allow step2` line.
+    """A bare `http_access allow step2` (or step1) also grants access to
+    the real *decrypted* HTTP request that follows a bump decision --
+    Squid's at_step state doesn't reset after step2 is reached, so that
+    request is still evaluated as "at step2" too. This would let an
+    authenticated user reach ANY bump-mode content without ever being
+    checked by authz_allowed. Fixed by requiring CONNECT alongside
+    step1/step2, which only ever matches during the tunnel/negotiation
+    phase (the decrypted inner request's method is GET/POST/etc., never
+    CONNECT). This test can't reproduce Squid's own ACL semantics, but it
+    stops the fix from being silently reverted to a bare `allow
+    step1`/`allow step2` line.
     """
     text = TEMPLATE_PATH.read_text()
     for line in text.splitlines():
@@ -125,10 +111,9 @@ def test_step_acls_in_http_access_are_qualified_with_connect():
 
 
 def test_no_proxy_auth_left_in_intercept_mode():
-    """Regression guard for RoadMap.md's Squid intercept-mode migration
-    (2026-08-30): an intercepted connection has no CONNECT handshake for
-    Squid to challenge with a 407, so auth_param basic/proxy_auth must never
-    creep back in -- if it did, every intercepted connection would be denied
+    """An intercepted connection has no CONNECT handshake for Squid to
+    challenge with a 407, so auth_param basic/proxy_auth must never creep
+    back in -- if it did, every intercepted connection would be denied
     outright (fails closed, but silently breaks the entire bump-tier
     feature)."""
     text = TEMPLATE_PATH.read_text()
@@ -137,21 +122,19 @@ def test_no_proxy_auth_left_in_intercept_mode():
 
 
 def test_ports_are_intercept_mode_not_explicit_proxy():
-    """Regression guard: the old explicit-proxy `http_port 3128 ssl-bump`
-    must not come back -- it's fundamentally incompatible with NAT-redirected
-    traffic (no CONNECT is ever sent for an intercepted HTTPS connection).
+    """The old explicit-proxy `http_port 3128 ssl-bump` must not come
+    back -- it's fundamentally incompatible with NAT-redirected traffic
+    (no CONNECT is ever sent for an intercepted HTTPS connection).
 
-    `http_port 127.0.0.1:3128` (added 2026-08-30, confirmed live against a
-    real Squid binary) is NOT that port coming back -- it's a deliberate,
-    loopback-only, non-intercept port that exists purely so Squid has a
-    "normal" address to build its own internal URLs from (built-in icons
-    for e.g. FTP listings); without it, an intercept-only Squid FATALs at
-    startup with "mimeLoadIcon: cannot parse internal URL" before ever
-    opening the real intercept listeners. It's never reachable from
-    outside the container and never carries real traffic, so the
-    meaningful guard is "no *explicit ssl-bump proxy* on 3128", not "the
-    digits 3128 never appear in the file" -- see docs/review-2026-08-28.md
-    equivalent write-up in RoadMap.md's live-verification section."""
+    `http_port 127.0.0.1:3128` is NOT that port coming back -- it's a
+    deliberate, loopback-only, non-intercept port that exists purely so
+    Squid has a "normal" address to build its own internal URLs from
+    (built-in icons for e.g. FTP listings); without it, an intercept-only
+    Squid FATALs at startup with "mimeLoadIcon: cannot parse internal
+    URL" before ever opening the real intercept listeners. It's never
+    reachable from outside the container and never carries real traffic,
+    so the meaningful guard is "no *explicit ssl-bump proxy* on 3128",
+    not "the digits 3128 never appear in the file"."""
     text = TEMPLATE_PATH.read_text()
     assert re.search(r"^http_port\s+3129\s+intercept\s*$", text, re.MULTILINE)
     assert re.search(r"^https_port\s+3130\s+intercept\s+ssl-bump\b", text, re.MULTILINE)
@@ -160,17 +143,13 @@ def test_ports_are_intercept_mode_not_explicit_proxy():
 
 
 def test_ssl_bump_catchall_is_still_terminate_not_splice():
-    """Guards a deliberate deviation from RoadMap.md's changes-needed
-    checklist: that checklist lists flipping `ssl_bump terminate step2 all`
-    to `splice` as part of this item, but also flags (in the same breath)
-    that whether the SNI-layer helpers still pull their own weight "needs a
-    closer look... not assumed here." Closer look: flipping it now, before
-    the AdGuard hard-deny integration exists (a separate, not-yet-started
-    checklist item) to actually be the domain-level gate, would make
-    block_page_mode='terminate' (the default) silently splice unconfigured/
-    unassigned domains through unfiltered instead of denying them -- a real
-    regression, not a no-op. See squid.conf.template's own comment on this
-    line. Revisit together with the AdGuard item."""
+    """Guards against flipping `ssl_bump terminate step2 all` to `splice`
+    before the AdGuard hard-deny integration exists to actually be the
+    domain-level gate: doing so now would make block_page_mode='terminate'
+    (the default) silently splice unconfigured/unassigned domains through
+    unfiltered instead of denying them -- a real regression, not a no-op.
+    See squid.conf.template's own comment on this line. Revisit together
+    with the AdGuard item."""
     text = TEMPLATE_PATH.read_text()
     assert re.search(r"^ssl_bump\s+terminate\s+step2\s+all\s*$", text, re.MULTILINE), (
         "the ssl_bump catch-all must stay 'terminate' until the AdGuard "
@@ -194,23 +173,19 @@ def test_http_access_catchall_is_still_deny_not_allow():
 
 
 def test_alt_svc_response_header_is_stripped():
-    """RoadMap.md finding #2 (QUIC fallback UX): controller/adguard_sync.py's
-    build_ech_strip_rules() (item 17) already withholds the DNS HTTPS
-    record's alpn="h3" hint for every bump-mode domain, but that alone was
-    confirmed live 2026-09-11 NOT to stop Chrome's ERR_QUIC_PROTOCOL_ERROR
+    """controller/adguard_sync.py's build_ech_strip_rules() already
+    withholds the DNS HTTPS record's alpn="h3" hint for every bump-mode
+    domain, but that alone doesn't stop Chrome's ERR_QUIC_PROTOCOL_ERROR
     -- Chrome also caches h3 support from a real Alt-Svc response header,
     independent of DNS.
 
-    **Real production failure, same day, worth its own regression guard**:
-    the original version of this rule scoped itself with `acl bumped
-    ssl::bumped` -- confirmed live against production Squid 5.7 that
-    `ssl::bumped` is NOT a real Squid ACL type at all ("FATAL: Invalid ACL
-    type 'ssl::bumped'"), crash-looping the proxy container the moment it
-    deployed. Fixed by dropping the ACL and using an unconditional
-    `reply_header_access Alt-Svc deny all` instead -- still effectively
-    scoped to bumped traffic in practice, since a spliced connection is
-    never HTTP-parsed by Squid at all regardless of any ACL. This test
-    guards against the invalid `ssl::bumped` ACL ever coming back."""
+    This also guards against scoping the rule with an ACL like `acl
+    bumped ssl::bumped` again: `ssl::bumped` is not a real Squid ACL type
+    ("FATAL: Invalid ACL type 'ssl::bumped'"), so that crash-loops the
+    proxy container. An unconditional `reply_header_access Alt-Svc deny
+    all` is used instead -- still effectively scoped to bumped traffic in
+    practice, since a spliced connection is never HTTP-parsed by Squid at
+    all regardless of any ACL."""
     text = TEMPLATE_PATH.read_text()
     active_lines = [
         line for line in text.splitlines()
@@ -229,15 +204,14 @@ def test_alt_svc_response_header_is_stripped():
 
 
 def test_host_verify_strict_is_off_for_intercept_mode():
-    """RoadMap.md finding #6 (2026-09-10): with Squid's stricter host
-    verification, an intercepted connection to a large multi-IP CDN gets
-    killed with `SECURITY ALERT: Host header forgery detected` +
-    NONE_NONE/409 whenever the client's connected IP isn't in Squid's own
-    fresh re-resolution of the SNI name -- which is most of the time for a
-    short-TTL CDN pool. `host_verify_strict off` makes Squid treat the
-    intercepted destination as authoritative instead. It must sit BEFORE
-    the ssl_bump chain (it governs how the intercepted destination is
-    established, which happens first)."""
+    """With Squid's stricter host verification, an intercepted connection
+    to a large multi-IP CDN gets killed with `SECURITY ALERT: Host header
+    forgery detected` + NONE_NONE/409 whenever the client's connected IP
+    isn't in Squid's own fresh re-resolution of the SNI name -- which is
+    most of the time for a short-TTL CDN pool. `host_verify_strict off`
+    makes Squid treat the intercepted destination as authoritative
+    instead. It must sit BEFORE the ssl_bump chain (it governs how the
+    intercepted destination is established, which happens first)."""
     text = TEMPLATE_PATH.read_text()
     m = re.search(r"^host_verify_strict\s+off\s*$", text, re.MULTILINE)
     assert m, "host_verify_strict off must be set -- see the comment block above it in squid.conf.template"

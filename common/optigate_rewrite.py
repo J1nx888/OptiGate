@@ -1,31 +1,20 @@
 #!/usr/bin/env python3
-"""The `optigate.home` memorable-hostname DNS rewrite -- moved here from
-controller/adguard_sync.py 2026-09-08, same "both dashboard and
-controller need this, so it lives in common/" reasoning
-category_fetch.py's own docstring already gives for its module.
+"""The `optigate.home` memorable-hostname DNS rewrite -- lives in
+common/ since both dashboard and controller need it (same reasoning
+category_fetch.py's own docstring gives for its module).
 
-**Real gap found live 2026-09-08**: this was originally built as part
-of controller/adguard_sync.py's periodic sync loop only, on the
-assumption that AdGuard's config being wiped/reset would be rare and
-`controller` (the `interception` profile) would normally be running to
-re-apply it. Both assumptions turned out wrong in the same session --
-a routine wipe-and-redeploy left AdGuard freshly bootstrapped with no
-rewrite at all, and the `interception` profile is OFF by default (an
-opt-in, advanced feature most installs never enable), so
-`update_household_settings()`'s (formerly `update_optigate_hostname()`'s)
-"Saved. The address is now X.home."
-message was flatly untrue for anyone not running that profile --
-silently non-functional with no error, exactly the "other people
-deploying this won't know what's wrong" failure mode the project owner
-flagged. Fixed by making the dashboard call this directly (see
-dashboard.py's own `_sync_optigate_rewrite_now()`), so the feature
-works standalone, with `controller`'s own periodic call now just a
+Called directly by the dashboard (see dashboard.py's own
+`_sync_optigate_rewrite_now()`) rather than only from
+controller/adguard_sync.py's periodic sync loop: the `interception`
+profile controller runs under is off by default for most installs, so
+the rewrite has to work standalone or `update_household_settings()`'s
+"Saved. The address is now X.home." message would be untrue for anyone
+not running that profile. controller's own periodic call is now just a
 second, redundant path for when that profile happens to be running.
 
-**Bypass/ignored devices can't reach `optigate.home` -- by design
-(RoadMap.md finding #3, 2026-09-10).** The hostname is only ever an
-AdGuard DNS rewrite, so it resolves only for a device whose DNS
-actually goes through AdGuard. A `bypass_login` device gets nftables'
+Bypass/ignored devices can't reach `optigate.home` -- by design. The
+hostname is only ever an AdGuard DNS rewrite, so it resolves only for a
+device whose DNS actually goes through AdGuard. A `bypass_login` device gets nftables'
 plain `ct mark set 0x1 return` with no `:5354` DNS redirect
 (phase3/nftables-manager baselineRules), and an `ignored` device isn't
 in any managed set at all -- both resolve `optigate.home` against
@@ -78,8 +67,7 @@ def sync_optigate_rewrite(
     timeout: float = adguard_client.DEFAULT_TIMEOUT,
 ) -> None:
     """Reconciles AdGuard Home's own DNS-rewrite entries against this
-    project's single `optigate.home` entry (the memorable-URL feature,
-    RoadMap.md's dated 2026-09-07 entry) -- same "recompute and
+    project's single `optigate.home` entry -- same "recompute and
     reconcile every call" discipline controller/adguard_sync.py's other
     sync functions use, so renaming the hostname prefix (Settings page)
     or the box's own LAN IP changing (DASHBOARD_URL) self-heals on the

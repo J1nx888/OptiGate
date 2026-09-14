@@ -59,12 +59,10 @@ func broadcastAddr(subnet *net.IPNet) net.IP {
 
 // ResolveGateway performs a genuine ARP request/reply exchange to
 // learn the gateway's real hardware address. This must never be
-// satisfied from the OS neighbor cache: a cache that's already been
+// satisfied from the OS neighbor cache: the cache could already be
 // poisoned -- by this worker's own prior ungraceful crash, or by
-// something else on the LAN (the production network this project
-// targets has an independently confirmed live ARP-spoofer already
-// running -- see the project's own network notes) -- would make the
-// worker treat its own or another party's poisoning as ground truth.
+// another actor on the LAN -- which would make the worker treat
+// existing poisoning as ground truth.
 func ResolveGateway(sender ARPSender, gatewayIP net.IP) (net.HardwareAddr, error) {
 	mac, err := sender.Resolve(gatewayIP)
 	if err != nil {

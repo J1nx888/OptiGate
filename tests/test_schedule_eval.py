@@ -1,5 +1,5 @@
-"""Phase 8: common/schedule_eval.py -- pure day/time/timezone evaluation,
-plus is_full_lockout_active()'s thin DB-touching wrapper."""
+"""common/schedule_eval.py -- pure day/time/timezone evaluation, plus
+is_full_lockout_active()'s thin DB-touching wrapper."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -46,11 +46,9 @@ def test_same_day_window_inactive_on_unscheduled_day():
 
 
 def test_equal_start_and_end_time_means_active_all_day():
-    """Regression test for a real bug (fixed 2026-09-02): "00:00" to
-    "00:00" is the natural way an admin would type "block all day," but
-    the same-day branch's own [start, end) range is empty when start ==
-    end, so this used to silently never activate, on any day, at any
-    hour."""
+    """"00:00" to "00:00" is the natural way an admin would type "block
+    all day," but the same-day branch's own [start, end) range is empty
+    when start == end -- must not silently never activate."""
     schedule = _schedule(start_time="00:00", end_time="00:00")
     for hour in (0, 6, 12, 18, 23):
         now = datetime(2026, 8, 31, hour, 30, tzinfo=timezone.utc)  # Monday, a scheduled day
@@ -188,7 +186,7 @@ def test_is_full_lockout_active_false_when_lockout_all_is_zero(conn):
     assert schedule_eval.is_full_lockout_active(conn, device, now) is False
 
 
-# --- Phase 12: schedule_overrides / schedule_is_active_for_device --------
+# --- schedule_overrides / schedule_is_active_for_device -------------------
 
 def test_override_forces_a_mode_schedule_active_outside_its_own_window(conn):
     # Bedtime's own clock window hasn't started yet (it's noon), but an
@@ -234,10 +232,9 @@ def test_override_does_not_affect_a_non_mode_category_block_schedule(conn):
 
 
 def test_override_suppresses_a_non_mode_lockout_all_schedule_too(conn):
-    # Regression test for RoadMap.md finding #10 (found 2026-09-10): prod's
-    # "Bedtime" is lockout_all=1, is_mode=0 -- unlike a category-block
-    # safety net, a full lockout is a total blackout incompatible with
-    # being "in" any mode, so a deliberate "Shift mode now" override must
+    # A lockout_all=1 schedule can have is_mode=0 (e.g. "Bedtime") -- unlike
+    # a category-block safety net, a full lockout is a total blackout
+    # incompatible with being "in" any mode, so a mode-shift override must
     # lift it too, even though it was never marked is_mode.
     bedtime = _insert_schedule(conn, "Bedtime", is_mode=0, lockout_all=1,
                                 days="mon,tue,wed,thu,fri,sat,sun", start="21:00", end="06:00")

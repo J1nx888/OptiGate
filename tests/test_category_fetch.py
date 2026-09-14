@@ -115,16 +115,13 @@ def test_fetch_and_sync_category_raises_without_subscription_url(conn):
 
 
 def test_fetch_and_sync_category_skips_rewrite_when_content_is_unchanged(monkeypatch, conn):
-    """Regression test for a real gap found by code review 2026-09-11,
-    fixed 2026-09-12: this used to unconditionally DELETE+INSERT every
-    subscription row on every sync, even when the fetched content was
-    identical (post-parse) to what's already stored -- the confirmed-
-    live "Adult" category alone is ~953K domains. A second sync with
-    byte-for-byte-different-but-semantically-identical content
-    (reordered lines) must leave the existing category_domains rows
-    completely untouched -- proven here by their row ids staying the
-    same, since a real DELETE+INSERT would hand out fresh autoincrement
-    ids for the reinserted rows."""
+    """A sync must not rewrite category_domains rows when the fetched
+    content is unchanged (post-parse) from what's already stored -- some
+    subscription lists run into the hundreds of thousands of domains, so
+    an unconditional DELETE+INSERT on every sync is expensive. A second
+    sync with reordered-but-identical content must leave the existing
+    rows' ids untouched, since a real DELETE+INSERT would hand out fresh
+    autoincrement ids."""
     category = _insert_category(conn, "Gambling", "https://example.invalid/gambling.txt")
     monkeypatch.setattr(
         category_fetch._OPENER, "open",
@@ -190,17 +187,13 @@ def test_fetch_and_sync_category_still_rewrites_when_content_actually_changes(mo
 
 
 def test_sync_is_one_atomic_transaction_not_thousands_of_autocommits(monkeypatch, conn):
-    """Regression for a real, severe performance bug found live
-    2026-09-07 (RoadMap.md's dated entry): `conn` opens with
-    isolation_level=None (common/db.py), so without an explicit
-    transaction, every row of the executemany INSERT autocommits (and
-    fsyncs) individually -- for the real ~953K-domain Adult list, that
-    took over 20 minutes and then collided with another writer
-    ("database is locked"). Proven here via the rollback path: a
+    """`conn` opens with isolation_level=None (common/db.py), so without
+    an explicit transaction, every row of the executemany INSERT
+    autocommits (and fsyncs) individually -- ruinous for a
+    large subscription list. Proven here via the rollback path: a
     mid-transaction failure must leave category_domains and
-    last_synced_at completely untouched, not partially replaced --
-    which is only possible if the delete+insert+update are genuinely
-    one atomic unit, not each committing as they go."""
+    last_synced_at completely untouched, which is only possible if the
+    delete+insert+update are genuinely one atomic unit."""
     category = _insert_category(conn, "Gambling", "https://example.invalid/gambling.txt")
     conn.execute(
         "INSERT INTO category_domains (category_id, pattern, source, created_at) VALUES (?, ?, 'subscription', ?)",

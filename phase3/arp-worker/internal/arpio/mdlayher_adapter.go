@@ -4,15 +4,10 @@
 // interface (see internal/worker/types.go). This is the one piece of
 // the whole project that actually needs CAP_NET_RAW.
 //
-// Verified 2026-08-29 against a real build on the smoke-test VM
-// (github.com/mdlayher/arp v0.0.0-20260528070854-93566ba168e9, `go doc`
-// used to confirm the exact signatures): that version's Client.Resolve
-// and arp.NewPacket take netip.Addr, not net.IP, which the first draft
-// of this file (written offline, no toolchain available) got wrong.
-// Fixed below with a net.IP -> netip.Addr conversion at the boundary
-// so the rest of the codebase (worker.ARPSender) keeps using net.IP,
-// which is what the stdlib and this project's other code already use
-// throughout.
+// github.com/mdlayher/arp's Client.Resolve and arp.NewPacket take
+// netip.Addr, not net.IP -- the conversion happens at the boundary
+// (see toAddr) so the rest of the codebase (worker.ARPSender) can keep
+// using net.IP, matching the stdlib and the rest of this project.
 package arpio
 
 import (
@@ -29,9 +24,9 @@ type Client struct {
 }
 
 // Dial opens a raw-socket ARP client bound to ifi. Requires
-// CAP_NET_RAW (or root) -- per RoadMap.md's least-privilege design,
-// this should be the only capability the arp-worker binary is ever
-// granted (see the systemd unit sketch in the design doc).
+// CAP_NET_RAW (or root) -- this should be the only capability the
+// arp-worker binary is ever granted (see the systemd unit sketch in
+// the design doc).
 func Dial(ifi *net.Interface) (*Client, error) {
 	c, err := arp.Dial(ifi)
 	if err != nil {

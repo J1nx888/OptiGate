@@ -4,13 +4,11 @@
 // policy.Reconcile/ResolveConflicts logic in ../policy. This is the one
 // piece of nftables-manager that actually needs CAP_NET_ADMIN.
 //
-// NOT VERIFIED AGAINST A REAL BUILD as first written -- same situation
-// as phase3/arp-worker/internal/arpio's mdlayher/arp adapter before its
-// own fix: written from memory of knftables' documented shape (as used
-// in kube-proxy), not checked against a fetched copy, because no Go
-// toolchain was available while writing it. Expect API mismatches here
-// specifically -- fix against `go doc sigs.k8s.io/knftables` once
-// fetched, same workflow that fixed the ARP worker's adapter.
+// NOT VERIFIED AGAINST A REAL BUILD: written from memory of knftables'
+// documented shape (as used in kube-proxy), not checked against a
+// fetched copy, since no Go toolchain was available while writing it.
+// Expect API mismatches here specifically -- verify against `go doc
+// sigs.k8s.io/knftables` once a toolchain is available.
 package nft
 
 import (
@@ -51,26 +49,20 @@ type Manager struct {
 	// (every existing test's plain Manager{...} struct literal, and any
 	// caller that doesn't care) falls back to DefaultDNSRedirectPort in
 	// baselineRules() below, so this field is optional in practice, not
-	// just in name. Added 2026-09-08: a real deployment found
-	// avahi-daemon (mDNS) already squatting the previous hardcoded
-	// :5353 default -- a port conflict any other user running this on a
-	// typical Debian/Ubuntu box (avahi is a common default package) was
-	// always going to hit sooner or later, not a one-off. Making this
-	// genuinely configurable, not just picking a different hardcoded
-	// number, is the actual fix -- see docker-compose.yml's
+	// just in name. Configurable because avahi-daemon (mDNS), a common
+	// default package on Debian/Ubuntu, already squats the previous
+	// hardcoded :5353 default on many boxes -- see docker-compose.yml's
 	// ADGUARD_DNS_PORT and this binary's own -dns-redirect-port flag.
 	dnsRedirectPort int
 
 	// selfIP is this box's own LAN IP (e.g. "192.168.1.250"), used by
 	// baselineRules() below to exclude traffic addressed to the box
-	// itself from bump_v4's Squid redirect -- see that field's own
-	// comment for the full fix this closes (RoadMap.md items 7/18/20).
-	// Empty string (every existing test's plain Manager{...} struct
-	// literal, and any caller that doesn't know its own LAN IP) means
-	// baselineRules() just omits the exception rules entirely -- same
-	// "not configured, not an error" treatment
-	// common/optigate_rewrite.py's parse_block_page_ip() already gives
-	// the identical fact on the Python side.
+	// itself from bump_v4's Squid redirect. Empty string (every existing
+	// test's plain Manager{...} struct literal, and any caller that
+	// doesn't know its own LAN IP) means baselineRules() just omits the
+	// exception rules entirely -- same "not configured, not an error"
+	// treatment common/optigate_rewrite.py's parse_block_page_ip()
+	// already gives the identical fact on the Python side.
 	selfIP string
 }
 
@@ -221,11 +213,9 @@ func (m *Manager) EnsureBaseline(ctx context.Context) error {
 // them any more -- but a table left in the kernel keeps enforcing its
 // last-written rules forever, and because it is registered at the same
 // prerouting/dstnat hook as the current table, its stale device-set
-// membership silently shadows the live policy (found live 2026-09-10:
-// a device still sitting in the abandoned `parental_proxy` table's
-// `unauthenticated_v4` set was being force-redirected to the captive
-// portal and to a DNS port nothing listens on any more, regardless of
-// its correct classification in the current table). pruneLegacyTables
+// membership silently shadows the live policy (a device still sitting
+// in an abandoned legacy table's set can be force-redirected regardless
+// of its correct classification in the current table). pruneLegacyTables
 // deletes them on every startup.
 var legacyTableNames = []string{"parental_proxy"}
 
@@ -251,17 +241,15 @@ func (m *Manager) pruneLegacyTables(ctx context.Context) error {
 
 // Teardown removes the "optigate" table entirely (the Go equivalent of
 // `nft delete table inet optigate`) and the one rule this project adds
-// outside it (see ensureDockerUserException). Real fix for the gap
-// found live 2026-09-08 shutting down a soak-test window: SIGTERM
-// (cmd/pp-nftables-manager/main.go) used to just log and return,
-// leaving every baseline redirect rule active in the kernel with the
-// managing process gone -- forcing a manual `sudo nft delete table
-// inet optigate` on the host to actually return the box to normal
-// pass-through. Tolerates the table already being gone (knftables'
-// IsNotFound), so this is safe to call even if EnsureBaseline was
-// never reached (e.g. this process crashed during its own startup) --
-// same "call it unconditionally, let idempotency do the work" style as
-// EnsureBaseline itself.
+// outside it (see ensureDockerUserException). Without this, SIGTERM
+// would leave every baseline redirect rule active in the kernel with
+// the managing process gone, requiring a manual `sudo nft delete table
+// inet optigate` on the host to return the box to normal pass-through.
+// Tolerates the table already being gone (knftables' IsNotFound), so
+// this is safe to call even if EnsureBaseline was never reached (e.g.
+// this process crashed during its own startup) -- same "call it
+// unconditionally, let idempotency do the work" style as EnsureBaseline
+// itself.
 func (m *Manager) Teardown(ctx context.Context) error {
 	tx := m.nft.NewTransaction()
 	tx.Delete(&knftables.Table{})
@@ -315,21 +303,20 @@ func (m *Manager) removeDockerUserException(ctx context.Context) error {
 // unsafe (DOCKER-USER isn't ours to clear).
 const dockerUserComment = "optigate: allow marked connections (see knftables_adapter.go)"
 
-// ensureDockerUserException fixes a real gap discovered live 2026-09-07:
-// every container in this project runs with network_mode: host, so
-// Docker's own bridge-network NAT/isolation rules (the "ip filter"
-// table's DOCKER*/DOCKER-USER chains, auto-created the moment the
-// Docker daemon starts, independent of whether any bridge container
-// ever runs) provide this project literally nothing -- but its FORWARD
-// base chain's policy is still `drop` by default (Docker 20.10+), and
-// nothing before this fix ever told it otherwise. A base chain's own
-// `accept` policy or an early same-hook chain's `accept` verdict does
-// NOT override a *different* base chain's later `drop` policy at the
-// same hook (verified against a real box, not assumed -- an `accept`
-// verdict only means "this particular chain is done with the packet,"
-// or a *jumped-to* sub-chain, netfilter still runs every other base
-// chain registered at that hook afterward, and any one of them
-// returning `drop` is immediately final). The one chain Docker
+// ensureDockerUserException works around a host-networking gap: every
+// container in this project runs with network_mode: host, so Docker's
+// own bridge-network NAT/isolation rules (the "ip filter" table's
+// DOCKER*/DOCKER-USER chains, auto-created the moment the Docker daemon
+// starts, independent of whether any bridge container ever runs)
+// provide this project literally nothing -- but its FORWARD base
+// chain's policy is still `drop` by default (Docker 20.10+), and
+// nothing else here tells it otherwise. A base chain's own `accept`
+// policy or an early same-hook chain's `accept` verdict does NOT
+// override a *different* base chain's later `drop` policy at the same
+// hook (an `accept` verdict only means "this particular chain is done
+// with the packet," or a *jumped-to* sub-chain -- netfilter still runs
+// every other base chain registered at that hook afterward, and any one
+// of them returning `drop` is immediately final). The one chain Docker
 // guarantees it creates once and never overwrites the contents of --
 // specifically so operators can add exactly this kind of exception --
 // is DOCKER-USER, jumped to from the very first line of Docker's own
@@ -391,31 +378,27 @@ func (m *Manager) ensureDockerUserException(ctx context.Context) error {
 // applied in the order given (evaluation order matters -- bypass must
 // be checked, and short-circuit via `return`, before anything else).
 //
-// Corrected 2026-08-30 for the "two independent axes" architecture
-// (RoadMap.md, locked that date): the old ruleset redirected EVERY
-// authenticated_v4 device's tcp 80/443 to Squid unconditionally, which
-// was wrong -- Squid access is a separate, admin-chosen per-device
-// opt-in (bump_v4), not a consequence of authentication. authenticated_v4
-// now only carries its DNS redirect; bump_v4 independently carries the
-// tcp 80/443 redirect to Squid's intercept ports, and composes with
-// (does not replace) authenticated_v4 -- a device is normally a member
-// of both. Squid itself narrows this all-or-nothing per-device redirect
-// down to specific domains via its own unchanged SNI splice/bump logic
+// authenticated_v4 carries only its DNS redirect below; bump_v4
+// independently carries the tcp 80/443 redirect to Squid's intercept
+// ports, and composes with (does not replace) authenticated_v4 -- a
+// device is normally a member of both, since Squid access is a
+// separate, admin-chosen per-device opt-in, not a consequence of plain
+// authentication. Squid itself narrows this all-or-nothing per-device
+// redirect down to specific domains via its own SNI splice/bump logic
 // (nftables can't see hostnames below the TLS layer, so it can't be
-// selective by domain the way Squid can) -- see RoadMap.md's Squid
-// intercept-mode section.
-// tcp dport 853 (DNS-over-TLS) redirects, added 2026-09-02 to close a
-// real, silent DNS-tier bypass found by code review: before this, ONLY
-// port 53 was ever touched, so a device with DoT enabled (e.g. Android's
-// one-tap Settings > Private DNS, no browser setting or technical skill
-// needed) resolved every domain via an encrypted TLS session straight to
-// whatever public resolver it was pointed at, with AdGuard's domain/
+// selective by domain the way Squid can).
+//
+// tcp dport 853 (DNS-over-TLS) is redirected alongside port 53: a
+// device with DoT enabled (e.g. Android's one-tap Settings > Private
+// DNS, no browser setting or technical skill needed) would otherwise
+// resolve every domain via an encrypted TLS session straight to
+// whatever public resolver it's pointed at, with AdGuard's domain/
 // category/schedule/SafeSearch/anti-DoH rules never in the path at all.
-// Redirecting to :5353 -- the SAME plain-DNS port 53 already redirects
-// to -- is deliberate, not a mistake: AdGuard's listener there speaks
-// plain DNS, not TLS, so a redirected DoT ClientHello simply fails the
-// handshake (this box has no certificate a random public resolver's
-// hostname would validate against, and minting one would mean actually
+// Redirecting to the SAME plain-DNS port already used for port 53 is
+// deliberate, not a mistake: AdGuard's listener there speaks plain DNS,
+// not TLS, so a redirected DoT ClientHello simply fails the handshake
+// (this box has no certificate a random public resolver's hostname
+// would validate against, and minting one would mean actually
 // terminating arbitrary TLS, a materially bigger undertaking than
 // blocking). A failed handshake is the desired outcome here, matching
 // how this project already treats an unconfigured bump-mode domain
@@ -426,39 +409,34 @@ func (m *Manager) ensureDockerUserException(ctx context.Context) error {
 // DNS-over-TLS is TCP-only (RFC 7858).
 //
 // bump_v4 needs no port-853 rule of its own: a bump-eligible device is
-// ALWAYS also a member of authenticated_v4 (see the "two independent
-// axes" comment above), so the authenticated_v4 rule below already
-// covers it.
+// ALWAYS also a member of authenticated_v4 (see above), so the
+// authenticated_v4 rule below already covers it.
 //
-// Known, pre-existing asymmetry NOT addressed here (out of scope for
-// this fix, flagged for a future look): unauthenticated_v4 has no tcp
-// dport 53 rule, only udp -- a PREAUTH device using TCP-based plain DNS
-// (large responses, some resolvers' defaults) would bypass the DNS
-// redirect the same way DoT did, though it can never reach an actual
-// destination beyond this box's own :5353 either way once port 853 is
-// closed off, since PREAUTH's only other open door is tcp/80 to the
-// captive portal.
+// Known, pre-existing asymmetry NOT addressed here (flagged for a
+// future look): unauthenticated_v4 has no tcp dport 53 rule, only udp
+// -- a PREAUTH device using TCP-based plain DNS (large responses, some
+// resolvers' defaults) would bypass the DNS redirect the same way DoT
+// did, though it can never reach an actual destination beyond this
+// box's own :5353 either way once port 853 is closed off, since
+// PREAUTH's only other open door is tcp/80 to the captive portal.
 //
-// The two `ct mark set 0x1` statements, added 2026-09-07: real traffic
-// for bypass_v4 (its ordinary, non-redirected browsing) and
-// authenticated_v4 (its ordinary web traffic, as opposed to the DNS
-// ports redirected above) needs to actually be forwarded back out this
-// single-NIC box to reach the real internet -- a genuine `redirect` to
-// a local port isn't the right tool for that (there's no local service
-// for it to terminate at), so unlike every other line here it doesn't
-// end in a terminal verdict. `ct mark` is the intentional choice over
-// `meta mark`: it's read again much later, at the forward hook, by
+// The two `ct mark set 0x1` statements mark real traffic for bypass_v4
+// (its ordinary, non-redirected browsing) and authenticated_v4 (its
+// ordinary web traffic, as opposed to the DNS ports redirected above)
+// so it can actually be forwarded back out this single-NIC box to reach
+// the real internet -- a genuine `redirect` to a local port isn't the
+// right tool for that (there's no local service for it to terminate
+// at), so unlike every other line here it doesn't end in a terminal
+// verdict. `ct mark` is the intentional choice over `meta mark`: it's
+// read again much later, at the forward hook, by
 // ensureDockerUserException's rule in a completely different table --
 // `ct mark` persists for a connection's whole lifetime once set on its
-// first packet, `meta mark` would not still be attached by then. See
-// that function's own doc comment for the full story (a real,
-// previously-undiscovered bug: nothing ever actually verified a client
-// could reach the real internet through this box end-to-end, only that
-// its traffic arrived here via ARP redirection). unauthenticated_v4
-// deliberately gets no such rule -- its only legitimate paths are the
-// locally-terminating redirects above; anything else (e.g. a raw HTTPS
-// request bypassing the captive portal) is meant to fail, the same as
-// any real-world captive portal.
+// first packet, `meta mark` would not still be attached by then (see
+// that function's own doc comment for the full reasoning).
+// unauthenticated_v4 deliberately gets no such rule -- its only
+// legitimate paths are the locally-terminating redirects above;
+// anything else (e.g. a raw HTTPS request bypassing the captive portal)
+// is meant to fail, the same as any real-world captive portal.
 //
 // The DNS/DoT redirect target (:5353 below, historically -- see
 // DefaultDNSRedirectPort's own comment on why that changed) comes from
@@ -476,42 +454,37 @@ var baselineRules = (&Manager{}).baselineRules()
 // something) is reflected everywhere this ruleset gets used, not just
 // baked in once at compile time.
 //
-// **Self-IP exception, added for RoadMap.md items 7/18/20 (2026-09-09,
-// next session):** bump_v4's own two redirect rules below match on
+// Self-IP exception: bump_v4's own two redirect rules below match on
 // source IP and destination PORT only, with no destination-IP
-// exception for the box's own address -- confirmed live to cause two
-// real problems, not just a hypothetical one. Item 18: a bump-enabled
-// device's request for the `optigate.home` troubleshooting page never
-// reached dashboard/block_page_server.py's real port-80 listener at
-// all, it hit Squid first, which has no special-case awareness that
-// `optigate.home` is a synthetic system hostname -- so it showed the
-// box's own IP instead of the requesting device's. Item 20: worse than
-// cosmetic -- when AdGuard correctly DNS-rewrites a hard-denied domain
-// to the box's own IP for the friendly block page, the same
+// exception for the box's own address, which causes two real problems.
+// First, a bump-enabled device's request for the `optigate.home`
+// troubleshooting page never reaches dashboard/block_page_server.py's
+// real port-80 listener -- it hits Squid first, which has no
+// special-case awareness that `optigate.home` is a synthetic system
+// hostname, so it shows the box's own IP instead of the requesting
+// device's. Second, and worse: when AdGuard DNS-rewrites a hard-denied
+// domain to the box's own IP for the friendly block page, the same
 // unconditional redirect sweeps a bump-enabled device's HTTPS attempt
 // to that rewritten address into Squid too, which then sees a
 // connection whose real destination is the box's own IP but whose SNI
-// says (say) "www.youtube.com", correctly flags its own built-in
+// says (say) "www.youtube.com", triggers its own built-in
 // Host-header-forgery check, and kills the connection outright --
 // invisible to the Report page, since that Squid-internal check fires
 // before proxy/authz_helper.py or proxy/sni_helper.py (the only places
 // that ever write to access_log) get a chance to run at all.
 //
-// Chose this fix over a Squid-side special case (the other candidate
-// RoadMap.md's dated entry considered) because it's the one change
-// that actually closes BOTH gaps at once: Squid's own docs/mailing
-// list (core developer Amos Jeffries, confirmed directly, not assumed)
-// say its Host-header-forgery check has no config directive to relax
-// for specific cases, and even if it did, a rule keyed to the literal
-// `optigate.home` hostname could never help item 20's case -- the SNI
-// Squid sees there is the actual denied domain, not `optigate.home`.
-// Excluding the box's own destination IP from the redirect instead
-// means traffic addressed to the gateway itself never reaches Squid in
-// the first place, regardless of what SNI it carries -- matching how a
-// real router already treats packets addressed to its own interface.
-// `return` (not `accept`) so the packet falls through to this base
-// chain's own policy verdict exactly as if bump_v4 had never matched
-// it at all, rather than this project asserting a verdict of its own.
+// Fixed here rather than on the Squid side: Squid's Host-header-forgery
+// check has no config directive to relax for specific cases, and even
+// if it did, a rule keyed to the literal `optigate.home` hostname
+// couldn't help the second case -- the SNI Squid sees there is the
+// actual denied domain, not `optigate.home`. Excluding the box's own
+// destination IP from the redirect instead means traffic addressed to
+// the gateway itself never reaches Squid in the first place, regardless
+// of what SNI it carries -- matching how a real router already treats
+// packets addressed to its own interface. `return` (not `accept`) so
+// the packet falls through to this base chain's own policy verdict
+// exactly as if bump_v4 had never matched it at all, rather than this
+// project asserting a verdict of its own.
 //
 // Deliberately does NOT touch authenticated_v4/unauthenticated_v4/
 // quarantine_v4 -- none of those have this specific problem (only
@@ -520,9 +493,7 @@ var baselineRules = (&Manager{}).baselineRules()
 // untested behavior change nobody asked for. selfIP of "" (no
 // DASHBOARD_URL configured, or it's not a plain IPv4 host -- see
 // SelfIPFromDashboardURL) means these two exception rules are omitted
-// entirely, leaving bump_v4's redirect exactly as it was before this
-// fix -- every existing test's plain Manager{} still gets that
-// unchanged baseline.
+// entirely, leaving bump_v4's redirect unchanged.
 func (m *Manager) baselineRules() []string {
 	port := m.dnsRedirectPort
 	if port == 0 {
@@ -548,16 +519,15 @@ func (m *Manager) baselineRules() []string {
 		// no forged-certificate MITM for it -- so a bump device left
 		// free to use it sends every HTTPS request over a path Squid
 		// can't see: per-domain, per-path and per-show rules, plus all
-		// Report-page logging, silently bypassed. Confirmed live
-		// 2026-09-10: a bump device played non-whitelisted Crunchyroll
-		// because Chrome moved to H3 after its first TCP request (via
-		// Cloudflare's Alt-Svc) and never came back to TCP. Dropping
-		// udp/443 makes the browser fall back to tcp/443, which the rule
-		// directly above redirects into Squid -- the standard fix every
-		// intercepting proxy uses, since QUIC can't be intercepted, only
-		// denied. Scoped to bump_v4 only: a DNS-tier (authenticated_v4)
-		// device's QUIC is already gated by AdGuard at resolution time
-		// and has no decryption expectation to defeat.
+		// Report-page logging, silently bypassed. Browsers that negotiate
+		// QUIC via Alt-Svc after their first TCP request (e.g. Chrome)
+		// can stay on it indefinitely without falling back to TCP.
+		// Dropping udp/443 forces that fallback to tcp/443, which the
+		// rule directly above redirects into Squid -- the standard fix
+		// every intercepting proxy uses, since QUIC can't be intercepted,
+		// only denied. Scoped to bump_v4 only: a DNS-tier
+		// (authenticated_v4) device's QUIC is already gated by AdGuard at
+		// resolution time and has no decryption expectation to defeat.
 		"ip saddr @bump_v4 udp dport 443 drop",
 		fmt.Sprintf("ip saddr @authenticated_v4 udp dport 53 redirect to :%d", port),
 		fmt.Sprintf("ip saddr @authenticated_v4 tcp dport 53 redirect to :%d", port),
@@ -594,8 +564,7 @@ func (m *Manager) ReadActual(ctx context.Context) (policy.ActualPolicy, error) {
 // ApplyDiffs applies every set's add/remove changes in ONE atomic
 // transaction -- either all of it lands, or (per knftables' own
 // atomic-transaction guarantee cited in the design doc section 1)
-// none of it does. This is what makes Milestone 5's "atomic
-// apply/rollback" requirement concrete.
+// none of it does.
 func (m *Manager) ApplyDiffs(ctx context.Context, diffs map[policy.SetName]policy.SetDiff) error {
 	if len(diffs) == 0 {
 		return nil

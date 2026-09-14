@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Milestone 4's remaining "AdGuard query-log observations (confirms
-active IP usage)" discovery source (RoadMap.md's discovery precedence
-list). Distinct from -- and much narrower than -- adguard_sync.py,
-which pushes hard-deny rules TO AdGuard; this module only ever reads
-FROM it.
+"""AdGuard query-log observations, used to confirm active IP usage.
+Distinct from -- and much narrower than -- adguard_sync.py, which
+pushes hard-deny rules TO AdGuard; this module only ever reads FROM it.
 
 AdGuard's query log has no link-layer information (a DNS query carries
 a client IP, never a MAC), so this source can never discover a

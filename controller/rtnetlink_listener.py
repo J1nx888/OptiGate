@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Milestone 4's higher-precedence discovery source (see
-docs/design/phase3-technical-design.md's discovery precedence order): a
-live rtnetlink listener for `RTM_NEWNEIGH` events, reacting within
+"""A live rtnetlink listener for `RTM_NEWNEIGH` events, reacting within
 however long the kernel takes to deliver the netlink message --
 effectively instant, versus `controller/discovery.py`'s periodic
 `ip neigh show` snapshot, which can miss a device's new IP for up to a
-full `--discovery-interval`. Closes the exact gap that module's own
-docstring and `docs/security/overview.md` §3 both flag by name.
+full `--discovery-interval`.
 
 Uses `pyroute2` (see `controller/requirements.txt`) -- pure Python, no C
-extension needed (confirmed via PyPI metadata), the one deliberate
-exception to this project's otherwise-stdlib-only controller/common
-code, for the one thing the stdlib genuinely doesn't expose a usable
-API for (parsing `RTM_NEWNEIGH` netlink messages -- raw `AF_NETLINK`
-sockets ARE available via Python's own `socket` module, but decoding
-their contents by hand is squarely what pyroute2 already does well).
+extension needed, the one deliberate exception to this project's
+otherwise-stdlib-only controller/common code, for the one thing the
+stdlib genuinely doesn't expose a usable API for (parsing
+`RTM_NEWNEIGH` netlink messages -- raw `AF_NETLINK` sockets ARE
+available via Python's own `socket` module, but decoding their
+contents by hand is squarely what pyroute2 already does well).
 Always imported lazily, inside functions, never at module level --
 `pyroute2` is Linux-only (no `AF_NETLINK` on Windows), and this module
 must stay importable (for tests, and for `controller/main.py` itself)
@@ -31,9 +28,7 @@ this binding" would be over-reacting to absence -- exactly the kind of
 inference `identity.py`'s own docstring already warns against for a
 different case (never auto-associating a MAC from network data alone).
 
-Real message shape confirmed live 2026-08-30 (pyroute2 0.9.6, a real
-Linux kernel, real Docker bridge traffic) before writing this, not
-assumed from documentation:
+Real message shape, not assumed from documentation:
 - `family` distinguishes real IPv4 ARP neighbors (`socket.AF_INET`, 2)
   from `AF_BRIDGE` FDB-learning noise (7, no `NDA_DST` at all -- these
   dominate event volume on a Docker host and are NOT ARP/NDP entries at
@@ -93,12 +88,9 @@ def extract_ipv4_binding(message: dict) -> tuple[str, str] | None:
 class RtnetlinkListener:
     """Owns the live netlink socket and the sqlite connection it records
     bindings through; the background thread and stop/retry bookkeeping
-    itself is delegated entirely to `periodic.PeriodicTask` (refactored
-    2026-09-12 -- this class used to hand-roll the exact same
-    thread+stop-Event+retry-backoff shape PeriodicTask already provides,
-    including its own copy of the `_safe_report()` guard PeriodicTask
-    gained on 2026-09-11; composing means that guard, and any future
-    fix to this shape, only has to exist once).
+    itself is delegated entirely to `periodic.PeriodicTask`, so this
+    class doesn't hand-roll its own copy of that thread/stop-Event/
+    retry-backoff shape (including the `_safe_report()` guard).
 
     A hard failure while listening (permission denied, the socket
     erroring out, `pyroute2` itself misbehaving) is reported via

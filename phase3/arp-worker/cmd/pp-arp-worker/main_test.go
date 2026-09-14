@@ -12,22 +12,20 @@ import (
 var errResolveTimedOut = errors.New("fake: gateway ARP resolve timed out")
 
 // testGatewayMAC is the gateway MAC every existing test's wire message
-// already used before HandleReplaceTargets started live-verifying it
-// (2026-09-12) -- fakeSender's default Resolve() return matches this so
-// those tests keep exercising their OWN concern (target validation, not
-// gateway verification) without also having to know about the new
-// check.
+// uses; fakeSender's default Resolve() return matches this so those
+// tests keep exercising their OWN concern (target validation, not
+// gateway verification) without also having to know about that check.
 var testGatewayMAC = net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
 
 // fakeSender is a minimal worker.ARPSender double -- no real socket or
 // CAP_NET_RAW needed, just enough for a *worker.Worker to exist and
 // ApplyGeneration to run without erroring, so HandleReplaceTargets's
-// OWN logic (target validation, target count, failure reporting, and --
-// added 2026-09-12 -- gateway live-verification) can be tested in
-// isolation. resolveMAC/resolveErr are configurable per test; the zero
-// value of fakeSender{} would resolve to (nil, nil), which fails EVERY
-// generation shut (a nil MAC never bytes.Equal()s a real one) -- tests
-// that don't care about gateway verification should use
+// OWN logic (target validation, target count, failure reporting, and
+// gateway live-verification) can be tested in isolation. resolveMAC/
+// resolveErr are configurable per test; the zero value of
+// fakeSender{} would resolve to (nil, nil), which fails EVERY
+// generation shut (a nil MAC never bytes.Equal()s a real one) --
+// tests that don't care about gateway verification should use
 // newTestHandler() below, which sets resolveMAC to testGatewayMAC.
 type fakeSender struct {
 	resolveMAC net.HardwareAddr
@@ -60,11 +58,10 @@ func newTestHandlerWithSender(t *testing.T, sender fakeSender) *controllerHandle
 	return h
 }
 
-// TestHandleReplaceTargets_RejectsTheGateway is a regression test for a
-// real gap found by code review (2026-09-02): worker.ValidateTargets
-// existed but HandleReplaceTargets never called it, so a
+// TestHandleReplaceTargets_RejectsTheGateway confirms
+// HandleReplaceTargets actually calls worker.ValidateTargets, so a
 // controller-side bug sending the gateway's own IP as a "poison this"
-// target would have been applied unquestioningly.
+// target is rejected rather than applied unquestioningly.
 func TestHandleReplaceTargets_RejectsTheGateway(t *testing.T) {
 	h := newTestHandler(t)
 	reply := h.HandleReplaceTargets(ipc.ReplaceTargets{
@@ -141,14 +138,12 @@ func TestHandleReplaceTargets_AcceptsOrdinaryTargets(t *testing.T) {
 	}
 }
 
-// TestHandleReplaceTargets_RejectsTheGenerationOnGatewayResolveFailure is
-// a regression test for a real gap found by code review (2026-09-11,
-// fixed 2026-09-12): safety.go's ResolveGateway -- a genuine ARP
+// TestHandleReplaceTargets_RejectsTheGenerationOnGatewayResolveFailure
+// confirms that when safety.go's ResolveGateway (a genuine ARP
 // exchange verifying the gateway's real MAC, never satisfied from a
-// cache -- existed but was never actually called anywhere, so this
-// worker trusted the wire-supplied gateway MAC outright. A resolve
-// failure (e.g. the real gateway not answering ARP) must now fail the
-// whole generation closed, not just proceed with the unverified value.
+// cache) fails to resolve -- e.g. the real gateway not answering ARP
+// -- the whole generation fails closed rather than proceeding with the
+// unverified wire-supplied gateway MAC.
 func TestHandleReplaceTargets_RejectsTheGenerationOnGatewayResolveFailure(t *testing.T) {
 	h := newTestHandlerWithSender(t, fakeSender{resolveErr: errResolveTimedOut})
 	reply := h.HandleReplaceTargets(ipc.ReplaceTargets{

@@ -1,35 +1,31 @@
 #!/usr/bin/env python3
 """A tiny, dependency-free HTTP server for the AdGuard-side friendly
-block page -- added 2026-08-30, the third of that session's three
-recommended next steps ("a friendly landing page for the blocked
-case").
+block page.
 
 Why this is a SEPARATE server from the main Flask dashboard, and why
 it only ever helps for plain HTTP:
 
 `controller/adguard_sync.py` can point a hard-denied domain's DNS
 answer at this machine's LAN IP via AdGuard's `$dnsrewrite` modifier
-(confirmed live 2026-08-30 -- see that module's own docstring) instead
-of the default 0.0.0.0. A browser that was told "crunchyroll.com is at
-<this box>" then connects here directly, on whatever port it wanted --
-port 80 for a plain `http://` request, port 443 for `https://`. This
-server exists specifically to catch the port-80 case and answer with a
-real page; there's no equivalent for port 443, and there deliberately
-never will be here: the ONLY way to terminate TLS for an arbitrary
-domain a browser trusts is a certificate that domain's real CA issued,
-or one the DEVICE has already been told to trust -- and non-bump
-devices are, BY DESIGN, never asked to trust this project's own
+instead of the default 0.0.0.0. A browser that was told "crunchyroll.com
+is at <this box>" then connects here directly, on whatever port it
+wanted -- port 80 for a plain `http://` request, port 443 for
+`https://`. This server exists specifically to catch the port-80 case
+and answer with a real page; there's no equivalent for port 443, and
+there deliberately never will be here: the ONLY way to terminate TLS
+for an arbitrary domain a browser trusts is a certificate that domain's
+real CA issued, or one the DEVICE has already been told to trust -- and
+non-bump devices are, BY DESIGN, never asked to trust this project's own
 SSL-Bump CA (`proxy/squid.conf.template`'s whole reason to exist is
 giving that trust ONLY to devices an admin deliberately opted in).
 Terminating TLS here anyway would show every non-bump device a
 "your connection is not private" certificate warning for every hard-
 denied HTTPS domain -- objectively worse than today's plain connection
-failure, by this project's own already-established reasoning (see
-`dashboard.py`'s `SETTINGS_BODY` card on `block_page_mode`, which
-defaults Squid's own equivalent choice to "just fail the connection"
-for exactly this reason). So: port 443 here just refuses the
-connection (nothing listens), identical in effect to the pre-2026-08-30
-default -- no worse. Port 80 gets a real page.
+failure (see `dashboard.py`'s `SETTINGS_BODY` card on `block_page_mode`,
+which defaults Squid's own equivalent choice to "just fail the
+connection" for exactly this reason). So: port 443 here just refuses
+the connection (nothing listens) -- no worse than not running this
+server at all. Port 80 gets a real page.
 
 Deliberately NOT the same Flask `/blocked` route the Squid path uses:
 that route correlates against a recent `access_log` row Squid's own
@@ -38,16 +34,12 @@ need -- it already has the one piece of context that matters, directly
 from the request itself: the `Host` header IS the blocked domain, no
 correlation required. Deliberately still no "Request approval" flow
 here (unlike /blocked) -- that would need a reactive UI wired to this
-specific write path; a clear, simpler scope for this pass.
+specific write path.
 
-**2026-08-31 -- this module now DOES write to access_log** (see
-`_respond()` below), closing a real gap found while scoping tighter
-Squid/AdGuard integration (RoadMap.md's dated entry, GH #9): until this
-fix, "AdGuard never touches this project's database at all" was
-literally true, so every AdGuard-side block -- including the NEW
-splice-tier enforcement `controller/adguard_sync.py`'s
-`build_splice_deny_rules()` adds -- was completely invisible on the
-Report page, not even the block itself. Identity is resolved the same
+This module writes to access_log itself (see `_respond()` below), so an
+AdGuard-side block -- including splice-tier enforcement from
+`controller/adguard_sync.py`'s `build_splice_deny_rules()` -- is visible
+on the Report page like any other block. Identity is resolved the same
 way the Squid helpers do (`common/device_identity.py`'s
 `resolve_device()`/`resolve_user_for_device()`), from the requesting
 socket's own address -- this server sees the real LAN client IP
@@ -93,16 +85,16 @@ stroke-linecap='round' stroke-linejoin='round'><path d='M12 3l8 3.5v5.2c0 4.7-3.
 </body></html>
 """
 
-# The memorable-URL feature (RoadMap.md's dated 2026-09-07 entry): a
-# device that's ALREADY connected to the WiFi -- unlike
-# captive_portal_server.py's login page, which only an unauthenticated
-# device ever gets redirected to -- can visit this hostname (default
-# optigate.home, see common/db.py's optigate_hostname()) to see its own
-# Label/User-or-Group/IP/MAC, e.g. after losing internet access, or just
-# to self-check before calling whoever administers the network. This
-# server (not a new one) is the natural home for it: it already listens
-# on port 80 across the whole LAN (not gated to unauthenticated_v4 the
-# way captive_portal_server.py's :3131 redirect is) and already resolves
+# The memorable-URL feature: a device that's ALREADY connected to the
+# WiFi -- unlike captive_portal_server.py's login page, which only an
+# unauthenticated device ever gets redirected to -- can visit this
+# hostname (default optigate.home, see common/db.py's
+# optigate_hostname()) to see its own Label/User-or-Group/IP/MAC, e.g.
+# after losing internet access, or just to self-check before calling
+# whoever administers the network. This server (not a new one) is the
+# natural home for it: it already listens on port 80 across the whole
+# LAN (not gated to unauthenticated_v4 the way
+# captive_portal_server.py's :3131 redirect is) and already resolves
 # identity from the requesting socket's own source IP -- see
 # controller/adguard_sync.py's sync_optigate_rewrite() for the other half
 # (the AdGuard DNS-rewrite that makes the hostname actually resolve here).
@@ -141,11 +133,10 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
 
     def _log_block(self, host: str) -> None:
         """Record this hit in access_log, same as the Squid helpers do --
-        see this module's own docstring for why this write path didn't
-        exist before 2026-08-31. A fresh connection per request (this is a
-        low-traffic, one-off HTTP server, not a long-lived process with a
-        pooled connection) -- same pattern captive_portal_server.py already
-        uses for the same reason."""
+        see this module's own docstring for why. A fresh connection per
+        request (this is a low-traffic, one-off HTTP server, not a
+        long-lived process with a pooled connection) -- same pattern
+        captive_portal_server.py already uses for the same reason."""
         conn = None
         try:
             conn = db.get_conn()
@@ -199,10 +190,9 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
                 elif device["ignored"] or (group is not None and group["ignored"]):
                     # A device can be effectively ignored either directly
                     # (device.ignored) or via its group's own ignored flag
-                    # (added 2026-09-07, db.py's schema comment on
-                    # groups.ignored) -- both read the same here, since
-                    # this is just an informational display, not an
-                    # enforcement decision.
+                    # (see db.py's schema comment on groups.ignored) --
+                    # both read the same here, since this is just an
+                    # informational display, not an enforcement decision.
                     assigned_to = "Ignored (never filtered)"
                 elif group is not None:
                     assigned_to = html.escape(group["name"])
@@ -215,8 +205,7 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
                     ("MAC address", html.escape(device["mac_address"])),
                     # No DHCP-hostname/mDNS-name capture exists anywhere in
                     # this project yet (common/device_bindings has no such
-                    # column) -- shown honestly rather than omitted, since
-                    # the project owner explicitly asked for this field.
+                    # column) -- shown honestly rather than omitted.
                     ("Device name", "<em>Not tracked yet</em>"),
                 ]
         except Exception:
@@ -266,10 +255,8 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
             return
 
         self._log_block(host)
-        # html.escape(host): `host` is the raw client-supplied Host
-        # header (real bug found 2026-09-11 review -- was interpolated
-        # unescaped here, a reflected-XSS vector, unlike every other
-        # field this handler renders elsewhere in this file).
+        # html.escape(host): `host` is raw client-supplied Host header
+        # data -- must be escaped here to avoid a reflected-XSS vector.
         body = _PAGE_TEMPLATE.format(host=html.escape(host)).encode("utf-8")
         self.send_response(403)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -282,9 +269,8 @@ class _BlockPageHandler(BaseHTTPRequestHandler):
         self._respond()
 
     def do_HEAD(self) -> None:  # noqa: N802
-        # Fixed 2026-09-11: this used to call _respond() the same as
-        # do_GET, which wrote a full body -- a HEAD response must carry
-        # only the headers a GET would send.
+        # A HEAD response must carry only the headers a GET would send,
+        # not the body.
         self._respond(send_body=False)
 
     def do_POST(self) -> None:  # noqa: N802

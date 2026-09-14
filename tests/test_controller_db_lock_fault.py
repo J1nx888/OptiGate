@@ -1,8 +1,8 @@
-"""Milestone 9 fault-campaign coverage: a transient SQLite lock from a
-concurrent writer must not crash the controller's health/policy writes
--- common/db.py's get_conn() sets busy_timeout=5000, so a short-lived
-lock from another connection should just be a brief wait, not a hard
-failure that would otherwise take down run_cycle's health reporting.
+"""A transient SQLite lock from a concurrent writer must not crash the
+controller's health/policy writes -- common/db.py's get_conn() sets
+busy_timeout=5000, so a short-lived lock from another connection should
+just be a brief wait, not a hard failure that would otherwise take down
+run_cycle's health reporting.
 """
 from __future__ import annotations
 

@@ -53,9 +53,8 @@ def test_ignored_device_is_excluded_even_with_an_active_binding(conn):
 
 
 def test_device_in_an_ignored_group_is_excluded_even_with_an_active_binding(conn):
-    """Group-level ignore (added 2026-09-07, db.py's schema comment on
-    groups.ignored) excludes a device the same way its own `ignored` bit
-    does, even though the device's own column reads 0."""
+    """Group-level ignore excludes a device the same way its own
+    `ignored` bit does, even though the device's own column reads 0."""
     conn.execute("INSERT INTO groups (name, ignored, created_at) VALUES ('IoT', 1, ?)", (db.now_iso(),))
     conn.commit()
     group_id = conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
@@ -122,13 +121,11 @@ def test_device_with_two_simultaneously_active_bindings_contributes_only_the_fre
 
 
 def test_brand_new_mac_with_no_pre_existing_devices_row_still_becomes_a_target(conn):
-    """Regression test for the real gap found scoping Phase 4, 2026-08-31
-    (see RoadMap.md and identity.record_binding's own docstring): before
-    the auto-create fix, a MAC observed with no devices row ever created
-    for it got device_id = NULL, invisible to this module's own JOIN --
-    full, unfiltered access, not merely "ungated." record_binding() now
-    auto-creates a fresh, unassociated (PREAUTH) devices row the first
-    time a MAC is ever seen, which is what makes it show up here at all."""
+    """A MAC observed with no devices row ever created for it must still
+    become a target, not silently fall out of scope with device_id = NULL
+    and get full, unfiltered access. record_binding() auto-creates a
+    fresh, unassociated (PREAUTH) devices row the first time a MAC is
+    seen, which is what makes it show up here at all."""
     identity.record_binding(conn, "aa:bb:cc:dd:ee:99", "192.168.1.99", source="rtnetlink")
 
     desired = db_backed_desired_state(conn, GATEWAY)
@@ -141,13 +138,12 @@ def test_full_duplex_flag_passed_through(conn):
 
 
 def test_deleting_a_device_does_not_drop_its_active_binding_out_of_scope(conn):
-    """Real gap found live 2026-09-11 (see this module's own dated
-    comment): deleting a device row used to silently remove it from
-    ARP-spoofing scope entirely (device_bindings.device_id -> NULL via
-    ON DELETE SET NULL, invisible to the old INNER JOIN) instead of
-    falling back to the same safe PREAUTH treatment a genuinely-new
-    device gets -- an unconditional bypass for anyone who deletes their
-    own device. The orphaned binding must still become a target."""
+    """Deleting a device row must not silently remove it from
+    ARP-spoofing scope (device_bindings.device_id -> NULL via ON DELETE
+    SET NULL) -- that would be an unconditional bypass for anyone who
+    deletes their own device. The orphaned binding must still become a
+    target, falling back to the same safe PREAUTH treatment a
+    genuinely-new device gets."""
     device = _add_device(conn, "aa:bb:cc:dd:ee:01")
     identity.record_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.21", source="rtnetlink")
     conn.execute("DELETE FROM devices WHERE id = ?", (device["id"],))

@@ -33,13 +33,13 @@ _mac_counter = itertools.count(1)
 
 
 def _bind_ip_to_user(conn, user_id, ip):
-    """Give `ip` a resolvable device identity (RoadMap.md's intercept-mode
-    identity model): a `devices` row assigned to user_id, bound to ip via a
-    real common/identity.record_binding() call -- the same path the DNS
-    tier's own identity resolution goes through, exercised here instead of
-    inserting device_bindings rows by hand. A fresh MAC per call, since
-    device_bindings is unique on (mac_address, ipv4_address) and several
-    tests reuse the same IP for different users."""
+    """Give `ip` a resolvable device identity: a `devices` row assigned to
+    user_id, bound to ip via a real common/identity.record_binding() call --
+    the same path the DNS tier's own identity resolution goes through,
+    exercised here instead of inserting device_bindings rows by hand. A
+    fresh MAC per call, since device_bindings is unique on
+    (mac_address, ipv4_address) and several tests reuse the same IP for
+    different users."""
     mac = f"aa:bb:cc:dd:ee:{next(_mac_counter):02x}"
     conn.execute(
         "INSERT INTO devices (mac_address, user_id, created_at) VALUES (?, ?, ?)",
@@ -51,9 +51,7 @@ def _bind_ip_to_user(conn, user_id, ip):
 
 def _bind_ip_to_group(conn, group_id, ip):
     """Same as _bind_ip_to_user, but for a device assigned to a GROUP
-    instead of a user (user_id NULL, group_id set) -- the case
-    common/matching.py's device_domain_reason() was added to fix (see its
-    own docstring)."""
+    instead of a user (user_id NULL, group_id set)."""
     mac = f"aa:bb:cc:dd:ee:{next(_mac_counter):02x}"
     conn.execute(
         "INSERT INTO devices (mac_address, group_id, created_at) VALUES (?, ?, ?)",
@@ -174,7 +172,7 @@ def test_sni_handle_trusted_true_only_for_trusted_mode(conn):
 
 def test_sni_handle_splice_unresolved_identity_denied_and_logged(conn):
     # No device_bindings row at all for this IP -- device_identity.resolve_user
-    # returns None, the intercept-mode equivalent of the old empty %LOGIN.
+    # returns None, so this counts as unauthenticated.
     _add_domain(conn, r"example\.com", mode="splice")
     assert sni_helper.handle_splice(conn, "192.168.1.5", "example.com") is False
     row = conn.execute("SELECT * FROM access_log").fetchone()
@@ -215,11 +213,9 @@ def test_sni_handle_splice_per_user_domain_requires_assignment(conn):
 
 
 def test_sni_handle_splice_group_assigned_device_gets_access(conn):
-    """The core regression test for the group/device authorization bug
-    (see common/matching.py's device_domain_reason() docstring): a device
-    assigned to a GROUP, not a user, used to resolve to no identity at all
-    (device_identity.resolve_user() INNER JOINs devices.user_id) and was
-    denied unconditionally before ever reaching a domain check."""
+    """A device assigned to a GROUP, not a user, must still resolve to a
+    real device identity and be checked against group_domains, rather than
+    being denied outright before ever reaching a domain check."""
     group_id = _add_group(conn, "TVs")
     _bind_ip_to_group(conn, group_id, "192.168.1.5")
     domain = _add_domain(conn, r"example\.com", mode="splice", is_global=0)
@@ -245,16 +241,10 @@ def test_sni_handle_splice_wrong_mode_domain_denied(conn):
 
 
 def test_sni_handle_splice_unconfigured_domain_allowed_and_logged(conn):
-    """Fixed 2026-09-08, real gap found live: a domain with no `domains`
-    row at all used to be denied (falling through to handle_block_page)
-    even though controller/adguard_sync.py's own docstring says an
-    unconfigured domain is "deliberately still default-allow at the DNS
-    tier." A non-bump device never even reaches Squid for this domain at
-    all, so Squid re-denying it here for a bump-enabled device meant
-    turning bump on silently switched that device's ENTIRE traffic to a
-    stricter policy than the rest of the household gets. Confirmed live:
-    this is exactly what blocked Netflix (never configured anywhere) on
-    a bump-enabled device -- nothing to do with Netflix specifically."""
+    """An unconfigured domain (no `domains` row at all) must still
+    default-allow at Squid, matching the DNS tier -- otherwise turning
+    bump mode on for a device would silently switch its entire traffic to
+    a stricter policy than the rest of the household gets."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     assert sni_helper.handle_splice(conn, "192.168.1.5", "unknown-site.example") is True
@@ -277,8 +267,7 @@ def test_sni_handle_block_page_redirect_when_configured(conn):
 
 
 def test_sni_handle_block_page_unrecognized_mode_value_denies(conn):
-    """Code-review fix, still relevant after 2026-09-08's logging cleanup:
-    the deny condition matches any mode value other than the literal
+    """The deny condition matches any mode value other than the literal
     'redirect', not just the literal string 'terminate', so a
     corrupted/unexpected setting value still denies rather than silently
     defaulting to the more permissive (bump-for-a-real-page) behavior."""
@@ -290,12 +279,9 @@ def test_sni_handle_block_page_unrecognized_mode_value_denies(conn):
 def test_sni_handle_block_page_terminate_does_not_double_log_configured_domain(conn):
     """A configured splice-mode domain the user isn't permitted is already
     logged by handle_splice before this rule is ever reached -- logging it
-    again here would just be a worse duplicate. Fixed 2026-09-08:
-    handle_block_page no longer logs anything at all (that
-    responsibility moved entirely to handle_splice, including for
-    unconfigured domains -- see
-    test_sni_handle_splice_unconfigured_domain_allowed_and_logged), so
-    this now also covers "handle_block_page never logs, period"."""
+    again here would just be a worse duplicate. handle_block_page never
+    logs anything itself; that responsibility belongs entirely to
+    handle_splice."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"example\.com", mode="splice", is_global=0)
@@ -306,7 +292,7 @@ def test_sni_handle_block_page_terminate_does_not_double_log_configured_domain(c
 # ============================================================
 # authz_helper.decide -- HTTP-layer decision (every request that reaches
 # this helper: bump-mode domains fully, plus every other mode via the
-# plain-HTTP path -- see the module's own 2026-09-08 docstring entry)
+# plain-HTTP path)
 # ============================================================
 
 def test_authz_unresolved_identity_denied(conn):
@@ -325,12 +311,9 @@ def test_authz_outside_lan_denied_and_logged(conn):
 
 
 def test_authz_unconfigured_domain_allowed(conn):
-    """Fixed 2026-09-08, real gap found live: this plain-HTTP path used
-    to deny any domain that wasn't mode='bump', including a genuinely
-    unconfigured one -- see sni_helper.py's own
-    test_sni_handle_splice_unconfigured_domain_allowed_and_logged for
-    the full writeup (this is that same fix's plain-HTTP counterpart,
-    since HTTP has no SNI stage for sni_helper.py to catch this first)."""
+    """An unconfigured domain (mode isn't 'bump') must still be allowed on
+    the plain-HTTP path, matching handle_splice's behavior on the SNI
+    tier."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     assert authz_helper.decide(conn, "192.168.1.5", "unknown.example:443", "/") is True
@@ -350,11 +333,9 @@ def test_authz_trusted_mode_domain_always_allowed_unlogged(conn):
 
 
 def test_authz_splice_mode_global_domain_allowed(conn):
-    """Fixed 2026-09-08 alongside the unconfigured-domain gap: a
-    splice-mode domain reaching this plain-HTTP path used to be denied
-    outright as "not_bump_mode" regardless of actual authorization --
-    even a globally-assigned one. Now matches sni_helper.py's own
-    handle_splice() exactly."""
+    """A splice-mode domain reaching this plain-HTTP path must be checked
+    for actual authorization, not denied outright as not-bump-mode --
+    matches sni_helper.py's handle_splice() exactly."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"example\.com", mode="splice", is_global=1)
@@ -384,9 +365,8 @@ def test_authz_bump_domain_not_assigned_to_user_denied(conn):
 
 
 def test_authz_device_only_assignment_works_with_no_user_or_group(conn):
-    """Second half of the authorization-bug regression coverage: a device
-    with NEITHER user_id NOR group_id, authorized only via a direct
-    device_domains grant."""
+    """A device with NEITHER user_id NOR group_id, authorized only via a
+    direct device_domains grant."""
     device_id = _bind_ip_to_bare_device(conn, "192.168.1.5")
     domain = _add_domain(conn, r"example\.com", mode="bump", is_global=0)
     assert authz_helper.decide(conn, "192.168.1.5", "example.com:443", "/") is False
@@ -401,12 +381,9 @@ def test_authz_device_only_assignment_works_with_no_user_or_group(conn):
 
 
 def test_authz_generic_bump_domain_no_path_rules_denies_beyond_root(conn):
-    """Changed 2026-09-07 (RoadMap.md's dated entry, project owner's
-    explicit direction): a domain with zero domain_paths rows used to
-    allow every path by default -- switching a domain to bump mode
-    silently opened its entire site until an admin came back and
-    narrowed it. Now only the bare root is allowed until at least one
-    path rule is added."""
+    """A domain with zero domain_paths rows must only allow the bare root
+    by default -- otherwise switching a domain to bump mode would silently
+    open its entire site until an admin narrows it."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"example\.com", mode="bump", is_global=1)
@@ -482,12 +459,10 @@ def test_authz_crunchyroll_series_page_requires_approval(conn):
 
 
 def test_authz_crunchyroll_up_next_requires_approval(conn):
-    """RoadMap.md finding #1d: the "continue watching" feed carries the
-    series id directly in the path, same direct check as SERIES_PAGE --
-    no series_resolve call needed. Before this classifier existed, this
-    exact path fell through to OTHER and was blanket-allowed by the (now
-    removed) `^/content/v[0-9]+/` domain_paths rule regardless of show
-    ownership -- this is the regression test for that gap."""
+    """The "continue watching" feed carries the series id directly in the
+    path, same direct check as SERIES_PAGE -- no series_resolve call
+    needed. Must require show approval like any other series access, not
+    fall through to a blanket allow."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
@@ -573,11 +548,11 @@ def test_authz_crunchyroll_other_shape_falls_back_to_path_allowlist(conn):
 
 
 def test_authz_crunchyroll_other_shape_with_no_path_rules_denies_beyond_root(conn):
-    """Same 2026-09-07 deny-by-default-beyond-root change as the generic
-    bump-domain test above, for Crunchyroll's own OTHER-shape fallback --
-    in practice defaults.py always seeds a real path list for this
-    domain, so this only matters for a hand-configured Crunchyroll-kind
-    domain that hasn't had paths added yet."""
+    """Same deny-by-default-beyond-root behavior as the generic bump-domain
+    test above, for Crunchyroll's own OTHER-shape fallback -- in practice
+    defaults.py always seeds a real path list for this domain, so this
+    only matters for a hand-configured Crunchyroll-kind domain that
+    hasn't had paths added yet."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
@@ -586,13 +561,10 @@ def test_authz_crunchyroll_other_shape_with_no_path_rules_denies_beyond_root(con
 
 
 def test_authz_crunchyroll_content_v2_no_longer_blanket_allowed(conn):
-    """RoadMap.md finding #1d: `^/content/v[0-9]+/` used to be a seeded
-    blanket domain_paths rule -- ANY unrecognized request under that
-    prefix was allowed regardless of show ownership. It's gone now
-    (defaults/seed_defaults.py's CRUNCHYROLL_PATHS); the narrower
-    discover/watchlist replacements below should allow the genuinely
-    id-free endpoints while an arbitrary unrecognized /content/v.../
-    shape still denies."""
+    """The narrower discover/watchlist domain_paths rules (replacing the
+    old blanket `^/content/v[0-9]+/` allow) should allow genuinely id-free
+    endpoints while an arbitrary unrecognized /content/v.../ shape still
+    denies."""
     user = _add_user(conn, "kid1", "pw")
     _bind_ip_to_user(conn, user["id"], "192.168.1.5")
     domain = _add_domain(conn, r"crunchyroll\.com", mode="bump", is_global=1, kind="crunchyroll")
@@ -637,11 +609,10 @@ def test_authz_crunchyroll_discover_path_rule_negative_lookahead_excludes_up_nex
 
 
 # ============================================================
-# ip_address capture on every Squid-helper log_access() call site
-# (RoadMap follow-up, 2026-09-10) -- the raw client IP is already a
-# parameter of decide()/handle_splice(); these confirm it now reaches
-# the access_log row, on both the SNI tier and the HTTP tier, including
-# the branch threaded through _decide_crunchyroll().
+# ip_address capture on every Squid-helper log_access() call site -- the
+# raw client IP is already a parameter of decide()/handle_splice(); these
+# confirm it reaches the access_log row, on both the SNI tier and the
+# HTTP tier, including the branch threaded through _decide_crunchyroll().
 # ============================================================
 
 _CLIENT_IP = "192.168.1.77"
@@ -723,10 +694,10 @@ def test_authz_records_client_ip_through_decide_crunchyroll(conn):
 
 
 def test_authz_stamps_the_show_name_on_the_row_when_any_user_has_it_approved(conn):
-    """Owner request 2026-09-11: the Report page needs the show NAME next
-    to the id on a blocked row. If any user has the show approved, its
-    title is on file in user_shows -- authz_helper stamps it onto the
-    access_log row for free (cheap indexed lookup, no network)."""
+    """The Report page needs the show NAME next to the id on a blocked
+    row. If any user has the show approved, its title is on file in
+    user_shows -- authz_helper stamps it onto the access_log row for free
+    (cheap indexed lookup, no network)."""
     watcher = _add_user(conn, "kid1", "pw")
     other = _add_user(conn, "kid2", "pw")
     _bind_ip_to_user(conn, watcher["id"], _CLIENT_IP)

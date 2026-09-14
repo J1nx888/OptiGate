@@ -1,31 +1,16 @@
 #!/usr/bin/env python3
-"""Milestone 4/9 (ongoing): populates device_bindings from a periodic
-`ip neigh show` snapshot -- the "periodic ip neigh snapshot (missed-
-event reconciliation)" source from
-docs/design/phase3-technical-design.md's discovery precedence order
-(rtnetlink-first for lowest latency, this snapshot second as a
-catch-all for anything missed).
+"""Populates device_bindings from a periodic `ip neigh show` snapshot --
+a catch-all discovery source, lower-precedence than
+`controller/rtnetlink_listener.py`'s live event listener, for anything
+that source misses.
 
-This module implements ONLY the snapshot half of that precedence list
--- a live rtnetlink-event listener (the higher-precedence, lower-
-latency source) is NOT built here; that needs real netlink socket
-programming (e.g. via a package like pyroute2) that deserves its own
-pass rather than being rushed alongside this. AdGuard query-log
-correlation and active rate-limited ARP scanning (the remaining two
-sources in that precedence list) also aren't built.
-
-**Wired into a running loop as of 2026-08-30** via `run_loop()` below,
-called from `controller/main.py` on its own background thread and its
-own DB connection (see `run_loop`'s own docstring for why a separate
-connection is required, not just a separate thread). This closes the
-gap `docs/security/overview.md` §3 and RoadMap.md Milestone 4 both flag:
-`device_bindings` freshness -- and therefore Squid's
+Run via `run_loop()` below, called from `controller/main.py` on its own
+background thread and its own DB connection (see `run_loop`'s own
+docstring for why a separate connection is required, not just a
+separate thread). `device_bindings` freshness -- and therefore Squid's
 `common/device_identity.py` identity resolution, and
-`controller/policy_state.py`'s nftables policy computation -- depended
-on *something* calling `snapshot_once()` regularly, and until now
-nothing did. This does not replace the still-unbuilt live rtnetlink
-listener (which would still improve staleness *within* this loop's own
-interval); see the module docstring above.
+`controller/policy_state.py`'s nftables policy computation -- depends
+on something calling `snapshot_once()` regularly.
 """
 from __future__ import annotations
 
@@ -42,8 +27,7 @@ log = logging.getLogger("controller.discovery")
 # Matches a line like:
 #   192.168.1.21 dev enp1s0 lladdr aa:bb:cc:dd:ee:01 REACHABLE
 # `ip neigh show`'s output format is stable/documented (iproute2's
-# `ip-neighbour(8)`), not guessed -- confirmed against real output on
-# the smoke-test VM while writing this.
+# `ip-neighbour(8)`), not guessed.
 _NEIGH_LINE_RE = re.compile(
     r"^(?P<ip>\S+)\s+dev\s+(?P<dev>\S+)\s+lladdr\s+(?P<mac>[0-9a-fA-F:]+)\s+(?P<state>\S+)\s*$"
 )
@@ -115,20 +99,17 @@ def run_loop(interval: float, on_error=None, on_success=None) -> PeriodicTask:
 
     Deliberately does NOT accept a `conn` parameter -- it opens its OWN
     connection internally, lazily, the first time the background thread
-    actually runs. This was a real bug in this function's first draft:
-    `sqlite3.Connection` objects are only usable from the thread that
-    *created* them (`check_same_thread=True`, `db.get_conn()`'s own
-    default) -- and that's the thread that called `db.get_conn()`, not
-    whichever thread later happens to execute queries on it. Handing this
-    loop a connection built on the caller's thread (e.g. main.py's own
-    `health_conn`) fails exactly the same way a shared connection would;
-    only a connection built ON this loop's own background thread works,
-    which means this function has to be the one to build it. Callers
-    just need `db.DB_PATH` already set correctly before this starts --
-    true process-wide by the time `main.py`'s `_build_db_backed_provider`
-    has run, the same way every other component in this codebase
-    (dashboard, the Squid helpers) relies on `db.DB_PATH` already being
-    right rather than being told the path directly.
+    actually runs. `sqlite3.Connection` objects are only usable from the
+    thread that *created* them (`check_same_thread=True`, `db.get_conn()`'s
+    own default), so handing this loop a connection built on the
+    caller's thread (e.g. main.py's own `health_conn`) fails the same
+    way a shared connection would; only a connection built ON this
+    loop's own background thread works, which means this function has
+    to be the one to build it. Callers just need `db.DB_PATH` already
+    set correctly before this starts, the same way every other
+    component in this codebase (dashboard, the Squid helpers) relies on
+    `db.DB_PATH` already being right rather than being told the path
+    directly.
 
     A failed snapshot (the `ip` command missing, a transient subprocess
     error, a malformed line) is reported via `on_error` rather than

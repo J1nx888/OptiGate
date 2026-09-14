@@ -125,15 +125,14 @@ def test_path_allowed_skips_invalid_regex_pattern(conn):
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM timeout guard is Unix-only")
 def test_path_allowed_does_not_hang_on_catastrophic_backtracking(conn):
-    """Regression test for a real ReDoS risk (fixed 2026-09-02): an
-    admin-supplied domain_paths pattern is matched via re.search()
-    against the client-controlled request path with no backtracking-
-    safety check -- dashboard.py's own validation only confirms
-    re.compile() succeeds. A classic catastrophic-backtracking pattern
-    ((a+)+$) against a long run of a's with no terminating match takes
-    exponential time under Python's stdlib `re`; this confirms
-    path_allowed() now completes quickly (via _search_with_timeout's
-    SIGALRM guard) instead of hanging the calling process."""
+    """An admin-supplied domain_paths pattern is matched via re.search()
+    against the client-controlled request path -- dashboard.py's own
+    validation only confirms re.compile() succeeds, not that the pattern
+    is safe. A classic catastrophic-backtracking pattern ((a+)+$) against
+    a long run of a's with no terminating match takes exponential time
+    under Python's stdlib `re`; this confirms path_allowed() completes
+    quickly (via _search_with_timeout's SIGALRM guard) instead of hanging
+    the calling process."""
     domain = _add_domain(conn, r"example\.com", mode="bump")
     conn.execute(
         "INSERT INTO domain_paths (domain_id, pattern) VALUES (?, ?)", (domain["id"], r"(a+)+$")
@@ -152,8 +151,7 @@ def test_path_allowed_does_not_hang_on_catastrophic_backtracking(conn):
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM timeout guard is Unix-only")
 def test_find_domain_does_not_hang_on_catastrophic_backtracking(conn):
     """Same guard, same reasoning, for the other regex-matching call
-    site (find_domain's hostname match) -- see this file's own
-    docstring on why both are guarded identically."""
+    site (find_domain's hostname match)."""
     _add_domain(conn, r"(a+)+$", mode="bump")
     evil_hostname = "a" * 40 + "!"
 
@@ -167,19 +165,15 @@ def test_find_domain_does_not_hang_on_catastrophic_backtracking(conn):
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM timeout guard is Unix-only")
 def test_search_with_timeout_fails_closed_off_the_main_thread(monkeypatch):
-    """Regression test for a real gap found by code review 2026-09-11,
-    fixed 2026-09-12: signal.signal() raises ValueError off the main
-    thread, and the fallback for that case used to be a completely
-    UNGUARDED rx.search() -- silently disabling the ReDoS guard on
-    exactly the threads it exists for, not just failing to bound it as
-    tightly. This isn't hypothetical: find_categories_for_hostname()
-    is already called live from dashboard.py's route handlers and
+    """signal.signal() raises ValueError off the main thread, so the
+    SIGALRM guard can't be used there -- find_categories_for_hostname()
+    is called from dashboard.py's route handlers and
     adguard_report_sync.py, both running on waitress's multi-threaded
-    worker pool -- simulated here directly with a background thread.
-    Must now still complete quickly and fail closed (no match) via the
-    subprocess fallback (_search_in_subprocess), not hang the thread
-    for as long as the pattern's real backtracking cost would otherwise
-    take."""
+    worker pool, simulated here directly with a background thread. Off
+    the main thread, the search must still complete quickly and fail
+    closed (no match) via the subprocess fallback
+    (_search_in_subprocess), not hang for as long as the pattern's real
+    backtracking cost would otherwise take."""
     import matching as matching_module
 
     rx = matching_module._domain_regex(r"(a+)+$")
@@ -428,10 +422,9 @@ def test_schedule_applies_to_target_via_is_global(conn):
 
 
 def test_schedule_applies_to_target_via_bare_user_id_no_device_needed(conn):
-    """The whole point of pulling this out of schedule_applies_to_device()
-    (2026-09-06, for the user detail page's 'active right now' display):
-    a caller with only a user id in hand, no device row at all, can still
-    get a real answer."""
+    """A caller with only a user id in hand, no device row at all, can
+    still get a real answer -- used by the user detail page's 'active
+    right now' display."""
     user = _add_user(conn, "kid3")
     schedule = _add_schedule(conn, "Free Time")
     assert matching.schedule_applies_to_target(conn, schedule, user_id=user["id"]) is False
@@ -511,16 +504,14 @@ def test_find_categories_for_hostname_blank_input_returns_empty_list(conn):
 
 
 def test_find_categories_for_hostname_no_categories_at_all(conn):
-    """Regression guard for the 2026-09-07 rewrite's early-exit -- an
-    empty `categories` table must short-circuit before either SQL pass
-    runs, not just return an empty result after querying anyway."""
+    """An empty `categories` table must short-circuit before either SQL
+    pass runs, not just return an empty result after querying anyway."""
     assert matching.find_categories_for_hostname(conn, "facebook.com") == []
 
 
-# --- 2026-09-07 performance rewrite: fast (exact-match) vs slow -----------
-# (GLOB-filtered custom-regex) path, verified to agree on every case the
-# original single-pass regex scan already covered above, plus the split
-# itself.
+# --- fast (exact-match) vs slow (GLOB-filtered custom-regex) path ---------
+# verified to agree on every case the single-pass regex scan above
+# already covers, plus the split itself.
 
 def test_candidate_exact_patterns_are_escaped_suffixes_most_specific_first(conn):
     assert matching._candidate_exact_patterns("www.example.com") == [

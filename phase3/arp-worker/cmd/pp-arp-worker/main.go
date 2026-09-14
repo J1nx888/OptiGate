@@ -1,9 +1,9 @@
 // Command pp-arp-worker is the privileged ARP worker process described
-// in RoadMap.md and docs/design/phase3-technical-design.md. It holds
-// CAP_NET_RAW and nothing else; all policy/DB/reconciliation logic
-// lives in the separate interception-controller process (not yet
-// written), which drives this one exclusively over the Unix socket
-// IPC protocol in internal/ipc/protocol.go.
+// in docs/design/phase3-technical-design.md. It holds CAP_NET_RAW and
+// nothing else; all policy/DB/reconciliation logic lives in the
+// separate interception-controller process (not yet written), which
+// drives this one exclusively over the Unix socket IPC protocol in
+// internal/ipc/protocol.go.
 //
 // NOT YET BUILT OR TESTED -- see the design doc's header note. Verify
 // internal/arpio's mdlayher/arp API usage against a real `go get`
@@ -32,12 +32,12 @@ import (
 func main() {
 	ifaceName := flag.String("iface", "", "LAN interface to bind to (required)")
 	socketPath := flag.String("socket", "/run/optigate/arp-worker.sock", "controller IPC socket path")
-	// -1 default (not 0) deliberately: 0 is root's real, legitimate UID, so
-	// using it as the "not provided" sentinel would make this flag
-	// silently un-settable to 0 -- found via a real integration test where
-	// the controller happened to run as root in a container. flag.Uint
-	// can't represent -1, hence Int here with an explicit range check
-	// instead of Uint's implicit zero-value trap.
+	// -1 default (not 0) deliberately: 0 is root's real, legitimate UID
+	// (the controller may run as root in a container), so using it as
+	// the "not provided" sentinel would make this flag silently
+	// un-settable to 0. flag.Uint can't represent -1, hence Int here
+	// with an explicit range check instead of Uint's implicit
+	// zero-value trap.
 	controllerUID := flag.Int("controller-uid", -1, "UID the interception-controller process runs as (required, checked via SO_PEERCRED)")
 	leaseMissedCycles := flag.Int("lease-missed-cycles", 5, "missed heartbeat cycles before entering repair-only mode")
 	flag.Parse()
@@ -64,7 +64,7 @@ func main() {
 	}
 	defer sender.Close()
 
-	cfg := worker.DefaultConfig() // placeholder constants -- see RoadMap.md section 8
+	cfg := worker.DefaultConfig() // placeholder constants -- see Config's own doc comment
 	cfg.OnSendError = func(err error) {
 		log.Printf("ARP send failed (worker keeps running, see worker.Config.OnSendError's own doc comment): %v", err)
 	}
@@ -121,13 +121,13 @@ func watchdogLoop() {
 type controllerHandler struct {
 	worker *worker.Worker
 	lease  *worker.LeaseMonitor
-	// selfIP/subnet (added 2026-09-02) are this worker's own bound
-	// interface's IPv4 address/network, queried directly from the OS at
-	// startup (see firstIPv4Addr) rather than trusted from anything the
-	// controller sends -- used by HandleReplaceTargets to run every
-	// candidate target through worker.ValidateTargets before it's ever
-	// handed to ApplyGeneration. See that call site's own comment for
-	// why bypass_v4 isn't checked here yet too.
+	// selfIP/subnet are this worker's own bound interface's IPv4
+	// address/network, queried directly from the OS at startup (see
+	// firstIPv4Addr) rather than trusted from anything the controller
+	// sends -- used by HandleReplaceTargets to run every candidate
+	// target through worker.ValidateTargets before it's ever handed to
+	// ApplyGeneration. See that call site's own comment for why
+	// bypass_v4 isn't checked here yet too.
 	selfIP net.IP
 	subnet *net.IPNet
 	// notifier is set once, right after ipc.Listen returns (see main()
@@ -143,38 +143,33 @@ func (h *controllerHandler) HandleReplaceTargets(m ipc.ReplaceTargets) []any {
 	gwIP := net.ParseIP(m.Gateway.IP)
 	gwMAC := parseMACOrNil(m.Gateway.MAC)
 	if gwIP == nil || gwMAC == nil {
-		// Fixed 2026-09-11, found by code review: a missing/malformed
-		// gateway field used to flow straight into worker.ValidateTargets
-		// as a nil net.IP -- net.IP.Equal against nil always returns
-		// false, so every t.IP.Equal(gateway.IP) check silently returns
-		// false too, defeating the is_gateway safety check for every
-		// candidate in this generation instead of failing the request.
-		// Fail closed instead, matching this project's own convention
-		// (AGENTS.md "Everything is fail-closed by convention"): apply
-		// nothing and report every candidate as a resolution failure, so
-		// the controller can see this generation was rejected outright
-		// rather than silently accepted with its safety check disabled.
+		// A missing/malformed gateway field must not flow into
+		// worker.ValidateTargets as a nil net.IP -- net.IP.Equal against
+		// nil always returns false, so every t.IP.Equal(gateway.IP)
+		// check would silently return false too, defeating the
+		// is_gateway safety check for every candidate instead of failing
+		// the request. Fail closed instead (AGENTS.md "Everything is
+		// fail-closed by convention"): apply nothing and report every
+		// candidate as a resolution failure, so the controller can see
+		// this generation was rejected outright rather than silently
+		// accepted with its safety check disabled.
 		log.Printf("rejecting replace_targets generation %d: malformed or missing gateway (ip=%q mac=%q)",
 			m.Generation, m.Gateway.IP, m.Gateway.MAC)
 		return rejectGeneration(m)
 	}
 
-	// Fixed 2026-09-12, found by code review the previous night:
-	// safety.go's own ResolveGateway (a genuine ARP exchange, never
-	// satisfied from the OS neighbor cache) was never actually called
-	// anywhere -- this worker trusted the wire-supplied gateway MAC
-	// outright. Re-verified once per generation (not just at startup, so
-	// a cache/config gone bad mid-run is still caught; not on an
-	// independent timer, to avoid a second background goroutine for a
-	// check that's naturally paced by how often targets actually
-	// change), matching this project's own stated threat model: an
-	// independently-confirmed live rogue ARP-spoofer already runs on the
-	// production LAN, so a wrong gateway MAC reaching this worker (a
-	// controller-side bug, or that same rogue spoofer having poisoned
-	// whatever fed the controller) must not be blindly trusted here too.
-	// A resolve failure/timeout and a confirmed mismatch are both
-	// treated as fail-closed -- reject the whole generation rather than
-	// poison anything based on a gateway this worker couldn't verify.
+	// The gateway MAC is re-verified via a genuine ARP exchange (never
+	// satisfied from the OS neighbor cache -- see safety.go's
+	// ResolveGateway) once per generation: not just at startup, so a
+	// cache/config gone bad mid-run is still caught; not on an
+	// independent timer, since the check is naturally paced by how
+	// often targets actually change. A wrong gateway MAC reaching this
+	// worker -- a controller-side bug, or a rogue ARP-spoofer having
+	// poisoned whatever fed the controller -- must not be blindly
+	// trusted. A resolve failure/timeout and a confirmed mismatch are
+	// both treated as fail-closed -- reject the whole generation rather
+	// than poison anything based on a gateway this worker couldn't
+	// verify.
 	resolvedMAC, err := h.worker.ResolveGateway(gwIP)
 	if err != nil {
 		log.Printf("rejecting replace_targets generation %d: could not live-verify gateway %s: %v",
@@ -201,13 +196,11 @@ func (h *controllerHandler) HandleReplaceTargets(m ipc.ReplaceTargets) []any {
 		targets = append(targets, worker.Target{IP: ip, MAC: mac})
 	}
 
-	// Fixed 2026-09-02 (was a TODO, and dead-code review separately
-	// found this simply wasn't being called at all): run every
-	// candidate through worker.ValidateTargets before it's ever handed
-	// to ApplyGeneration, so a controller-side bug or race can't make
-	// this worker send poisoning ARPs claiming ownership of the gateway,
-	// broadcast, multicast, or its own address -- see safety.go's own
-	// doc comment.
+	// Run every candidate through worker.ValidateTargets before it's
+	// ever handed to ApplyGeneration, so a controller-side bug or race
+	// can't make this worker send poisoning ARPs claiming ownership of
+	// the gateway, broadcast, multicast, or its own address -- see
+	// safety.go's own doc comment.
 	//
 	// bypass_v4 is still NOT checked here (passing nil for that
 	// parameter) -- unlike self/gateway/broadcast/multicast, which this
@@ -271,19 +264,16 @@ func (h *controllerHandler) onLeaseExpired() {
 	log.Print("lease expired: no heartbeat received in time, entering repair-only mode")
 	h.worker.Shutdown() // sends one corrective round and drops the stale generation, per the design doc's lease rule
 
-	// Fixed 2026-09-02: this used to be the ENTIRE function -- a purely
-	// local log line, with no way for the controller (or, through it,
-	// the admin dashboard) to ever learn this happened at all. For a
-	// household with an unchanging device list, controller/reconcile.py
-	// only sends a fresh replace_targets (the only thing that re-arms
-	// this lease) when desired state actually changes, so nothing would
-	// ever prompt the worker to speak again -- interception silently and
-	// permanently stopped while interception_runtime.mode kept reading
-	// "running" forever. h.notifier is nil only in the narrow startup
-	// window before ipc.Listen returns (see main(), below) -- lease
-	// expiry can't fire before then, since LeaseMonitor needs at least
-	// one full lease duration to elapse first, but this is checked
-	// rather than assumed.
+	// Without this notification, a household with an unchanging device
+	// list would never trigger a fresh replace_targets (the only thing
+	// that re-arms this lease), so nothing would ever prompt the worker
+	// to speak again -- interception would silently and permanently
+	// stop while interception_runtime.mode kept reading "running"
+	// forever. h.notifier is nil only in the narrow startup window
+	// before ipc.Listen returns (see main(), below) -- lease expiry
+	// can't fire before then, since LeaseMonitor needs at least one
+	// full lease duration to elapse first, but this is checked rather
+	// than assumed.
 	if h.notifier != nil {
 		err := h.notifier.Notify(ipc.Fault{
 			V: ipc.ProtocolVersion, Op: "fault",

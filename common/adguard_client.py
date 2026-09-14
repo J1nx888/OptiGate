@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """Thin REST client for AdGuard Home's `/control` API.
 
-This is what makes the "two independent axes" hard-deny invariant real
-(RoadMap.md, locked 2026-08-30): a domain marked `domains.mode = 'bump'`
-must never resolve normally for a device that isn't `bump_enabled` --
-nftables has no domain visibility to enforce this itself (see
-knftables_adapter.go's own comment), so it has to happen here, at the
-DNS tier, before a connection to that domain is even attempted.
+This is what makes the "two independent axes" hard-deny invariant real:
+a domain marked `domains.mode = 'bump'` must never resolve normally for
+a device that isn't `bump_enabled` -- nftables has no domain visibility
+to enforce this itself (see knftables_adapter.go's own comment), so it
+has to happen here, at the DNS tier, before a connection to that domain
+is even attempted.
 
-Verified live 2026-08-30 against a real AdGuard Home v0.107.79 instance
--- not written from documentation alone, matching this project's own
-repeated lesson that a first draft written from memory/docs tends to be
-subtly wrong in exactly the way that only shows up against the real
-thing (the ARP worker's mdlayher/arp adapter, the nftables adapter's
-import path, three separate Squid startup bugs this same session):
+Behavior notes below are verified against a real AdGuard Home instance,
+not assumed from documentation:
 - `/control/filtering/set_rules` (POST, body `{"rules": [...]}`) does a
   full replace of AdGuard's custom filtering rules -- no incremental
   add/remove API exists, matching this project's own established
@@ -23,59 +19,47 @@ import path, three separate Squid startup bugs this same session):
   a `user_rules` key.
 - HTTP Basic Auth works directly against `/control/*` for a configured
   instance -- no cookie-based `/control/login` session dance needed.
-- The `$client=ip1,ip2` modifier on a custom rule does exactly what it
-  says: confirmed with two real client containers against a real
-  instance, one resolving a domain normally and the other -- named in
-  the rule's $client list -- getting `0.0.0.0` back for the identical
-  query.
+- The `$client=ip1,ip2` modifier on a custom rule scopes a rule to the
+  named client IPs, verified against a real instance with two client
+  containers: one resolved the domain normally, the other -- named in
+  the rule's $client list -- got `0.0.0.0` back for the identical query.
 - `/control/install/configure` (POST) is what the first-run setup
   wizard itself calls -- NOT the bare `/install/configure` path some of
   AdGuard's own generated OpenAPI-doc tooling implies (every route
   lives under `/control`, even before the instance is configured at
   all). It writes a complete, correctly-versioned AdGuardHome.yaml
   itself; see adguard/entrypoint.sh, which calls this once on first
-  boot instead of hand-templating that file (confirmed live that a
-  hand-authored version, built from the wiki's documented fields alone,
-  was missing several fields the real binary always writes --
-  `session_ttl` format, `upstream_mode`, `cache_optimistic_*`,
-  `doh.routes` -- so letting AdGuard build its own config is both
-  simpler and version-correct in a way a template can't be kept in sync
-  with automatically).
+  boot instead of hand-templating that file -- a hand-authored version,
+  built from the wiki's documented fields alone, was missing several
+  fields the real binary always writes (`session_ttl` format,
+  `upstream_mode`, `cache_optimistic_*`, `doh.routes`), so letting
+  AdGuard build its own config is both simpler and version-correct in a
+  way a template can't be kept in sync with automatically.
 - `/control/filtering/status`'s `user_rules` key is present but `null`,
   not `[]`, on a freshly-configured instance that has never had a custom
-  rule set -- confirmed live 2026-08-30 running the full interception
-  stack against a brand-new AdGuard container for the first time ever
-  (every earlier live AdGuard test this project ran had already pushed
-  at least one custom rule by the time `get_custom_rules` was exercised,
-  which is exactly why this hadn't surfaced before). `get_custom_rules`
-  below treats that ONE specific shape -- key present, value `null` --
-  as "no rules yet" (empty list), same as `[]`. It deliberately does NOT
-  extend the same treatment to a missing key or a non-object response:
-  an early version of this fix did, and a code review the same day
-  caught that this let `sync_once()` silently proceed to a destructive
-  full-replace write on what could be a genuinely malformed response
-  (wrong endpoint, incompatible AdGuard version) rather than the
-  confirmed benign case -- those still raise `AdGuardError` and fail
-  closed, exactly as before this fix existed.
+  rule set. `get_custom_rules` below treats that ONE specific shape --
+  key present, value `null` -- as "no rules yet" (empty list), same as
+  `[]`. It deliberately does NOT extend the same treatment to a missing
+  key or a non-object response: those are a genuinely different,
+  more anomalous failure (wrong endpoint, incompatible AdGuard version)
+  and still raise `AdGuardError` and fail closed -- collapsing all three
+  into one silent "no rules yet" would let `sync_once()` proceed to a
+  destructive full-replace write on a merely malformed read.
 - `/control/querylog?limit=N` (GET) returns `{"data": [...], "oldest":
-  "<timestamp>"}`, newest-first -- confirmed live 2026-08-31 by
-  generating real DNS queries against a running instance and reading
-  the response back. Each entry's `client` field is a plain IP string
-  (no MAC -- DNS carries no link-layer information) and `time` is
-  ISO8601 UTC with variable-precision fractional seconds (commonly
-  9-digit/nanosecond, e.g. `"2026-08-31T13:17:13.089285447Z"`) -- see
-  `normalize_query_log_time` below for why that can't be compared as a
-  plain string against this project's own `db.now_iso()` timestamps.
+  "<timestamp>"}`, newest-first. Each entry's `client` field is a plain
+  IP string (no MAC -- DNS carries no link-layer information) and
+  `time` is ISO8601 UTC with variable-precision fractional seconds
+  (commonly 9-digit/nanosecond, e.g.
+  `"2026-08-31T13:17:13.089285447Z"`) -- see `normalize_query_log_time`
+  below for why that can't be compared as a plain string against this
+  project's own `db.now_iso()` timestamps.
 - `/control/rewrite/list` (GET) / `/control/rewrite/add` (POST) /
   `/control/rewrite/delete` (POST) -- DNS rewrites, a separate feature
-  from the custom filtering rules above. Confirmed live 2026-09-07
-  against the real production instance for the `optigate.home`
-  memorable-URL feature (RoadMap.md's dated entry): `list` returns a
-  plain `[]` on a fresh instance (unlike `user_rules`'s `null` quirk
-  above); `add`/`delete` both take `{"domain", "answer"}` and return an
-  empty 200 body; a rewrite added this way is immediately resolvable --
-  confirmed with `dig @127.0.0.1 -p 5353 <domain>` against the real
-  resolver in the same session, then confirmed gone after `delete`.
+  from the custom filtering rules above, backing the `optigate.home`
+  memorable-URL feature. `list` returns a plain `[]` on a fresh instance
+  (unlike `user_rules`'s `null` quirk above); `add`/`delete` both take
+  `{"domain", "answer"}` and return an empty 200 body; a rewrite added
+  this way is immediately resolvable.
 
 No third-party dependencies -- matches common/cr_api.py's own
 urllib-based pattern, mirrored here, rather than adding `requests` to a
@@ -90,15 +74,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 DEFAULT_TIMEOUT = 5.0
-# Raised from 1 MiB (2026-09-11, live production incident): a real
-# household's /control/filtering/status response -- which grows with
-# every subscription filter's rule count and description, unbounded --
-# crossed 1 MiB once enough over-threshold subscription categories
-# existed, and response.read(MAX_RESPONSE_BYTES) silently truncated it
-# instead of erroring, producing a confusing "malformed JSON" failure
-# from json.loads() on a body cut off mid-string. 16 MiB gives real
-# headroom; _request() below now also detects truncation explicitly
-# instead of ever passing a possibly-cut-off body to a JSON parser.
+# /control/filtering/status's response grows with every subscription
+# filter's rule count and description, unbounded, and can cross a
+# smaller cap -- response.read(MAX_RESPONSE_BYTES) would then silently
+# truncate it instead of erroring, producing a confusing "malformed
+# JSON" failure from json.loads() on a body cut off mid-string. 16 MiB
+# gives real headroom; _request() below also detects truncation
+# explicitly instead of ever passing a possibly-cut-off body to a JSON
+# parser.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 # Bypass environment proxy variables -- this client always talks
@@ -114,21 +97,18 @@ class AdGuardError(RuntimeError):
     failed snapshot: log it and retry next cycle, never crash the
     process over a transient AdGuard restart or network hiccup.
 
-    `status_code` (added 2026-09-08, real gap found investigating a
-    "AdGuard username/password not synced" report): the HTTP status
-    AdGuard responded with, when there was one -- None for a genuine
-    connection failure (unreachable, timed out). Lets a caller tell
-    "AdGuard is down/unreachable" apart from "AdGuard is up but
-    rejected these credentials" (401), which used to collapse into the
-    same generic error everywhere -- see dashboard.py's
-    _optigate_rewrite_status() for the first caller that actually acts
-    on this distinction. A password change made through this project's
-    own admin form (dashboard.py's update_admin()) only writes AdGuard's
+    `status_code`: the HTTP status AdGuard responded with, when there
+    was one -- None for a genuine connection failure (unreachable,
+    timed out). Lets a caller tell "AdGuard is down/unreachable" apart
+    from "AdGuard is up but rejected these credentials" (401) -- see
+    dashboard.py's _optigate_rewrite_status() for a caller that acts on
+    this distinction. A password change made through this project's own
+    admin form (dashboard.py's update_admin()) only writes AdGuard's
     real config file on disk -- AdGuard itself only reads it at
     startup -- so every AdGuard-authenticated call fails with exactly
     this 401 until someone restarts the `adguard` container, and
-    without this attribute that looked identical to AdGuard simply
-    being offline."""
+    without this attribute that looks identical to AdGuard simply being
+    offline."""
 
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -203,17 +183,16 @@ def get_custom_rules(
     if rules is None:
         # A freshly-configured instance that's never had a custom rule set
         # reports the KEY PRESENT but `null`, not `[]` -- see this module's
-        # docstring. Treat that one specific, confirmed-live shape as an
-        # empty list rather than raising, or sync_once() could never
-        # complete its very first cycle against a brand-new AdGuard
-        # instance (it always reads before it writes). Deliberately narrow:
-        # a non-dict response or a missing key entirely is a genuinely
-        # different, more anomalous failure (wrong endpoint, incompatible
-        # AdGuard version) and should still raise and fail closed --
-        # collapsing all three into one silent "no rules yet" used to let
-        # sync_once() proceed to a full-replace write on a merely
-        # malformed read, silently discarding any admin-added rules that
-        # were actually still there (found via code review 2026-08-30).
+        # docstring. Treat that one specific shape as an empty list rather
+        # than raising, or sync_once() could never complete its very first
+        # cycle against a brand-new AdGuard instance (it always reads
+        # before it writes). Deliberately narrow: a non-dict response or a
+        # missing key entirely is a genuinely different, more anomalous
+        # failure (wrong endpoint, incompatible AdGuard version) and
+        # should still raise and fail closed, rather than risk
+        # sync_once() proceeding to a full-replace write on a merely
+        # malformed read and silently discarding admin-added rules that
+        # were actually still there.
         rules = []
     if not isinstance(rules, list):
         raise AdGuardError("AdGuard Home's filtering/status response had a non-list 'user_rules'")
@@ -243,9 +222,8 @@ def get_rewrites(
     """AdGuard Home's own DNS-rewrite entries (`GET /control/rewrite/list`)
     -- a separate feature from the custom filtering rules above (no
     `$dnsrewrite` modifier or block involved, just a plain forced DNS
-    answer for a domain). Confirmed live 2026-09-07 against a real
-    AdGuard Home instance: returns a plain JSON array (`[]` on a fresh
-    instance, not `null` the way `user_rules` is -- this endpoint had no
+    answer for a domain). Returns a plain JSON array (`[]` on a fresh
+    instance, not `null` the way `user_rules` is -- this endpoint has no
     equivalent of that quirk), each entry shaped
     `{"domain": ..., "answer": ..., "enabled": true}`. Used by
     controller/adguard_sync.py's `sync_optigate_rewrite()` to find and
@@ -272,14 +250,12 @@ def add_rewrite(
     base_url: str, username: str, password: str, domain: str, answer: str, timeout: float = DEFAULT_TIMEOUT
 ) -> None:
     """Adds one DNS-rewrite entry (`POST /control/rewrite/add`, body
-    `{"domain", "answer"}`) -- confirmed live 2026-09-07: a plain HTTP
-    200 with an empty body on success, and the new entry immediately
-    resolvable via AdGuard's own DNS (confirmed with `dig` against port
-    5353 the same session). Does not check for an existing entry with
-    the same domain first -- callers that need idempotency (
-    sync_optigate_rewrite()) should read get_rewrites() and reconcile
-    before calling this, same "read fresh, then write" discipline as
-    set_custom_rules()."""
+    `{"domain", "answer"}`) -- a plain HTTP 200 with an empty body on
+    success, and the new entry immediately resolvable via AdGuard's own
+    DNS. Does not check for an existing entry with the same domain
+    first -- callers that need idempotency (sync_optigate_rewrite())
+    should read get_rewrites() and reconcile before calling this, same
+    "read fresh, then write" discipline as set_custom_rules()."""
     _request(
         f"{base_url.rstrip('/')}/control/rewrite/add",
         method="POST",
@@ -295,7 +271,7 @@ def delete_rewrite(
 ) -> None:
     """Removes one DNS-rewrite entry (`POST /control/rewrite/delete`,
     body `{"domain", "answer"}` -- both fields required; AdGuard matches
-    on the exact pair, not the domain alone, confirmed live 2026-09-07).
+    on the exact pair, not the domain alone).
     """
     _request(
         f"{base_url.rstrip('/')}/control/rewrite/delete",
@@ -315,8 +291,7 @@ def set_filters_update_interval(
     doesn't reimplement update-checking, just configures AdGuard's real
     one). `adguard/entrypoint.sh` calls this once during first-run
     bootstrap with `interval_hours=168` (one week, matching AdGuard's
-    own "Once a week" UI preset) -- confirmed live 2026-08-30 that 168
-    is accepted and echoed back exactly by `/control/filtering/status`.
+    own "Once a week" UI preset).
     """
     _request(
         f"{base_url.rstrip('/')}/control/filtering/config",
@@ -331,12 +306,11 @@ def set_filters_update_interval(
 def refresh_filters(base_url: str, username: str, password: str, timeout: float = DEFAULT_TIMEOUT) -> int:
     """Forces AdGuard Home to check every subscribed filter list right
     now, instead of waiting for its own update interval -- this is what
-    the dashboard's "Check for filter updates now" button calls.
-    Confirmed live 2026-08-30 this is safe to call as often as wanted
-    (AdGuard's own docs: "ratelimited, so you can call it freely").
-    Returns how many lists actually had new content -- 0 is a normal,
-    healthy result when nothing has changed upstream since the last
-    check, not a failure.
+    the dashboard's "Check for filter updates now" button calls. Safe to
+    call as often as wanted (AdGuard rate-limits it internally). Returns
+    how many lists actually had new content -- 0 is a normal, healthy
+    result when nothing has changed upstream since the last check, not
+    a failure.
     """
     body = _request(
         f"{base_url.rstrip('/')}/control/filtering/refresh",
@@ -356,20 +330,17 @@ def refresh_filters(base_url: str, username: str, password: str, timeout: float 
     return updated
 
 
-# RoadMap.md's discovery precedence: "AdGuard query-log observations
-# (confirms active IP usage)" -- the shape below is confirmed live
-# 2026-08-31 against a real AdGuard Home instance (`/control/querylog`),
-# not assumed from documentation, matching this module's own established
-# discipline.
+# Matches AdGuard's own `/control/querylog` time-field shape (see
+# normalize_query_log_time below).
 _QUERYLOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z$")
 
 
 def normalize_query_log_time(raw: str) -> str:
     """AdGuard's querylog `time` field is ISO8601 UTC with variable-
-    precision fractional seconds and a bare `Z` suffix -- confirmed
-    live 2026-08-31 (e.g. `"2026-08-31T13:17:13.089285447Z"`, 9-digit/
-    nanosecond precision). `common/db.py`'s own `now_iso()` never
-    carries fractional seconds at all (`"2026-08-31T13:17:13Z"`).
+    precision fractional seconds and a bare `Z` suffix (e.g.
+    `"2026-08-31T13:17:13.089285447Z"`, 9-digit/nanosecond precision).
+    `common/db.py`'s own `now_iso()` never carries fractional seconds
+    at all (`"2026-08-31T13:17:13Z"`).
     Comparing the two formats as plain strings is unsafe: ASCII `.`
     (0x2E) sorts before `Z` (0x5A), so a same-second fractional
     timestamp compares as "earlier" than a whole-second one that
@@ -407,8 +378,7 @@ def get_query_log(
     since last poll," and a modest, fixed-size page covers normal query
     volume between polls; missing entries within a single burst that
     exceeds `limit` is an acceptable gap for a source whose whole role
-    is a soft freshness signal, not primary discovery (RoadMap.md's
-    discovery precedence).
+    is a soft freshness signal, not primary discovery.
     """
     body = _request(
         f"{base_url.rstrip('/')}/control/querylog?limit={int(limit)}",
@@ -427,28 +397,18 @@ def get_query_log(
 
 
 # ==========================================================================
-# Phase 8 (2026-08-31): native filter-list subscriptions -- for a `categories`
-# row over controller/adguard_sync.py's per-target rule-count threshold
-# (confirmed live 2026-08-31: real category lists run up to ~953K domains --
-# AdGuard's own team calls per-client scoping of a list that size via custom
-# rules "unworkable," see AdguardTeam/AdGuardHome#8103), the category's own
-# subscription_url is pushed as one of AdGuard's OWN managed filter lists
-# instead -- letting AdGuard's engine (built for exactly this) match it,
-# rather than this project expanding it into a `$client=`-scoped custom-rule
+# Native filter-list subscriptions -- for a `categories` row over
+# controller/adguard_sync.py's per-target rule-count threshold (real
+# category lists run up to ~953K domains -- AdGuard's own team calls
+# per-client scoping of a list that size via custom rules "unworkable,"
+# see AdguardTeam/AdGuardHome#8103), the category's own subscription_url
+# is pushed as one of AdGuard's OWN managed filter lists instead --
+# letting AdGuard's engine (built for exactly this) match it, rather
+# than this project expanding it into a `$client=`-scoped custom-rule
 # line per domain the way build_category_deny_rules() does for a small,
-# per-target category.
-#
-# **Confirmed live 2026-09-01** against a real running AdGuard Home
-# v0.107.79 instance on the smoke-test VM, once it came back up --
-# written from openapi.yaml alone originally (no Docker available
-# locally at the time; the smoke-test VM was offline), then verified
-# with direct curl calls plus a real end-to-end run of
-# sync_category_subscriptions() against a scratch 5,001-domain category
-# before being trusted the way every other function in this module is.
-# All four request/response shapes below turned out correct on the
-# first live check -- no surprises, unlike most of this project's other
-# from-openapi-alone guesses (see RoadMap.md's dated entry for the full
-# verification writeup).
+# per-target category. The four request/response shapes below are
+# verified against a real running AdGuard Home instance, not assumed
+# from openapi.yaml alone.
 # ==========================================================================
 
 def get_filters_status(
@@ -456,7 +416,7 @@ def get_filters_status(
 ) -> list[dict]:
     """The `filters` array from `/control/filtering/status` -- each entry
     at least `id`/`enabled`/`name`/`url`/`rules_count` per AdGuard's
-    openapi.yaml -- confirmed live 2026-09-01, see module note above."""
+    openapi.yaml."""
     body = _request(
         f"{base_url.rstrip('/')}/control/filtering/status",
         method="GET",
@@ -478,8 +438,7 @@ def add_filter_url(
     base_url: str, username: str, password: str, name: str, url: str, timeout: float = DEFAULT_TIMEOUT
 ) -> None:
     """Subscribes AdGuard Home to `url` as a new managed filter list named
-    `name` -- per openapi.yaml (confirmed live 2026-09-01, see module
-    note above), `POST /control/filtering/add_url` with body
+    `name` -- `POST /control/filtering/add_url` with body
     `{"name", "url", "whitelist": false}`. Behavior when `url` is already
     subscribed is unconfirmed -- callers (adguard_sync.py) should check
     `get_filters_status()` first rather than relying on this being a safe
@@ -498,8 +457,7 @@ def remove_filter_url(
     base_url: str, username: str, password: str, url: str, timeout: float = DEFAULT_TIMEOUT
 ) -> None:
     """Unsubscribes AdGuard Home from `url` -- `POST
-    /control/filtering/remove_url` with body `{"url", "whitelist": false}`
-    -- confirmed live 2026-09-01, see module note above."""
+    /control/filtering/remove_url` with body `{"url", "whitelist": false}`."""
     _request(
         f"{base_url.rstrip('/')}/control/filtering/remove_url",
         method="POST",
@@ -517,14 +475,13 @@ def set_filter_url_enabled(
     """Toggles an already-subscribed filter's `enabled` state without
     removing it -- `POST /control/filtering/set_url` with body
     `{"url", "whitelist": false, "data": {"enabled", "name", "url"}}`,
-    identified by URL rather than id per openapi.yaml (confirmed live
-    2026-09-01, see module note above). This is what lets a schedule-gated
-    global category (adguard_sync.py) turn its subscription on/off as the
-    schedule's window opens/closes, without adding/removing it from
-    AdGuard's filter list entirely each time. `name` must be passed again
-    here even though it isn't changing -- per the documented request
-    shape, `data` fully replaces the filter's editable fields, not a
-    partial patch."""
+    identified by URL rather than id per openapi.yaml. This is what lets
+    a schedule-gated global category (adguard_sync.py) turn its
+    subscription on/off as the schedule's window opens/closes, without
+    adding/removing it from AdGuard's filter list entirely each time.
+    `name` must be passed again here even though it isn't changing --
+    per the documented request shape, `data` fully replaces the
+    filter's editable fields, not a partial patch."""
     _request(
         f"{base_url.rstrip('/')}/control/filtering/set_url",
         method="POST",
@@ -536,45 +493,39 @@ def set_filter_url_enabled(
 
 
 # ==========================================================================
-# G3 (2026-09-01): SafeSearch / YouTube Restricted Mode -- Bark Home parity
-# (RoadMap.md's Phase 8 gap-list addendum). AdGuard Home has a genuine
-# first-class feature for exactly this, per its own openapi.yaml --
-# **confirmed live 2026-09-01** against a real running instance before
-# writing controller/adguard_sync.py's caller: `GET
+# SafeSearch / YouTube Restricted Mode. AdGuard Home has a genuine
+# first-class feature for exactly this, per its own openapi.yaml: `GET
 # /control/safesearch/status` returns `{"enabled", "bing", "duckduckgo",
 # "ecosia", "google", "pixabay", "yandex", "youtube"}` (all booleans);
 # `PUT /control/safesearch/settings` takes the identical shape and
-# returns `200 OK` (plain text, not JSON). Confirmed this is a REAL DNS
-# rewrite, not just a config flag: with `enabled: true`, `dig
-# www.google.com` returned a CNAME to `forcesafesearch.google.com`, and
-# `dig www.youtube.com` returned a CNAME to `restrictmoderate.youtube.com`
+# returns `200 OK` (plain text, not JSON). This is a REAL DNS rewrite,
+# not just a config flag: with `enabled: true`, `dig www.google.com`
+# returns a CNAME to `forcesafesearch.google.com`, and `dig
+# www.youtube.com` returns a CNAME to `restrictmoderate.youtube.com`
 # (YouTube's own *moderate* restriction level -- AdGuard's toggle has no
 # strict/moderate choice, it's whatever Google's own forcesafesearch
 # infrastructure applies for that hostname).
 #
-# This mirrors Bark Home's own behavior exactly: SafeSearch/Restricted
-# Mode is a single network-wide toggle there too, not a per-device
-# setting -- so unlike the category/schedule machinery elsewhere in this
-# project, there is deliberately no `$client=`-scoped equivalent here.
-# `openapi.yaml` also lists a legacy `/control/parental/*` "Parental
-# Control" endpoint (a third-party adult-content blocklist AdGuard used
-# to run server-side) -- NOT used here: that's a different, older
-# feature this project's own `categories` table (Phase 8) already covers
-# via the "Adult" starter category, and separately, is widely reported
-# discontinued in recent AdGuard Home releases since the backend service
-# it depended on was shut down -- not verified live one way or the
-# other, simply irrelevant to what G3 actually needs.
+# SafeSearch/Restricted Mode is a single network-wide toggle, not a
+# per-device setting -- so unlike the category/schedule machinery
+# elsewhere in this project, there is deliberately no `$client=`-scoped
+# equivalent here. `openapi.yaml` also lists a legacy
+# `/control/parental/*` "Parental Control" endpoint (a third-party
+# adult-content blocklist AdGuard used to run server-side) -- NOT used
+# here: that's a different, older feature this project's own
+# `categories` table already covers via the "Adult" starter category,
+# and is also widely reported discontinued in recent AdGuard Home
+# releases since the backend service it depended on was shut down.
 # ==========================================================================
 
 
 def get_safesearch_status(
     base_url: str, username: str, password: str, timeout: float = DEFAULT_TIMEOUT
 ) -> dict:
-    """The current SafeSearch config -- confirmed live 2026-09-01, see
-    module note above. `adguard_sync.py`'s `sync_safesearch()` reads
-    this first so it can preserve whatever an admin has set per-service
-    directly in AdGuard's own UI, changing only the master `enabled`
-    flag this project owns."""
+    """The current SafeSearch config. `adguard_sync.py`'s
+    `sync_safesearch()` reads this first so it can preserve whatever an
+    admin has set per-service directly in AdGuard's own UI, changing
+    only the master `enabled` flag this project owns."""
     body = _request(
         f"{base_url.rstrip('/')}/control/safesearch/status",
         method="GET",
@@ -595,12 +546,12 @@ def set_safesearch_settings(
     base_url: str, username: str, password: str, config: dict, timeout: float = DEFAULT_TIMEOUT
 ) -> None:
     """Replaces AdGuard's SafeSearch config wholesale -- `PUT
-    /control/safesearch/settings`, confirmed live 2026-09-01 to accept
-    and echo back exactly the shape `get_safesearch_status()` returns
-    (there is no partial-patch form; every field must be supplied).
-    Callers should always start from a fresh `get_safesearch_status()`
-    result and only change the one field they mean to, same discipline
-    `set_filter_url_enabled()` above follows for filters."""
+    /control/safesearch/settings` accepts and echoes back exactly the
+    shape `get_safesearch_status()` returns (there is no partial-patch
+    form; every field must be supplied). Callers should always start
+    from a fresh `get_safesearch_status()` result and only change the
+    one field they mean to, same discipline `set_filter_url_enabled()`
+    above follows for filters."""
     _request(
         f"{base_url.rstrip('/')}/control/safesearch/settings",
         method="PUT",

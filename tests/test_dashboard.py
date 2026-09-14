@@ -84,8 +84,7 @@ def test_ca_cert_route_requires_no_auth(client):
 
 
 # ============================================================
-# ADMIN LOGIN BRUTE-FORCE PROTECTION -- added 2026-09-02 after an audit
-# found this login had none at all (docs/security/overview.md section 6).
+# ADMIN LOGIN BRUTE-FORCE PROTECTION
 # ============================================================
 
 def test_five_wrong_passwords_then_rate_limited(client):
@@ -93,10 +92,9 @@ def test_five_wrong_passwords_then_rate_limited(client):
         resp = client.get("/users", headers=_auth_header(password="nope"))
         assert resp.status_code == 401
 
-    # The 6th attempt is blocked outright -- even with the CORRECT
-    # password this time, matching the captive portal's own "don't let
-    # an attacker use up the budget on wrong guesses and slip the right
-    # one in at the end" reasoning.
+    # The 6th attempt is blocked outright even with the correct password --
+    # an attacker shouldn't be able to slip a correct guess in once the
+    # wrong-guess budget is used up.
     resp = client.get("/users", headers=_auth_header())
     assert resp.status_code == 429
     assert resp.headers.get("Retry-After") == "60"
@@ -294,10 +292,9 @@ def test_delete_domain_refuses_crunchyroll_builtin(client, db_conn):
 
 
 def test_delete_domain_refuses_a_protected_infrastructure_domain(client, db_conn):
-    """2026-09-13, RoadMap.md, project owner's explicit request: same
-    can't-delete protection as the built-in Crunchyroll domain, extended to
-    the infrastructure domains it depends on (defaults/seed_defaults.py's
-    GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS)."""
+    """Same can't-delete protection as the built-in Crunchyroll domain,
+    extended to the infrastructure domains it depends on
+    (defaults/seed_defaults.py's GLOBAL_SPLICE_DOMAINS/TRUSTED_DOMAINS)."""
     db_conn.execute(
         "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
         "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
@@ -337,10 +334,8 @@ def test_domain_access_grants_and_revokes_a_user(client, db_conn):
 
 
 def test_domains_page_lists_bulk_access_form_and_row_checkboxes(client, db_conn):
-    """Real live-testing feedback (RoadMap.md's dated entry): "we should
-    probably have a way to bulk categorize domains" -- setting access on
-    dozens of domains one at a time via each one's own Manage page
-    doesn't scale."""
+    """Setting access on dozens of domains one at a time via each domain's
+    own Manage page doesn't scale, hence the bulk-access form."""
     client.post("/domains/add", data={"pattern": r"example\.com", "mode": "splice"}, headers=_auth_header())
     resp = client.get("/domains", headers=_auth_header())
     assert resp.status_code == 200
@@ -350,10 +345,9 @@ def test_domains_page_lists_bulk_access_form_and_row_checkboxes(client, db_conn)
 
 
 def test_domains_page_excludes_protected_infrastructure_domains(client, db_conn):
-    """2026-09-13, RoadMap.md, project owner's explicit request: these
-    aren't something an admin added or can act on from here -- they live on
-    the Crunchyroll integration page's own "Required domains" card instead
-    (see test_integrations_crunchyroll_page_lists_required_domains)."""
+    """These aren't something an admin added or can act on from here -- they
+    live on the Crunchyroll integration page's own "Required domains" card
+    instead (see test_integrations_crunchyroll_page_lists_required_domains)."""
     db_conn.execute(
         "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
         "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
@@ -482,9 +476,7 @@ def test_bulk_update_domain_access_is_one_transaction_not_one_commit_per_domain(
 
 
 # ============================================================
-# Domains toolbar: Download/Delete/Manage access (Entra-style buttons,
-# added 2026-09-07 -- closing the last gap in the toolbar redesign already
-# applied to Devices/Users/Categories/Schedules; RoadMap.md's dated entry)
+# Domains toolbar: Download/Delete/Manage access (Entra-style buttons)
 # ============================================================
 
 def test_domains_page_has_toolbar_with_download_delete_and_manage_access(client, db_conn):
@@ -611,9 +603,8 @@ def test_add_path_and_delete_path(client, db_conn):
 
 
 # ============================================================
-# add_path(): plain path/URL input, not hand-written regex (changed
-# 2026-09-07, RoadMap.md's dated entry -- "the admin can just paste the
-# URL and everything after what is pasted is allowed")
+# add_path(): plain path/URL input, not hand-written regex -- the admin
+# can just paste the URL and everything after it is allowed.
 # ============================================================
 
 def test_extract_path_from_a_bare_path():
@@ -637,9 +628,9 @@ def test_extract_path_strips_query_string_via_path_to_pattern():
 
 
 def test_add_path_accepts_a_plain_path_and_matches_it_and_anything_after(client, db_conn):
-    """The project owner's own example: pasting a path allows that exact
-    path, a real subpath under it, AND a different literal path that
-    merely shares the same string prefix (not just a "/" boundary)."""
+    """Pasting a path allows that exact path, a real subpath under it, AND
+    a different literal path that merely shares the same string prefix
+    (not just a "/" boundary)."""
     client.post("/domains/add", data={"pattern": r"example\.com", "mode": "bump"}, headers=_auth_header())
     domain_id = db_conn.execute("SELECT id FROM domains WHERE pattern = ?", (r"example\.com",)).fetchone()[0]
 
@@ -698,15 +689,13 @@ def test_add_path_blank_input_rejected(client, db_conn):
 
 
 def test_delete_path_on_an_already_deleted_row_does_not_500(client, db_conn):
-    """Regression test for a real bug (fixed 2026-09-02): deleting a
-    path_id with no matching row used to fall through to
-    flash_redirect("domain_detail", domain_id=None), and Flask's
-    url_for() raises an unhandled BuildError for a None value against a
-    route requiring <int:domain_id> -- reproduced directly before this
-    fix. A double-clicked Remove button, or a stale Domain-detail page
-    where the path was already removed elsewhere, must get the same
-    graceful "no longer exists" flash every sibling delete route gives,
-    not a 500."""
+    """Deleting a path_id with no matching row falls through to
+    flash_redirect("domain_detail", domain_id=None), and Flask's url_for()
+    raises an unhandled BuildError for a None value against a route
+    requiring <int:domain_id>. A double-clicked Remove button, or a stale
+    Domain-detail page where the path was already removed elsewhere, must
+    get the same graceful "no longer exists" flash every sibling delete
+    route gives, not a 500."""
     resp = client.post("/domains/paths/delete", data={"path_id": 999999}, headers=_auth_header())
     assert resp.status_code < 500
     assert resp.status_code in (302, 303)
@@ -766,8 +755,8 @@ def test_approve_missing_log_entry_errors(client):
 
 
 def test_approve_from_report_scope_device_grants_device_domains_row(client, db_conn):
-    """Added 2026-08-31, GH #9: a device-only row (no user_id at all) can
-    now be approved for that specific device."""
+    """A device-only row (no user_id at all) can be approved for that
+    specific device."""
     import db as db_mod
     db_conn.execute(
         "INSERT INTO devices (mac_address, label, created_at) VALUES ('aa:bb:cc:dd:ee:01', 'Living Room TV', ?)",
@@ -845,10 +834,9 @@ def test_approve_from_report_scope_group_grants_group_domains_row(client, db_con
 
 
 def test_approve_path_not_allowed_redirects_to_prefilled_add_path_form(client, db_conn):
-    """GH #6: approving a path-blocked row used to be a silent no-op
-    (re-asserting a domain assignment that already existed). It must now
-    send the admin to review a derived pattern instead of auto-saving one
-    or doing nothing."""
+    """Approving a path-blocked row must send the admin to review a
+    derived pattern instead of silently re-asserting a domain assignment
+    that already existed, or doing nothing."""
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()[0]
     client.post("/domains/add", data={"pattern": r"asurascans\.example", "mode": "bump", "is_global": "on"}, headers=_auth_header())
@@ -894,18 +882,16 @@ def test_report_page_lists_logged_rows(client, db_conn):
     resp = client.get("/report", headers=_auth_header())
     assert resp.status_code == 200
     assert b"example.com" in resp.data
-    # RoadMap finding #5 (2026-09-10): the Report page had a Status/Result
-    # column all along; the owner's browser was serving a stale cached
-    # copy. Every HTML page is now sent no-store so that can't happen.
+    # Every HTML page is sent no-store so a stale cached copy can't hide
+    # a column that's actually there.
     assert "no-store" in resp.headers.get("Cache-Control", "")
     assert b"<th>Result</th>" in resp.data
 
 
 def test_report_times_are_shown_in_the_configured_household_timezone(client, db_conn):
-    """Owner bug 2026-09-11: the Report page rendered stored UTC
-    timestamps verbatim while Settings had the household on US/Eastern.
-    Now the activity table + pending card localise to
-    `household_time_zone` and the column header names the zone."""
+    """The activity table and pending card localise timestamps to
+    `household_time_zone` (rather than showing raw UTC), and the column
+    header names the zone."""
     import datetime as _dt
     import zoneinfo as _zi
     import db as db_mod
@@ -961,17 +947,16 @@ def test_service_worker_is_revalidated_and_never_caches_navigations(client):
     # bumped cache version so browsers force-update off any older revision
     assert 'CACHE = "pp-static-v3"' in body
     # the fetch handler must only ever respondWith for /static/ -- a
-    # blanket cache-first would let a stale page (finding #5) persist
+    # blanket cache-first would let a stale page persist
     assert 'url.pathname.startsWith("/static/")' in body
     assert body.count("event.respondWith") == 1
 
 
 def test_report_page_shows_which_device_a_blocked_row_came_from(client, db_conn):
-    """Real live-testing feedback (RoadMap.md's dated entry): a blocked
-    row for an unauthenticated device showed "(unauthenticated)" as its
-    User with no way to tell which physical device that actually was --
-    access_log.device_id was already there (see log_identity_fields()'s
-    own docstring), just never surfaced on this page."""
+    """A blocked row for an unauthenticated device shows "(unauthenticated)"
+    as its User with no way to tell which physical device that actually
+    was -- access_log.device_id is already there (see
+    log_identity_fields()'s own docstring), just needs surfacing here."""
     device_id = _insert_device(db_conn, "aa:bb:cc:dd:ee:60", label="Kitchen Tablet")
     db_conn.execute(
         "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, device_id) "
@@ -989,10 +974,9 @@ def test_report_page_shows_which_device_a_blocked_row_came_from(client, db_conn)
 
 
 def test_report_page_falls_back_to_raw_ip_for_a_never_recognized_device(client, db_conn):
-    """Same live-testing feedback as the test above -- the OTHER half:
-    when device_id is NULL (never resolved to any devices row at all,
-    not just a deleted one), the raw source IP (RoadMap.md's dated
-    entry, access_log.ip_address) is the only thing left to track the
+    """The other half of the test above: when device_id is NULL (never
+    resolved to any devices row at all, not just a deleted one), the raw
+    source IP (access_log.ip_address) is the only thing left to track the
     device down by."""
     db_conn.execute(
         "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, ip_address) "
@@ -1008,12 +992,10 @@ def test_report_page_falls_back_to_raw_ip_for_a_never_recognized_device(client, 
 
 
 def test_report_page_explains_why_a_blocked_row_was_blocked(client, db_conn):
-    """Real gap found live (RoadMap.md's dated entry, project owner's
-    own example: speedtest.net blocked on Matthew's device with no
-    indication why). access_log.reason was already populated with a
-    real value for essentially every allow/deny decision this project
-    makes -- the bug was that the Activity table only ever rendered a
-    bare "blocked" badge and never looked at row.reason at all."""
+    """access_log.reason is populated with a real value for essentially
+    every allow/deny decision this project makes -- the Activity table
+    must actually surface it instead of rendering a bare "blocked"
+    badge."""
     db_conn.execute(
         "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason) "
         "VALUES (datetime('now'), NULL, '(unauthenticated)', 'netflix.com', NULL, 0, 'unknown_domain')"
@@ -1027,10 +1009,10 @@ def test_report_page_explains_why_a_blocked_row_was_blocked(client, db_conn):
 
 
 def test_report_shows_the_show_name_next_to_the_id_from_user_shows(client, db_conn):
-    """Owner request 2026-09-11: a blocked Crunchyroll row only carried
-    the raw series id (`GRE50KV36`). If ANY user has that show approved,
-    its title is already on file in user_shows -- surface it, and
-    back-fill the access_log row so it's a one-time lookup."""
+    """A blocked Crunchyroll row only carries the raw series id
+    (`GRE50KV36`). If ANY user has that show approved, its title is
+    already on file in user_shows -- surface it, and back-fill the
+    access_log row so it's a one-time lookup."""
     client.post("/users/add", data={"username": "kidA", "password": "pw"}, headers=_auth_header())
     uid = db_conn.execute("SELECT id FROM users WHERE username = 'kidA'").fetchone()[0]
     db_conn.execute(
@@ -1119,7 +1101,6 @@ def test_report_page_shows_dash_for_a_row_with_no_device(client, db_conn):
 
 # ============================================================
 # Report: routine DNS-tier activity is hidden unless asked for
-# (RoadMap.md finding #9, 2026-09-10)
 # ============================================================
 
 def test_report_hides_dns_tier_allowed_rows_by_default(client, db_conn):
@@ -1167,9 +1148,8 @@ def test_report_show_routine_does_not_leak_into_other_status_filters_unexpectedl
 
 
 # ============================================================
-# Report: filter by device/group target (added 2026-08-31, GH #9 --
-# access_log.device_id lets rows with no user_id at all still be
-# filtered/acted on)
+# Report: filter by device/group target -- access_log.device_id lets
+# rows with no user_id at all still be filtered/acted on
 # ============================================================
 
 def _insert_device(db_conn, mac, *, label=None, group_id=None):
@@ -1220,8 +1200,8 @@ def test_report_filters_by_group_target(client, db_conn):
 
 
 def test_report_legacy_user_param_still_works(client, db_conn):
-    """Regression guard: ?user=<username> (pre-2026-08-31 links/bookmarks)
-    must keep working alongside the new ?target= combobox encoding."""
+    """Regression guard: ?user=<username> (legacy links/bookmarks) must
+    keep working alongside the newer ?target= combobox encoding."""
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
     db_conn.execute(
@@ -1291,10 +1271,8 @@ def test_user_detail_unknown_id_redirects_with_error(client):
 
 
 # ============================================================
-# User detail "Assigned sites" pagination -- added 2026-09-07, project
-# owner's explicit request: "This includes managing the domains assigned
-# to users in the user section too" -- same page-size-picker + Prev/Next
-# pattern as Categories/Devices/Domains the same day.
+# User detail "Assigned sites" pagination -- same page-size-picker +
+# Prev/Next pattern as Categories/Devices/Domains.
 # ============================================================
 
 def test_user_detail_assigned_sites_paginates_with_a_default_page_size(client, db_conn):
@@ -1356,13 +1334,11 @@ def test_user_detail_assigned_sites_small_list_shows_no_pagination_controls(clie
 
 
 def test_user_detail_shows_global_domains_separately_from_assigned(client, db_conn):
-    """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
-    the Users list's "N assigned" count includes every is_global domain
-    (users()'s own domain_count query), but this page used to query only
-    user_domains directly -- a brand-new user with zero explicit
-    assignments showed nothing at all beyond a vague aside, with no way
-    to see what the global domains actually are. Now they're listed here
-    directly, note included."""
+    """The Users list's "N assigned" count includes every is_global domain
+    (users()'s own domain_count query), so this page must list global
+    domains separately too -- otherwise a brand-new user with zero
+    explicit assignments shows nothing at all, with no way to see what
+    the global domains actually are."""
     client.post(
         "/domains/add",
         data={"pattern": r"google\.com", "mode": "splice", "note": "Google", "is_global": "on"},
@@ -1443,9 +1419,9 @@ def test_add_show_uses_cr_api_title_when_mocked(client, db_conn, monkeypatch):
 
 
 def test_user_detail_lists_shows_approved_for_other_users_as_pickable(client, db_conn):
-    """Real live-testing feedback (RoadMap.md's dated entry): approving a
-    show for a second kid meant re-pasting/re-resolving the exact same
-    Crunchyroll URL a first kid had already been approved for."""
+    """Approving a show for a second kid should not require
+    re-pasting/re-resolving the exact same Crunchyroll URL a first kid
+    was already approved for."""
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     client.post("/users/add", data={"username": "kid2", "password": "pw"}, headers=_auth_header())
     kid1 = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
@@ -1544,7 +1520,7 @@ def test_remove_show_deletes_row(client, db_conn):
 
 
 # ============================================================
-# Integrations page -- Crunchyroll cross-user management (2026-09-10)
+# Integrations page -- Crunchyroll cross-user management
 # ============================================================
 
 def _mk_kids(client, db_conn, *names):
@@ -1605,10 +1581,10 @@ def test_integrations_empty_state(client, db_conn):
 
 
 def test_integrations_crunchyroll_page_lists_required_domains(client, db_conn):
-    """2026-09-13, RoadMap.md, project owner's explicit request: protected
-    infrastructure domains are moved off the general Domains page and shown
-    here instead, since they're required for this integration specifically
-    (see test_domains_page_excludes_protected_infrastructure_domains)."""
+    """Protected infrastructure domains are kept off the general Domains
+    page and shown here instead, since they're required for this
+    integration specifically (see
+    test_domains_page_excludes_protected_infrastructure_domains)."""
     db_conn.execute(
         "INSERT INTO domains (pattern, mode, kind, is_global, protected, note, created_at) "
         "VALUES ('gstatic\\.com', 'splice', 'generic', 1, 1, 'Google static assets', datetime('now'))"
@@ -1784,7 +1760,7 @@ def test_approve_show_refreshes_stored_name_without_erroring(client, db_conn):
 
 
 # ============================================================
-# domains filtered by user (GH #2)
+# domains filtered by user
 # ============================================================
 
 def test_domains_filtered_by_user_shows_only_assigned_and_global(client, db_conn):
@@ -1829,7 +1805,7 @@ def test_users_page_sites_link_includes_user_id(client, db_conn):
 
 
 # ============================================================
-# GH #6: paste-a-URL one-step page approval
+# paste-a-URL one-step page approval
 # ============================================================
 
 def test_add_domain_from_url_creates_bump_domain_path_and_assignment(client, db_conn):
@@ -1926,18 +1902,18 @@ def test_domains_unfiltered_view_hides_paste_url_form(client, db_conn):
 
 
 def test_domains_filter_with_nonexistent_user_id_shows_error(client, db_conn):
-    """Code-review fix: an invalid/stale user_id must surface an error like
-    the rest of this file's "no longer exists" convention, not silently
-    fall back to the unfiltered list."""
+    """An invalid/stale user_id must surface an error like the rest of
+    this file's "no longer exists" convention, not silently fall back to
+    the unfiltered list."""
     resp = client.get("/domains?user_id=999999", headers=_auth_header())
     assert resp.status_code == 302
     assert "error=1" in resp.headers["Location"]
 
 
 def test_users_page_assigned_count_includes_global_domains(client, db_conn):
-    """Code-review fix: the "N assigned" count must match what its own
-    ?user_id= link actually shows -- explicit assignments plus every
-    global domain, not just explicit assignments."""
+    """The "N assigned" count must match what its own ?user_id= link
+    actually shows -- explicit assignments plus every global domain, not
+    just explicit assignments."""
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     client.post("/domains/add", data={"pattern": r"global\.example", "mode": "splice", "is_global": "on"}, headers=_auth_header())
     resp = client.get("/users", headers=_auth_header())
@@ -1945,8 +1921,8 @@ def test_users_page_assigned_count_includes_global_domains(client, db_conn):
 
 
 def test_add_domain_from_filtered_view_preserves_filter(client, db_conn):
-    """Code-review fix: add_domain must forward ?user_id= through its
-    redirect so the admin stays in the filtered view they were on."""
+    """add_domain must forward ?user_id= through its redirect so the
+    admin stays in the filtered view they were on."""
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()[0]
     resp = client.post(
@@ -1959,8 +1935,8 @@ def test_add_domain_from_filtered_view_preserves_filter(client, db_conn):
 
 
 def test_delete_domain_from_filtered_view_preserves_filter(client, db_conn):
-    """Code-review fix: delete_domain must forward ?user_id= through its
-    redirect so the admin stays in the filtered view they were on."""
+    """delete_domain must forward ?user_id= through its redirect so the
+    admin stays in the filtered view they were on."""
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()[0]
     client.post("/domains/add", data={"pattern": r"new\.example", "mode": "splice"}, headers=_auth_header())
@@ -2145,10 +2121,10 @@ def test_update_network_sweep_rejects_zero_or_negative_interval(client, db_conn)
 
 
 def test_update_network_settings_rejected_interval_leaves_local_network_unchanged_too(client, db_conn):
-    """Atomicity check for the merged Network section (RoadMap.md item
-    3): a bad interval must leave the WHOLE save rejected, not just the
-    interval -- a local_network change submitted in the same request
-    must not silently go through."""
+    """Atomicity check for the merged Network section: a bad interval
+    must leave the WHOLE save rejected, not just the interval -- a
+    local_network change submitted in the same request must not
+    silently go through."""
     import db
     db.set_setting(db_conn, "local_network", "192.168.1.0/24")
     db_conn.commit()
@@ -2190,13 +2166,11 @@ def test_settings_page_shows_the_run_now_button(client):
 
 
 def test_run_network_sweep_now_warns_when_controller_is_not_running(client, db_conn):
-    """Real gap found live 2026-09-09, project owner's own words: "we
-    can't just let it go off into nothingness." No interception_runtime
-    row at all (a fresh install, or -- the actual live case -- the
-    interception profile simply isn't running) must produce an honest
-    warning, not the generic "will run" message that implies success
-    it can't back up. The request is still queued regardless (see the
-    next test)."""
+    """No interception_runtime row at all (a fresh install, or the
+    interception profile simply not running) must produce an honest
+    warning, not the generic "will run" message that implies success it
+    can't back up. The request is still queued regardless (see the next
+    test)."""
     resp = client.post("/settings/network-sweep/run-now", headers=_auth_header(), follow_redirects=True)
     assert b"interception profile isn&#39;t running" in resp.data or b"interception profile isn't running" in resp.data
 
@@ -2258,10 +2232,9 @@ def test_update_optigate_hostname_blank_falls_back_to_default(client, db_conn):
 
 
 def test_update_optigate_hostname_rejects_a_dot(client, db_conn):
-    """The project owner's own words: "force the use of .home so the
-    administrator can only change the first part of the URL" -- a
-    prefix containing its own dot could otherwise smuggle in a
-    different, unintended suffix."""
+    """The admin can only change the first part of the URL -- a prefix
+    containing its own dot could otherwise smuggle in a different,
+    unintended suffix."""
     resp = client.post(
         "/settings/household", data={"optigate_hostname_prefix": "evil.example"}, headers=_auth_header()
     )
@@ -2285,11 +2258,10 @@ def test_update_optigate_hostname_rejects_leading_or_trailing_hyphen(client, db_
 
 
 # ============================================================
-# optigate.home rewrite pushed directly by the dashboard (2026-09-08) --
-# real gap found live: this used to be pushed ONLY by controller's
-# periodic cycle (the interception profile, off by default for most
-# installs), so the feature silently never worked at all without it,
-# with "Saved. The address is now X.home." implying otherwise.
+# optigate.home rewrite pushed directly by the dashboard -- pushing it
+# only from controller's periodic cycle (the interception profile, off
+# by default for most installs) would mean the feature silently never
+# works without it, while still claiming success.
 # ============================================================
 
 def test_update_optigate_hostname_without_dashboard_url_explains_why(client, db_conn):
@@ -2368,8 +2340,8 @@ def test_update_optigate_hostname_reports_an_adguard_error_without_crashing(clie
 
 def test_settings_page_shows_not_active_status_by_default(client, db_conn):
     """No DASHBOARD_URL, no AdGuard configured -- the default state on a
-    fresh install. Must say so plainly, not silently look identical to
-    a working setup (the exact gap that prompted this fix)."""
+    fresh install. Must say so plainly, not silently look identical to a
+    working setup."""
     resp = client.get("/settings", headers=_auth_header())
     assert b"not active" in resp.data
 
@@ -2418,13 +2390,11 @@ def test_settings_page_status_check_survives_adguard_being_unreachable(client, d
 
 
 def test_settings_page_distinguishes_stale_credentials_from_adguard_being_down(client, db_conn, monkeypatch):
-    """Real gap found 2026-09-08 investigating an "AdGuard username/
-    password not synced" report: a 401 (AdGuard is up, but rejects the
-    stored login -- exactly what happens after an admin password
-    change until someone restarts the adguard container) used to show
-    the identical "isn't reachable right now" message as AdGuard being
-    genuinely offline, pointing troubleshooting in the wrong direction
-    entirely."""
+    """A 401 (AdGuard is up, but rejects the stored login -- exactly what
+    happens after an admin password change until someone restarts the
+    adguard container) must not show the identical "isn't reachable
+    right now" message as AdGuard being genuinely offline; that would
+    point troubleshooting in the wrong direction entirely."""
     import dashboard
 
     monkeypatch.setenv("DASHBOARD_URL", "http://192.168.1.50:8787")
@@ -2632,16 +2602,12 @@ def test_reset_nic_counters_refuses_when_no_nic_is_available(client, monkeypatch
 
 
 def test_health_page_shows_running_mode_and_generation(client, db_conn):
-    # A hardcoded absolute timestamp here (an earlier version of this test
-    # used '2026-08-30T12:00:00Z') silently ages past HEALTH_STALE_AFTER_
-    # SECONDS as real time passes, at which point this test starts
-    # exercising the "stale" render branch instead of the intended plain-
-    # running one, while still passing on these same weak substring
-    # assertions -- caught by code review 2026-08-30. Use a relative,
-    # always-fresh timestamp instead, and assert the specific generation
-    # text plus the ABSENCE of the stale badge, so a regression in either
-    # the generation display or the staleness threshold actually fails
-    # this test rather than passing by coincidence.
+    # A relative, always-fresh timestamp avoids a hardcoded one silently
+    # ageing past HEALTH_STALE_AFTER_SECONDS and drifting into the
+    # "stale" render branch. Assert the specific generation text plus
+    # the ABSENCE of the stale badge, so a regression in either the
+    # generation display or the staleness threshold actually fails this
+    # test rather than passing by coincidence.
     import db
     recent_ts = db.now_iso()
     _insert_runtime_row(db_conn, last_healthy_at=recent_ts, applied_generation=7)
@@ -2661,10 +2627,10 @@ def test_health_page_shows_fail_open_reason(client, db_conn):
 
 
 def test_health_page_flags_stale_mode_despite_running_status(client, db_conn):
-    # Simulates a crash-looping controller (e.g. OOM-killed, confirmed live
-    # 2026-08-30): the DB row is frozen at whatever it said the moment the
-    # process died, since the process that would report fail_open is the
-    # same one that's dead.
+    # Simulates a crash-looping controller (e.g. OOM-killed): the DB row
+    # is frozen at whatever it said the moment the process died, since
+    # the process that would report fail_open is the same one that's
+    # dead.
     import db
     _insert_runtime_row(db_conn, last_healthy_at=db.iso_secs_ago(60))
     resp = client.get("/health", headers=_auth_header())
@@ -2697,10 +2663,9 @@ def test_health_page_shows_nft_fail_open_reason(client, db_conn):
 
 
 # ============================================================
-# Health page "run this command" toggle -- added 2026-09-07, project
-# owner's explicit request in place of a dashboard-driven start/stop
-# control (granting the dashboard container Docker socket access to
-# actually flip these containers was explicitly declined the same day)
+# Health page "run this command" toggle, in place of a dashboard-driven
+# start/stop control (granting the dashboard container Docker socket
+# access to actually flip these containers was declined)
 # ============================================================
 
 def test_health_page_shows_stop_commands_when_running(client, db_conn):
@@ -2783,12 +2748,10 @@ def test_update_admin_blank_password_keeps_current_password(client, db_conn):
 
 
 # ============================================================
-# Real AdGuard/dashboard credential unification (2026-09-07, RoadMap.md's
-# dated entry) -- replaces the earlier "show the plaintext AdGuard
-# password on screen" approach, correctly flagged as insecure. Changing
-# the dashboard's own admin password is now the ONLY way to change
-# AdGuard's login too; see dashboard/adguard_config_sync.py for the
-# actual file-write half of this (its own tests cover that in isolation).
+# AdGuard/dashboard credential unification -- changing the dashboard's
+# own admin password is the ONLY way to change AdGuard's login too; see
+# dashboard/adguard_config_sync.py for the actual file-write half of
+# this (its own tests cover that in isolation).
 # ============================================================
 
 def test_update_admin_password_change_syncs_adguard_settings(client, db_conn, monkeypatch):
@@ -2862,8 +2825,8 @@ def test_update_admin_password_change_survives_adguard_sync_failure(client, db_c
 
 
 def test_settings_page_never_shows_a_plaintext_adguard_password(client, db_conn):
-    """Regression guard for the exact insecure behavior the project
-    owner flagged and asked to have removed, not just hidden better."""
+    """Regression guard: the plaintext AdGuard password must be removed
+    entirely, not just hidden better."""
     import db as db_mod
     db_mod.set_setting(db_conn, "adguard_url", "http://127.0.0.1:3000")
     db_mod.set_setting(db_conn, "adguard_password", "s3cr3t-pw")
@@ -2883,8 +2846,8 @@ def test_settings_page_has_no_separate_adguard_username_or_password_input(client
 # ============================================================
 # /settings/filtering: AdGuard connection ADDRESS (username/password
 # moved to /settings/admin above), SafeSearch, and blocked-site
-# experience -- merged into one atomic Save 2026-09-09 (RoadMap.md item
-# 3). Plus "check for updates now" (its own separate one-off action).
+# experience -- merged into one atomic Save. Plus "check for updates
+# now" (its own separate one-off action).
 # ============================================================
 
 def test_update_adguard_settings_saves_only_the_url(client, db_conn):
@@ -2907,8 +2870,8 @@ def test_settings_shows_no_adguard_ui_link_when_not_configured(client, db_conn):
 
 
 def test_settings_shows_adguard_ui_link_using_the_browsers_own_host(client, db_conn):
-    # Real feature added 2026-09-07: a quick click-through to AdGuard's
-    # own admin UI. Must NOT reuse adguard_url's own host as-is -- that's
+    # A quick click-through to AdGuard's own admin UI. Must NOT reuse
+    # adguard_url's own host as-is -- that's
     # always 127.0.0.1 (the dashboard-to-AdGuard API address under this
     # project's shared network_mode: host setup), which would send the
     # admin's browser to their OWN machine, not the Beelink. Only the
@@ -2940,8 +2903,7 @@ def test_refresh_adguard_filters_calls_the_real_client_and_reports_the_count(cli
     monkeypatch.setattr(dashboard.adguard_config_sync, "sync_adguard_credentials", lambda *a, **kw: None)
     client.post("/settings/filtering", data={"adguard_url": "http://127.0.0.1:3000"}, headers=_auth_header())
     # Username/password now come from the dashboard's own admin login
-    # (update_admin()), not a separate AdGuard-only form -- see this
-    # module's own dated entry.
+    # (update_admin()), not a separate AdGuard-only form.
     client.post(
         "/settings/admin", data={"admin_username": "admin", "admin_password": "hunter2"}, headers=_auth_header(),
     )
@@ -3273,7 +3235,7 @@ def test_clear_filters_button_shown_when_a_filter_is_active(client):
 
 
 # ============================================================
-# Devices (v2 roadmap groundwork -- not enforced anywhere yet)
+# Devices (not enforced anywhere yet)
 # ============================================================
 
 def test_normalize_mac_accepts_colon_and_hyphen_forms():
@@ -3318,7 +3280,7 @@ def test_add_device_duplicate_mac_rejected(client, db_conn):
 
 
 # ============================================================
-# G7 follow-on: bulk CSV device import
+# Bulk CSV device import
 # ============================================================
 
 def _csv_upload(text: str, filename: str = "devices.csv"):
@@ -3485,7 +3447,7 @@ def test_settings_page_shows_bulk_import_card(client):
 
 
 # ============================================================
-# Events page (2026-09-01, added ahead of G1 real-network testing)
+# Events page
 # ============================================================
 
 def test_events_page_shows_empty_state_with_no_events(client):
@@ -3514,9 +3476,9 @@ def test_events_page_shows_recovery_severity_distinctly(client, db_conn):
 
 
 def test_events_page_shows_info_severity_with_its_own_badge(client, db_conn):
-    """Added 2026-09-09 alongside the 'info' severity itself -- must
-    render with a distinct badge, not crash on a severity value that
-    predates this page's original two-value ternary."""
+    """The 'info' severity must render with a distinct badge, not crash
+    on a severity value that predates this page's original two-value
+    ternary."""
     import system_events
 
     system_events.log_event(db_conn, "network_sweep", "info", "Manual sweep complete: probed 2 address(es).")
@@ -3588,10 +3550,9 @@ def test_update_device_sets_flags_and_assigns_to_a_kid(client, db_conn):
 
 
 def test_update_device_turning_on_bypass_login_defaults_to_ignored(client, db_conn):
-    """2026-08-31, project owner's explicit direction -- same default as
-    the quick-action bypass_login_device() route, but via the full edit
-    form: turning bypass_login on with no assignment picked defaults the
-    device to ignored."""
+    """Same default as the quick-action bypass_login_device() route, but
+    via the full edit form: turning bypass_login on with no assignment
+    picked defaults the device to ignored."""
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:60"}, headers=_auth_header())
     device_id = db_conn.execute("SELECT id FROM devices").fetchone()[0]
 
@@ -3668,10 +3629,10 @@ def test_update_device_bypass_login_default_does_not_refire_on_a_later_save(clie
 
 
 def test_update_device_assigning_to_a_user_authenticates_a_preauth_device(client, db_conn):
-    """2026-09-11, project owner's explicit request: assigning a PREAUTH
-    device to a kid from the Manage page is the same vouching act as
-    add_device()'s own manually-typed-MAC case -- it must clear the
-    captive-portal gate, not just set the assignment."""
+    """Assigning a PREAUTH device to a kid from the Manage page is the
+    same vouching act as add_device()'s own manually-typed-MAC case --
+    it must clear the captive-portal gate, not just set the
+    assignment."""
     client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
     device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:70")
@@ -3730,10 +3691,10 @@ def test_update_device_ignoring_does_not_authenticate_a_preauth_device(client, d
 
 
 def test_device_detail_page_reminds_about_the_ca_cert_before_bump_enable(client, db_conn):
-    """RoadMap.md's design sketch: an admin should confirm the CA cert
-    is actually installed before flipping bump_enabled, so a device
-    never ends up bump-enabled while still showing confusing
-    certificate warnings. Client-side only (a plain confirm(), matching
+    """An admin should confirm the CA cert is actually installed before
+    flipping bump_enabled, so a device never ends up bump-enabled while
+    still showing confusing certificate warnings. Client-side only (a
+    plain confirm(), matching
     this app's own established no-framework convention -- see the
     group-delete button's identical pattern) -- this just checks the
     reminder is actually wired to the checkbox, not that JS ran."""
@@ -3787,11 +3748,9 @@ def test_devices_requires_admin_auth(client):
 
 
 # ============================================================
-# Devices: pending-login visibility (Phase 4 milestone 1's
-# auto-created, is_authenticated=0 devices -- see
-# common/identity.py's record_binding docstring for how these rows
-# come to exist in the first place; this is the dashboard-side
-# visibility for that new state)
+# Devices: pending-login visibility for auto-created, is_authenticated=0
+# devices -- see common/identity.py's record_binding docstring for how
+# these rows come to exist in the first place.
 # ============================================================
 
 def _add_pending_device(db_conn, mac_address, created_at="2026-08-31T00:00:00Z"):
@@ -3831,9 +3790,9 @@ def test_devices_page_surfaces_a_pending_device_with_a_bypass_action(client, db_
 
 
 def test_pending_devices_show_network_info_from_device_bindings(client, db_conn):
-    # Real gap fixed 2026-09-07: devices.last_seen_at is never populated
-    # by anything, so the pending-devices card must read current IP /
-    # last seen / discovery source from device_bindings instead.
+    # devices.last_seen_at is never populated by anything, so the
+    # pending-devices card must read current IP / last seen / discovery
+    # source from device_bindings instead.
     _add_pending_device(db_conn, "aa:bb:cc:dd:ee:46")
     db_conn.execute(
         "INSERT INTO device_bindings (device_id, mac_address, ipv4_address, first_seen_at, last_seen_at, "
@@ -3850,10 +3809,9 @@ def test_pending_devices_show_network_info_from_device_bindings(client, db_conn)
 
 
 def test_pending_devices_show_manufacturer_from_mac_prefix(client, db_conn):
-    # RoadMap.md 2026-09-11: project owner's request to see device type
-    # on this card. Manufacturer is a pure MAC-prefix lookup (no
-    # device_bindings row needed at all) -- 84:28:59 is a real
-    # Amazon-registered OUI (see common/data/oui_prefixes.tsv).
+    # Manufacturer is a pure MAC-prefix lookup (no device_bindings row
+    # needed at all) -- 84:28:59 is a real Amazon-registered OUI (see
+    # common/data/oui_prefixes.tsv).
     _add_pending_device(db_conn, "84:28:59:aa:bb:cc")
 
     resp = client.get("/devices", headers=_auth_header())
@@ -3968,8 +3926,7 @@ def _bind(db_conn, mac, ip, last_seen="2026-09-10T12:00:00Z"):
 
 
 def test_devices_roster_shows_the_current_ip_column(client, db_conn):
-    # RoadMap 2026-09-10 finding #1: the roster had no IP column, so a
-    # device could only be found by MAC/label.
+    # Without this column a device could only be found by MAC/label.
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:70"}, headers=_auth_header())
     _bind(db_conn, "aa:bb:cc:dd:ee:70", "192.168.1.123")
     body = client.get("/devices", headers=_auth_header()).data.decode()
@@ -3978,14 +3935,13 @@ def test_devices_roster_shows_the_current_ip_column(client, db_conn):
 
 
 def test_devices_roster_shows_manufacturer_and_hostname_columns(client, db_conn, monkeypatch):
-    """2026-09-13, project owner's explicit request: the main roster only
-    ever showed Manufacturer/Hostname on the "Devices awaiting login" card
-    above it, even though _DEVICE_LIST_SELECT already returns
-    current_hostname on every row regardless of which query uses it, and
-    oui_lookup.vendor_for_mac() is a pure MAC-address lookup with no
-    per-table restriction. Monkeypatches the lookup (rather than depending
-    on the real bundled OUI dataset containing any specific prefix
-    forever) for a deterministic assertion."""
+    """The main roster should show Manufacturer/Hostname too, not just
+    the "Devices awaiting login" card above it -- _DEVICE_LIST_SELECT
+    already returns current_hostname on every row regardless of which
+    query uses it, and oui_lookup.vendor_for_mac() is a pure MAC-address
+    lookup with no per-table restriction. Monkeypatches the lookup
+    (rather than depending on the real bundled OUI dataset containing
+    any specific prefix forever) for a deterministic assertion."""
     import dashboard
     monkeypatch.setattr(dashboard.oui_lookup, "vendor_for_mac", lambda mac: "Acme Widget Co.")
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:73"}, headers=_auth_header())
@@ -4022,9 +3978,8 @@ def test_devices_roster_and_pending_tables_are_sortable(client, db_conn):
 
 
 def test_devices_off_lan_docker_bridge_ip_is_hidden(client, db_conn):
-    # RoadMap 2026-09-10 finding #3: the controller's discovery loop
-    # recorded 172.17.x Docker-bridge addresses as devices. Until the
-    # controller-side fix, the dashboard hides any device whose only
+    # The controller's discovery loop can record 172.17.x Docker-bridge
+    # addresses as devices; the dashboard hides any device whose only
     # bindings are outside the configured local_network.
     client.post("/devices/add", data={"mac_address": "02:42:AC:11:00:02"}, headers=_auth_header())
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:74"}, headers=_auth_header())
@@ -4045,14 +4000,12 @@ def test_devices_with_no_binding_at_all_still_show(client, db_conn):
 
 
 def test_devices_page_does_not_treat_a_group_ignored_device_as_pending(client, db_conn):
-    """Real bug found live 2026-09-08 (RoadMap.md's dated entry): the
-    pending check only ever looked at d.ignored, not at the device's
-    GROUP being in Ignore mode -- a device that's effectively ignored
-    only via group membership (same as the group_ignored/
+    """The pending check must also account for the device's GROUP being
+    in Ignore mode, not just d.ignored (same as the group_ignored/
     effective_ignored handling already used for the Status column's
-    "Ignored" badge) still showed up in "Devices awaiting login" and
-    still got the "Awaiting login" badge, even though every other part
-    of the UI already treated it as ignored."""
+    "Ignored" badge) -- otherwise a device effectively ignored only via
+    group membership still shows up in "Devices awaiting login", even
+    though every other part of the UI already treats it as ignored."""
     db_conn.execute("INSERT INTO groups (name, ignored, created_at) VALUES ('TVs', 1, datetime('now'))")
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
     db_conn.execute(
@@ -4083,9 +4036,8 @@ def test_bypass_login_sets_the_flag_without_touching_other_fields(client, db_con
 
 
 def test_dismiss_pending_hides_the_device_from_the_card(client, db_conn):
-    """2026-09-08, project owner's explicit request: "I need a 'dismiss'
-    option ... I don't want it to do anything but clear the device
-    showing as awaiting logon.\""""
+    """A 'dismiss' option that does nothing but clear the device from
+    showing as awaiting logon."""
     device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:52")
 
     resp = client.post("/devices/dismiss_pending", data={"device_id": device_id}, headers=_auth_header())
@@ -4208,7 +4160,7 @@ def test_bypass_login_requires_admin_auth(client, db_conn):
 
 
 # ============================================================
-# G6: ad-hoc "pause the internet" (per-device / per-user / whole-house)
+# Ad-hoc "pause the internet" (per-device / per-user / whole-house)
 # ============================================================
 
 def test_pause_device_sets_quarantined_at(client, db_conn):
@@ -4333,11 +4285,10 @@ def test_user_detail_page_shows_pause_card_when_user_has_devices(client, db_conn
 
 
 def test_user_detail_page_shows_pause_card_even_with_no_devices(client, db_conn):
-    # Real bug fixed 2026-09-06: the whole "Pause the internet" card used
-    # to disappear entirely for a user with zero devices assigned, making
-    # the feature look missing rather than just currently inapplicable
-    # (found via live user testing -- see chat). Now it always renders,
-    # explaining why there's nothing to pause yet instead of hiding.
+    # The "Pause the internet" card must always render, even for a user
+    # with zero devices assigned, explaining why there's nothing to
+    # pause yet instead of disappearing and making the feature look
+    # missing.
     client.post("/users/add", data={"username": "kid4", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid4'").fetchone()["id"]
 
@@ -4348,10 +4299,9 @@ def test_user_detail_page_shows_pause_card_even_with_no_devices(client, db_conn)
 
 
 # ============================================================
-# User-detail "Devices" card (2026-09-08) -- real live-testing feedback:
-# no way to see which devices are assigned to a user on this page at
-# all, had to search for the username on the Devices page instead.
-# Mirrors group_detail()'s own pre-existing "Devices in this group" card.
+# User-detail "Devices" card -- lets an admin see which devices are
+# assigned to a user without searching for the username on the Devices
+# page. Mirrors group_detail()'s own "Devices in this group" card.
 # ============================================================
 
 def test_user_detail_shows_its_assigned_devices(client, db_conn):
@@ -4375,9 +4325,9 @@ def test_user_detail_shows_its_assigned_devices(client, db_conn):
 
 
 def test_user_detail_devices_card_links_each_device_to_the_devices_page(client, db_conn):
-    """Real live-testing feedback (RoadMap.md): reaching a device from here
-    used to mean copying its MAC, going to Devices, and searching for it --
-    this links straight there, reusing Devices' own ?q= server-side search."""
+    """Links straight to the Devices page's own ?q= server-side search,
+    rather than making the admin copy the MAC and search for it
+    manually."""
     client.post("/users/add", data={"username": "kid5b", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid5b'").fetchone()["id"]
     db_conn.execute(
@@ -4478,10 +4428,9 @@ def test_pausing_an_ignored_device_offers_no_pause_button(client, db_conn):
 
 
 def test_bypass_login_defaults_an_unassigned_device_to_ignored(client, db_conn):
-    """2026-08-31, project owner's explicit direction: a device that will
-    never log in commonly has no real assignment either, so bypassing it
-    defaults it straight to `ignored` (AdGuard's baseline-protection
-    exemption) too, in one action."""
+    """A device that will never log in commonly has no real assignment
+    either, so bypassing it defaults it straight to `ignored` (AdGuard's
+    baseline-protection exemption) too, in one action."""
     device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:49")
 
     client.post("/devices/bypass_login", data={"device_id": device_id}, headers=_auth_header())
@@ -4577,17 +4526,16 @@ def test_deleting_a_group_unassigns_its_devices(client, db_conn):
 
 
 # ============================================================
-# Group detail page + per-group pause (real gap found 2026-09-06 --
-# per-device and per-user pause both already existed, but there was no
-# group_detail page at all to put a per-group pause control on)
+# Group detail page + per-group pause -- per-device and per-user pause
+# both already existed, but there was no group_detail page to put a
+# per-group pause control on.
 # ============================================================
 
 def test_devices_page_lists_bulk_action_form_and_row_checkboxes(client, db_conn):
-    """Real live-testing feedback 2026-09-07 (RoadMap.md's dated entry):
-    the devices table was "getting really clunky" and needed real bulk
-    actions (assign/delete several at once) instead of one-row-at-a-
-    time. Supersedes the same-day per-row quick-add-to-group select,
-    which added exactly the clutter this was meant to fix."""
+    """The devices table needed real bulk actions (assign/delete several
+    at once) instead of one-row-at-a-time. Supersedes the per-row
+    quick-add-to-group select, which added exactly the clutter this was
+    meant to fix."""
     client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:20"}, headers=_auth_header())
     resp = client.get("/devices", headers=_auth_header())
@@ -4601,10 +4549,8 @@ def test_devices_page_lists_bulk_action_form_and_row_checkboxes(client, db_conn)
 
 
 def test_devices_page_toolbar_matches_the_entra_style_button_set(client, db_conn):
-    """Real follow-up feedback (RoadMap.md's dated entry): "instead of
-    the weird dropdown, can you use the buttons like Entra has" --
-    Download/Enable/Disable/Delete/Manage, not a bare group-select
-    sitting in the toolbar by default."""
+    """Entra-style Download/Enable/Disable/Delete/Manage buttons, not a
+    bare group-select sitting in the toolbar by default."""
     client.post("/devices/add", data={"mac_address": "AA:BB:CC:DD:EE:21"}, headers=_auth_header())
     resp = client.get("/devices", headers=_auth_header())
     assert resp.status_code == 200
@@ -4649,10 +4595,10 @@ def test_bulk_assign_devices_to_group_applies_to_every_selected_device(client, d
 
 
 def test_bulk_assign_devices_to_group_authenticates_preauth_devices(client, db_conn):
-    """2026-09-11, project owner's explicit request: same vouching-act
-    reasoning as update_device()'s own single-device version -- a bulk
-    group assignment from the Devices list must clear the captive-portal
-    gate too, not just apply to devices already authenticated."""
+    """Same vouching-act reasoning as update_device()'s own single-device
+    version -- a bulk group assignment from the Devices list must clear
+    the captive-portal gate too, not just apply to devices already
+    authenticated."""
     client.post("/groups/add", data={"name": "IoT"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'IoT'").fetchone()["id"]
     device_id = _add_pending_device(db_conn, "aa:bb:cc:dd:ee:74")
@@ -4772,8 +4718,7 @@ def test_bulk_delete_devices_without_selection_shows_error(client, db_conn):
 
 
 # ============================================================
-# Devices toolbar: Enable/Disable/Download (Entra-style buttons, real
-# follow-up feedback -- RoadMap.md's dated entry)
+# Devices toolbar: Enable/Disable/Download (Entra-style buttons)
 # ============================================================
 
 def test_bulk_pause_devices_pauses_every_selected_device(client, db_conn):
@@ -4883,9 +4828,8 @@ def test_group_detail_devices_card_links_each_device_to_the_devices_page(client,
 
 
 def test_group_detail_shows_global_domains_separately_from_assigned(client, db_conn):
-    """Same real live-testing feedback as user_detail's own equivalent
-    test -- groups have the exact same is_global-count-vs-empty-list
-    mismatch."""
+    """Same as user_detail's own equivalent test -- groups have the exact
+    same is_global-count-vs-empty-list mismatch."""
     client.post(
         "/domains/add",
         data={"pattern": r"gstatic\.com", "mode": "splice", "note": "Google static assets", "is_global": "on"},
@@ -4903,9 +4847,8 @@ def test_group_detail_shows_global_domains_separately_from_assigned(client, db_c
 
 
 def test_group_detail_assigned_sites_paginates_with_a_default_page_size(client, db_conn):
-    """Added 2026-09-08, natural follow-up to user_detail's identical
-    "Assigned sites" pagination the day before -- same shape, same
-    reasoning: a heavily-assigned group's own site list only ever
+    """Same shape and reasoning as user_detail's "Assigned sites"
+    pagination -- a heavily-assigned group's own site list only ever
     grows."""
     client.post("/groups/add", data={"name": "TVs"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs'").fetchone()["id"]
@@ -5031,9 +4974,7 @@ def test_pause_group_requires_admin_auth(client, db_conn):
 
 
 # ============================================================
-# Group "Ignore mode" (added 2026-09-07, project owner's explicit
-# request: "For Device groups, I need to be able to enable 'ignore
-# mode' for specific device groups")
+# Group "Ignore mode"
 # ============================================================
 
 def test_update_group_ignored_turns_it_on_and_off(client, db_conn):
@@ -5114,9 +5055,7 @@ def test_devices_page_shows_ignored_badge_for_a_device_in_an_ignored_group(clien
 
 
 # ============================================================
-# Devices bulk "Ignore" action (added 2026-09-07, project owner's
-# explicit request: "The bulk add to group exists, but the bulk add to
-# ignore does not.")
+# Devices bulk "Ignore" action
 # ============================================================
 
 def test_bulk_set_ignored_devices_sets_ignore_and_clears_assignment(client, db_conn):
@@ -5171,14 +5110,10 @@ def test_devices_page_manage_panel_has_ignore_bulk_buttons(client, db_conn):
 
 
 # ============================================================
-# RoadMap.md item 23 (2026-09-09, project owner's explicit request: "I
-# realized I want to add an 'Add to ignore' option on the devices main
-# page without having to directly open the individual device. I want
-# that option for bulk settings too."): a per-row quick Ignore/Un-ignore
-# action (previously only reachable by opening a device's own detail
-# page), and the bulk Ignore/Un-ignore buttons promoted from the
-# collapsed "Manage" panel to the main toolbar row, alongside
-# Enable/Disable/Delete.
+# A per-row quick Ignore/Un-ignore action (previously only reachable by
+# opening a device's own detail page), and the bulk Ignore/Un-ignore
+# buttons promoted from the collapsed "Manage" panel to the main
+# toolbar row, alongside Enable/Disable/Delete.
 # ============================================================
 
 def test_bulk_ignore_buttons_are_in_the_main_toolbar_not_the_manage_panel(client, db_conn):
@@ -5274,11 +5209,8 @@ def test_pending_devices_card_quick_ignore_button_actually_ignores_it(client, db
 
 
 # ============================================================
-# Devices page pagination -- added 2026-09-07, project owner's explicit
-# request ("check the devices... page for the same issues... use the
-# page-size picker with the prev/next configuration"), same reasoning as
-# the Categories domain-list pagination the same day: these lists can
-# grow extensively with time.
+# Devices page pagination -- same page-size-picker + Prev/Next pattern
+# as Categories/Domains: these lists can grow extensively with time.
 # ============================================================
 
 def _add_devices(client, count, prefix="aa:bb:cc:dd"):
@@ -5339,10 +5271,9 @@ def test_devices_page_rejects_an_arbitrary_per_page_value(client, db_conn):
 
 
 def test_devices_page_search_filters_by_label_or_mac(client, db_conn):
-    """Added 2026-09-08, project owner's explicit follow-up request:
-    once the main roster paginates, the old client-side search box would
-    have only searched whichever page was on screen -- this is now a
-    real server-side search across the whole table."""
+    """Once the main roster paginates, a client-side search box would
+    only search whichever page was on screen -- this is a real
+    server-side search across the whole table."""
     _add_devices(client, 5)
     client.post(
         "/devices/add", data={"mac_address": "11:22:33:44:55:66", "label": "Kitchen TV"},
@@ -5448,8 +5379,7 @@ def test_domains_page_small_list_shows_no_pagination_controls(client, db_conn):
 
 
 def test_domains_page_search_filters_by_pattern_or_note(client, db_conn):
-    """Added 2026-09-08, project owner's explicit follow-up request --
-    same reasoning as Devices' search above."""
+    """Same reasoning as Devices' search above."""
     _add_domains(client, 5)
     client.post(
         "/domains/add", data={"pattern": "netflix\\.example", "mode": "splice", "note": "streaming"},
@@ -5616,12 +5546,10 @@ def test_deleting_a_device_removes_its_domain_assignments(client, db_conn):
 
 
 # ============================================================
-# Logout (HTTP Basic Auth has no real server-side session -- rewritten
-# 2026-09-09 after a real live lockout, see the /logout route's own
-# docstring for the full story: the previous fake-credential URL trick
-# caused several browsers to cache "logout" as the username and keep
-# resubmitting it on every later login attempt, defeating even a
-# correct password.)
+# Logout (HTTP Basic Auth has no real server-side session) -- a
+# fake-credential URL trick can cause some browsers to cache "logout"
+# as the username and keep resubmitting it on every later login
+# attempt, defeating even a correct password.
 # ============================================================
 
 def test_logout_page_reachable_with_no_credentials_at_all(client):
@@ -5640,17 +5568,17 @@ def test_logout_page_explains_the_real_manual_step(client):
 
 
 def test_logout_page_does_not_prompt_for_or_accept_any_credential_check(client):
-    """The old bogus-credential trick actively poisoned some browsers'
-    cached username -- confirm this page never even looks at whatever
+    """A bogus-credential trick can poison some browsers' cached
+    username -- confirm this page never even looks at whatever
     Authorization header a browser might still be sending."""
     resp = client.get("/logout", headers=_auth_header(username="logout", password="logout"))
     assert resp.status_code == 200
 
 
 def test_sidebar_logout_link_has_no_embedded_credentials(client, db_conn):
-    """Real regression check for the fix itself: the sidebar link must
-    never again embed a username:password@ pair in its href -- that's
-    exactly the mechanism that poisoned browsers' cached credentials."""
+    """The sidebar link must never embed a username:password@ pair in
+    its href -- that's exactly the mechanism that poisons browsers'
+    cached credentials."""
     resp = client.get("/report", headers=_auth_header())
     assert b"logout:logout@" not in resp.data
 
@@ -5674,9 +5602,7 @@ def test_users_page_has_no_search_box_when_empty(client):
 
 
 # ============================================================
-# Bulk-actions toolbar extended to Users/Categories/Schedules (RoadMap.md's
-# dated entry -- "implement the same design change... to the rest of the
-# page such as users, devices, schedules, categories")
+# Bulk-actions toolbar extended to Users/Categories/Schedules
 # ============================================================
 
 def test_users_page_has_bulk_actions_toolbar(client, db_conn):
@@ -5825,10 +5751,7 @@ def test_export_categories_csv_requires_admin_auth(client):
 
 
 # ============================================================
-# Categories toolbar: bulk access assignment + bulk sync (added
-# 2026-09-07, project owner's explicit request: "Add the ability for me
-# to bulk assign categories to users, groups, or everyone" and "Add the
-# ability for me to bulk sync categories")
+# Categories toolbar: bulk access assignment + bulk sync
 # ============================================================
 
 def test_categories_page_has_manage_access_and_sync_buttons(client, db_conn):
@@ -6050,10 +5973,9 @@ def test_bulk_sync_categories_syncs_every_selected_subscribed_category(client, d
     import category_fetch
 
     # Mocked before either add(), not just before the later bulk-sync
-    # call: add_category() now syncs a subscribed category immediately
-    # (RoadMap.md 2026-09-14), so this must already be safe to call at
-    # add-time too, not just at the bulk-sync step this test is really
-    # about.
+    # call: add_category() syncs a subscribed category immediately, so
+    # this must already be safe to call at add-time too, not just at
+    # the bulk-sync step this test is really about.
     monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 10)
     client.post(
         "/categories/add", data={"name": "Cat1", "subscription_url": "https://example.invalid/a.txt"},
@@ -6103,10 +6025,10 @@ def test_bulk_sync_categories_reports_a_failure_without_aborting_the_rest(client
         return 5
 
     # Mocked before either add(), not just before the later bulk-sync
-    # call: add_category() now syncs a subscribed category immediately
-    # (RoadMap.md 2026-09-14) -- "Broken" failing at add-time too is
-    # fine and expected, it doesn't stop the category from being
-    # created, which is all this test's own setup needs.
+    # call: add_category() syncs a subscribed category immediately --
+    # "Broken" failing at add-time too is fine and expected, it doesn't
+    # stop the category from being created, which is all this test's
+    # own setup needs.
     monkeypatch.setattr(category_fetch, "fetch_and_sync_category", _fake)
     client.post(
         "/categories/add", data={"name": "Broken", "subscription_url": "https://example.invalid/broken.txt"},
@@ -6278,10 +6200,9 @@ def _insert_device_with_last_seen(db_conn, mac, days_ago):
     at all, same as a device added by hand that's never actually shown
     up on the network. Otherwise inserts a real device_bindings row with
     a backdated last_seen_at -- the REAL data source _stale_devices()
-    reads (fixed 2026-09-07, RoadMap.md's dated entry): devices.
-    last_seen_at itself is never written by anything real, so a test
-    that only set THAT column (as this helper used to) would validate a
-    scenario that can never actually occur in production."""
+    reads: devices.last_seen_at itself is never written by anything
+    real, so a test that only set THAT column would validate a scenario
+    that can never actually occur in production."""
     import db as db_mod
     db_conn.execute(
         "INSERT INTO devices (mac_address, created_at) VALUES (?, datetime('now'))", (mac,)
@@ -6318,9 +6239,8 @@ def test_settings_page_shows_correct_stale_device_count(client, db_conn):
 
 
 def test_settings_page_shows_a_clickable_table_of_which_devices_are_stale(client, db_conn):
-    """Real live-testing feedback (RoadMap.md's dated entry): the old
-    card only ever showed a bare count -- no way to see WHICH devices,
-    or their MAC/label/assignment, without going elsewhere first."""
+    """A bare count alone gives no way to see WHICH devices, or their
+    MAC/label/assignment, without going elsewhere first."""
     import db as db_mod
     db_conn.execute(
         "INSERT INTO devices (mac_address, label, created_at) VALUES (?, ?, datetime('now'))",
@@ -6475,7 +6395,7 @@ def test_device_assignment_uses_radio_picker(client):
 
 
 # ============================================================
-# Phase 8: Categories
+# Categories
 # ============================================================
 
 def test_categories_page_loads_empty(client):
@@ -6494,10 +6414,9 @@ def test_add_category_then_appears(client, db_conn):
 
 
 def test_add_category_with_a_subscription_url_syncs_immediately(client, db_conn, monkeypatch):
-    """RoadMap.md 2026-09-14, project owner's explicit request: a newly
-    added subscription category used to sit empty until a separate
-    manual "Sync now" click -- add_category() must fetch it right away
-    instead."""
+    """A newly added subscription category must not sit empty until a
+    separate manual "Sync now" click -- add_category() fetches it right
+    away instead."""
     import category_fetch
     monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 17)
 
@@ -6688,11 +6607,9 @@ def test_add_category_requires_a_name(client, db_conn):
     ],
 )
 def test_add_category_rejects_a_private_subscription_url(client, db_conn, bad_url):
-    """Regression test for a real gap (fixed 2026-09-02): subscription_url
-    used to be stored with zero validation despite being fetched
-    server-side later with no restriction -- an SSRF-adjacent risk if
-    pointed at an internal address (this box's own admin APIs, a
-    router, a cloud metadata endpoint)."""
+    """subscription_url is fetched server-side later with no restriction
+    -- an SSRF-adjacent risk if pointed at an internal address (this
+    box's own admin APIs, a router, a cloud metadata endpoint)."""
     resp = client.post(
         "/categories/add", data={"name": "Evil", "subscription_url": bad_url}, headers=_auth_header()
     )
@@ -6729,12 +6646,12 @@ def test_delete_category_removes_it(client, db_conn):
 
 
 def test_delete_category_records_a_tombstone_so_seeding_wont_resurrect_it(client, db_conn):
-    """RoadMap.md 2026-09-13: a deleted starter category (e.g. "Weapons")
-    used to silently come back on the next proxy container restart,
-    since defaults/seed_defaults.py's seed() had no way to tell "never
-    created" apart from "deleted on purpose". delete_category() must
-    record the name so seed() can skip it later (see
-    tests/test_seed_idempotent.py for the seed()-side assertion)."""
+    """A deleted starter category (e.g. "Weapons") must not silently
+    come back on the next proxy container restart --
+    defaults/seed_defaults.py's seed() can't tell "never created" apart
+    from "deleted on purpose" otherwise. delete_category() records the
+    name so seed() can skip it later (see tests/test_seed_idempotent.py
+    for the seed()-side assertion)."""
     import db
     client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
@@ -6779,11 +6696,11 @@ def test_category_detail_shows_added_domains(client, db_conn):
 
 
 # ============================================================
-# Category detail domain-list pagination -- added 2026-09-07, project
-# owner's explicit request: clicking "Manage" on a large category tried
-# to load and render every single domain, which was slow and made the
-# "Allow-exceptions" card practically unreachable. Paginated like a
-# modern list/detail view instead (page-size picker + Prev/Next).
+# Category detail domain-list pagination -- clicking "Manage" on a
+# large category used to load and render every single domain, slow and
+# making the "Allow-exceptions" card practically unreachable. Paginated
+# like the other list/detail views instead (page-size picker +
+# Prev/Next).
 # ============================================================
 
 def _add_categories_domains(db_conn, category_id, count):
@@ -6890,11 +6807,10 @@ def test_category_detail_small_category_shows_no_pagination_controls(client, db_
 
 
 def test_category_detail_search_filters_the_domain_list(client, db_conn):
-    """Added 2026-09-08, project owner's explicit follow-up request --
-    same reasoning as Devices/Domains' server-side search: a category's
-    domain list is the one list on this site that can genuinely reach
-    the hundreds of thousands of rows, so finding one specific domain by
-    paging through by hand doesn't scale."""
+    """Same reasoning as Devices/Domains' server-side search: a
+    category's domain list is the one list on this site that can
+    genuinely reach the hundreds of thousands of rows, so finding one
+    specific domain by paging through by hand doesn't scale."""
     client.post("/categories/add", data={"name": "Big"}, headers=_auth_header())
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Big'").fetchone()["id"]
     _add_categories_domains(db_conn, category_id, 120)
@@ -6936,9 +6852,8 @@ def test_category_detail_search_is_carried_across_pagination_links(client, db_co
 
 
 # ============================================================
-# Category "Add many domains at once" -- added 2026-09-07 (RoadMap.md's
-# dated entry, project owner's explicit request to import a whole list of
-# sites as one category in a single paste)
+# Category "Add many domains at once" -- import a whole list of sites
+# as one category in a single paste
 # ============================================================
 
 def test_extract_domain_handles_bare_domain_path_and_full_url():
@@ -7122,9 +7037,9 @@ def test_update_category_access_still_allows_global_on_an_oversized_category(cli
 
 
 # ============================================================
-# Editing a category's subscription URL (real gap fixed 2026-09-08:
-# previously the only way to change it was delete-and-recreate the whole
-# category, losing access assignments/manual domains/overrides)
+# Editing a category's subscription URL -- without this, the only way
+# to change it was delete-and-recreate the whole category, losing
+# access assignments/manual domains/overrides
 # ============================================================
 
 def test_update_category_subscription_sets_url_on_a_manual_only_category(client, db_conn):
@@ -7234,9 +7149,9 @@ def test_update_category_subscription_requires_admin_auth(client, db_conn):
 
 
 def test_category_detail_always_shows_subscription_card(client, db_conn):
-    # Real UX fix 2026-09-08: this card used to be omitted entirely for
-    # a manual-only category, so there was no way to see it was even an
-    # option to add one without already knowing the route existed.
+    # This card must not be omitted entirely for a manual-only category
+    # -- otherwise there's no way to see it's even an option to add one
+    # without already knowing the route exists.
     client.post("/categories/add", data={"name": "Weapons"}, headers=_auth_header())
     category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Weapons'").fetchone()["id"]
     resp = client.get(f"/categories/{category_id}", headers=_auth_header())
@@ -7251,10 +7166,10 @@ def test_sync_category_now_reports_failure_cleanly(client, db_conn, monkeypatch)
         raise category_fetch.CategoryFetchError("could not reach host")
 
     # Mocked before add(), not just before the later explicit "Sync now"
-    # call this test is really about: add_category() now syncs a
-    # subscribed category immediately (RoadMap.md 2026-09-14), and a
-    # failure there must not prevent the category itself from being
-    # created (it isn't -- see add_category()'s own error handling).
+    # call this test is really about: add_category() syncs a subscribed
+    # category immediately, and a failure there must not prevent the
+    # category itself from being created (it isn't -- see
+    # add_category()'s own error handling).
     monkeypatch.setattr(category_fetch, "fetch_and_sync_category", _boom)
     client.post(
         "/categories/add",
@@ -7269,10 +7184,10 @@ def test_sync_category_now_reports_failure_cleanly(client, db_conn, monkeypatch)
 
 
 def test_sync_category_now_flags_zero_domains_as_likely_wrong_format(client, db_conn, monkeypatch):
-    # Real gap found 2026-09-06 by live user testing: fetching a URL that
-    # isn't a supported blocklist format (e.g. a documentation webpage)
-    # succeeds and legitimately parses to 0 domains -- that used to flash
-    # an unhelpful "Synced 0 domains." with nothing explaining why.
+    # Fetching a URL that isn't a supported blocklist format (e.g. a
+    # documentation webpage) succeeds and legitimately parses to 0
+    # domains -- an unhelpful "Synced 0 domains." with nothing
+    # explaining why would leave the admin guessing.
     import category_fetch
 
     monkeypatch.setattr(category_fetch, "fetch_and_sync_category", lambda conn, category, timeout=None: 0)
@@ -7321,13 +7236,12 @@ def test_categories_page_has_supported_format_hint(client):
 
 
 def test_categories_page_distinguishes_the_two_search_boxes(client, db_conn):
-    # Real bug fixed 2026-09-07, found by live user testing: typing a
-    # domain (e.g. a2e.ai) into the client-side "Search categories..."
-    # box filtered the table by category NAME, matched nothing, and made
-    # every category disappear -- read by the user as "the [domain]
-    # lookup tool doesn't work" when it was actually a different,
-    # unrelated control. Renamed that box's placeholder and added an
-    # explicit hint distinguishing it from the real domain-lookup tool.
+    # Typing a domain (e.g. a2e.ai) into the client-side "Search
+    # categories..." box filters the table by category NAME, matches
+    # nothing, and makes every category disappear -- easily read as "the
+    # domain lookup tool doesn't work" when it's a different, unrelated
+    # control. The box's placeholder and an explicit hint distinguish it
+    # from the real domain-lookup tool.
     client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
     resp = client.get("/categories", headers=_auth_header())
     assert b"Filter by category name" in resp.data
@@ -7335,9 +7249,9 @@ def test_categories_page_distinguishes_the_two_search_boxes(client, db_conn):
 
 
 # ============================================================
-# Cross-category domain lookup (real gap found 2026-09-06: no way to
-# check whether the same domain appears in more than one category
-# without opening each one individually)
+# Cross-category domain lookup -- checks whether the same domain
+# appears in more than one category without opening each one
+# individually
 # ============================================================
 
 def test_category_lookup_finds_a_domain_in_multiple_categories(client, db_conn):
@@ -7368,7 +7282,7 @@ def test_category_lookup_blank_domain_shows_no_results_section(client, db_conn):
 
 
 # ============================================================
-# Phase 8: Schedules
+# Schedules
 # ============================================================
 
 def test_schedules_page_loads_empty(client):
@@ -7450,8 +7364,8 @@ def test_update_schedule_saves_new_window(client, db_conn):
 
 
 def test_schedule_detail_renders_exactly_one_save_button(client, db_conn):
-    # RoadMap.md item 3: the When / Blocked for / Categories areas used
-    # to be three separate <form>s, each with its own Save button.
+    # The When / Blocked for / Categories areas are one merged form, not
+    # three separate <form>s each with its own Save button.
     client.post(
         "/schedules/add",
         data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
@@ -7465,11 +7379,10 @@ def test_schedule_detail_renders_exactly_one_save_button(client, db_conn):
 
 
 def test_update_schedule_is_one_atomic_save_across_window_access_and_categories(client, db_conn):
-    # RoadMap.md item 3, "one Save button per settings-shaped page, not
-    # several": this used to be three independent forms/routes (When /
-    # Blocked for / Categories blocked), each saved separately -- merged
-    # into one atomic save. Confirms a single submit really does update
-    # all three areas together, not just the time-window fields.
+    # One Save button per settings-shaped page, not several: When /
+    # Blocked for / Categories blocked are one atomic save. Confirms a
+    # single submit really does update all three areas together, not
+    # just the time-window fields.
     client.post(
         "/schedules/add",
         data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
@@ -7614,13 +7527,12 @@ def test_update_schedule_categories_assigns_them(client, db_conn):
 
 
 def test_schedule_detail_shows_every_category_as_a_checkbox_no_typing_needed(client, db_conn):
-    # Real UX bug fixed 2026-09-08: this used to be a type-to-reveal
-    # combobox (SHOW_ALL_THRESHOLD = 8 in the shared JS engine) -- with
-    # more than 8 categories configured (this project seeds 10 by
-    # default), nothing rendered until you typed a name you'd have to
-    # already know. Categories are a small, fixed, admin-curated list
-    # (unlike users/groups/devices), so this is now a plain checkbox
-    # list showing every one regardless of count.
+    # A type-to-reveal combobox (SHOW_ALL_THRESHOLD = 8 in the shared JS
+    # engine) would render nothing until you typed a name you'd have to
+    # already know, once more than 8 categories are configured (this
+    # project seeds 10 by default). Categories are a small, fixed,
+    # admin-curated list (unlike users/groups/devices), so this is a
+    # plain checkbox list showing every one regardless of count.
     client.post(
         "/schedules/add",
         data={"name": "School hours", "days": ["mon"], "start_time": "08:00", "end_time": "15:00", "time_zone": "UTC"},
@@ -7701,7 +7613,7 @@ def test_update_schedule_saves_is_mode(client, db_conn):
 
 
 # ============================================================
-# Phase 12: Schedule overrides ("Shift mode now")
+# Schedule overrides ("Shift mode now")
 # ============================================================
 
 def _add_mode_schedule(client, db_conn, name: str, *, is_global: bool = True) -> int:
@@ -7813,10 +7725,8 @@ def test_cancel_schedule_override_removes_it(client, db_conn):
 
 
 # ============================================================
-# RoadMap.md item 24 (2026-09-09, project owner's explicit request: "I
-# need the ability to do a shift schedule from the user page (not just
-# the schedule page)"): "Shift mode now" reachable directly from a
-# User's own detail page.
+# "Shift mode now" reachable directly from a User's own detail page,
+# not just the schedule page.
 # ============================================================
 
 def test_user_detail_shows_shift_mode_now_for_a_global_mode_schedule(client, db_conn):
@@ -7932,7 +7842,7 @@ def test_user_detail_shows_active_override_and_lets_it_be_cancelled(client, db_c
 
 
 # ============================================================
-# Phase 8: Settings household time zone
+# Settings household time zone
 # ============================================================
 
 def test_settings_page_shows_household_time_zone(client):
@@ -7962,12 +7872,12 @@ def test_update_household_time_zone_rejects_garbage(client, db_conn):
 
 
 def test_household_time_zone_is_genuinely_unset_on_a_fresh_install(db_conn):
-    """Real live-testing feedback (RoadMap.md's dated entry): this used
-    to be hardcoded to "UTC" at container boot, which always won over
-    the Settings page's own browser-side auto-detect the first time an
-    admin ever loaded it -- "default to wherever the admin's device is"
-    only means something if the setting is still genuinely absent for
-    that first page load to act on."""
+    """household_time_zone must not be hardcoded to "UTC" at container
+    boot -- that would always win over the Settings page's own
+    browser-side auto-detect the first time an admin loads it, and
+    "default to wherever the admin's device is" only means something if
+    the setting is still genuinely absent for that first page load to
+    act on."""
     import db as db_mod
     assert db_mod.get_setting(db_conn, "household_time_zone") is None
 
@@ -8011,7 +7921,7 @@ def test_update_safesearch_unchecked_saves_off(client, db_conn):
 
 
 # ============================================================
-# Phase 13: SSL-Bump CA certificate management
+# SSL-Bump CA certificate management
 # ============================================================
 
 def _generate_cert_pair(tmp_path, name: str, *, is_ca: bool = True, common_name: str = "Test CA"):
@@ -8064,10 +7974,10 @@ def test_settings_shows_ca_cert_details_when_present(client, db_conn, monkeypatc
 
 
 def test_settings_shows_a_real_fingerprint_not_a_blank_field(client, db_conn, monkeypatch, tmp_path):
-    # Regression test: live-verified 2026-09-06 that this openssl build
-    # prints "sha256 Fingerprint=" (lowercase), not "SHA256
-    # Fingerprint=" as _ca_cert_info() originally assumed -- the
-    # fingerprint silently came back blank with no error to reveal why.
+    # This openssl build prints "sha256 Fingerprint=" (lowercase), not
+    # "SHA256 Fingerprint=" -- _ca_cert_info() must handle that case, or
+    # the fingerprint silently comes back blank with no error to reveal
+    # why.
     import dashboard
 
     cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
@@ -8216,11 +8126,9 @@ def test_upload_ca_cert_requires_admin_auth(client, db_conn, monkeypatch, tmp_pa
 
 
 # ============================================================
-# Backup/restore (2026-09-08) -- tracked as a deferred item in
-# RoadMap.md since before 2026-09-07, revisited by the project owner as
-# the actual mechanism for wiping and redeploying the production box
-# clean without losing anything or needing to re-trust a new CA
-# certificate on every device.
+# Backup/restore -- the mechanism for wiping and redeploying the
+# production box clean without losing anything or needing to re-trust a
+# new CA certificate on every device.
 # ============================================================
 
 def test_download_backup_produces_a_zip_with_config_and_ca_files(client, db_conn, monkeypatch, tmp_path):
@@ -8334,11 +8242,10 @@ def test_restore_backup_also_restores_the_ca_certificate(client, db_conn, monkey
 
 
 def test_restore_backup_does_not_warn_about_re_trust_when_ca_is_unchanged(client, db_conn, monkeypatch, tmp_path):
-    """Live-verified bug found 2026-09-08: restoring the SAME backup a
-    box's own CA cert came from (the common case, e.g. reverting
-    unrelated config on the same install) must not falsely claim every
-    device needs to re-trust a certificate that never actually
-    changed."""
+    """Restoring the SAME backup a box's own CA cert came from (the
+    common case, e.g. reverting unrelated config on the same install)
+    must not falsely claim every device needs to re-trust a certificate
+    that never actually changed."""
     cert_path, key_path = _point_ca_paths_at(monkeypatch, tmp_path)
     cert_pem, key_pem = _generate_cert_pair(tmp_path, "current", common_name="Current CA")
     cert_path.write_bytes(cert_pem)

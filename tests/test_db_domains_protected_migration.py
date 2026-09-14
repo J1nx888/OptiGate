@@ -1,10 +1,9 @@
-"""common/db.py's _migrate(): adds domains.protected (2026-09-13, RoadMap.md
--- infrastructure the Crunchyroll integration depends on shouldn't be
-deletable, or mixed into the general Domains page, the same way it already
-wasn't OK for the built-in crunchyroll.com row itself) to a database that
+"""common/db.py's _migrate(): adds domains.protected to a database that
 predates the column, the same idempotent PRAGMA-table_info-then-ALTER-TABLE
 pattern _migrate() already uses for every other additive column (see e.g.
-categories.last_subscription_hash).
+categories.last_subscription_hash). The column marks rows -- like
+infrastructure the Crunchyroll integration depends on -- that shouldn't be
+deletable or mixed into the general Domains page.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ import db
 
 
 def _drop_protected_column(conn) -> None:
-    """Simulates a pre-2026-09-13 database: recreates domains exactly as it
+    """Simulates a pre-migration database: recreates domains exactly as it
     looked before the column existed, preserving any rows already inserted
     via the normal (post-migration) schema."""
     conn.execute("ALTER TABLE domains RENAME TO domains_new")

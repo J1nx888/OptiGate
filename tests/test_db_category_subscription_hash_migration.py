@@ -1,11 +1,10 @@
-"""common/db.py's _migrate(): adds categories.last_subscription_hash
-(2026-09-12, RoadMap.md -- common/category_fetch.py's skip-when-
-unchanged fix for fetch_and_sync_category(), so a re-sync can compare
-against the previous fetch's content instead of unconditionally
-rewriting every category_domains row) to a database that predates the
-column, the same idempotent PRAGMA-table_info-then-ALTER-TABLE pattern
-_migrate() already uses for every other additive column (see e.g.
-device_bindings.hostname).
+"""common/db.py's _migrate(): adds categories.last_subscription_hash to
+a database that predates the column, the same idempotent
+PRAGMA-table_info-then-ALTER-TABLE pattern _migrate() already uses for
+every other additive column (see e.g. device_bindings.hostname). The
+column lets fetch_and_sync_category() compare against the previous
+fetch's content instead of unconditionally rewriting every
+category_domains row.
 """
 from __future__ import annotations
 
@@ -13,7 +12,7 @@ import db
 
 
 def _drop_last_subscription_hash_column(conn) -> None:
-    """Simulates a pre-2026-09-12 database: recreates categories exactly
+    """Simulates a pre-migration database: recreates categories exactly
     as it looked before the column existed, preserving any rows already
     inserted via the normal (post-migration) schema."""
     conn.execute("ALTER TABLE categories RENAME TO categories_new")

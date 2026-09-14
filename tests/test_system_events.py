@@ -1,7 +1,6 @@
 """common/system_events.py: the operational failure/recovery event log
-that gives the dashboard's Events page (2026-09-01, added ahead of G1
-real-network testing) something to show besides docker-compose-logs-only
-visibility."""
+that gives the dashboard's Events page something to show besides
+docker-compose-logs-only visibility."""
 from __future__ import annotations
 
 import pytest
@@ -10,10 +9,10 @@ import system_events
 
 
 def test_log_event_accepts_info_severity(conn):
-    """Added 2026-09-09: a real, narrow-scope third severity (see
-    common/db.py's schema comment and system_events.py's own module
-    docstring for exactly which two callers use it and why) -- not a
-    general "log routine success" escape hatch."""
+    """A narrow-scope third severity (see common/db.py's schema comment
+    and system_events.py's own module docstring for exactly which two
+    callers use it and why) -- not a general "log routine success"
+    escape hatch."""
     system_events.log_event(conn, "network_sweep", "info", "Manual sweep complete: probed 254 address(es).")
     row = conn.execute("SELECT * FROM system_events").fetchone()
     assert row["severity"] == "info"
@@ -112,14 +111,13 @@ def test_log_event_rejects_an_invalid_severity(conn):
 
 
 def test_log_event_prunes_back_down_to_the_cap(conn, monkeypatch):
-    """Regression test for a real gap (fixed 2026-09-02): this table had
-    no row cap at all, and became attacker-influenceable once failed
-    login attempts (rate-limited but never fully blocked) started
-    writing here too -- an attacker who never once succeeds could grow
-    it indefinitely. A small cap (monkeypatched down from the real 5000
-    so this test doesn't need to insert thousands of rows) confirms
-    log_event() actually prunes back down to it after every insert,
-    keeping the NEWEST rows."""
+    """Without a cap, this table would grow unboundedly -- failed login
+    attempts (rate-limited but never fully blocked) write here too, so
+    an attacker who never once succeeds could grow it indefinitely. A
+    small cap (monkeypatched down from the real 5000 so this test
+    doesn't need to insert thousands of rows) confirms log_event()
+    actually prunes back down to it after every insert, keeping the
+    NEWEST rows."""
     monkeypatch.setattr(system_events, "_MAX_STORED_EVENTS", 3)
 
     for i in range(5):
@@ -191,14 +189,12 @@ def test_failure_recovery_callbacks_are_independent_per_source(conn):
 
 
 # ============================================================
-# Real production incident, 2026-09-11 (see this module's own dated
-# docstring on failure_recovery_callbacks()): log_event()'s own write
-# can itself raise (sqlite3.OperationalError: database is locked, on a
-# real box with several containers hitting the shared DB at once) --
-# and since on_error's whole JOB is reporting some OTHER failure, that
-# second exception used to have nowhere to go, escaping uncaught and
-# killing the periodic task's entire background thread. Neither
-# callback may ever raise, regardless of what log_event does.
+# log_event()'s own write can itself raise (e.g. sqlite3.OperationalError:
+# database is locked, when several containers hit the shared DB at once).
+# Since on_error's whole job is reporting some OTHER failure, that second
+# exception must never escape uncaught and kill the periodic task's
+# entire background thread -- neither callback may ever raise, regardless
+# of what log_event does.
 # ============================================================
 
 def test_on_error_never_raises_even_if_log_event_itself_fails(conn, monkeypatch, caplog):

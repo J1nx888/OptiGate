@@ -1,9 +1,9 @@
 """common/oui_lookup.py: pure, offline MAC-prefix -> vendor lookup for
-the "Devices awaiting login" card's Manufacturer column (RoadMap.md,
-2026-09-11). Matching logic is tested against a small injected table
-(no dependency on the real bundled data); a couple of sanity checks at
-the bottom confirm the real data/oui_prefixes.tsv file actually loads
-and resolves a few well-known real vendors.
+the "Devices awaiting login" card's Manufacturer column. Matching logic
+is tested against a small injected table (no dependency on the real
+bundled data); a couple of sanity checks at the bottom confirm the real
+data/oui_prefixes.tsv file actually loads and resolves a few well-known
+real vendors.
 """
 from __future__ import annotations
 

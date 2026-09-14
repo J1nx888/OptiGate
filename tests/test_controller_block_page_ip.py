@@ -1,14 +1,8 @@
 """common/optigate_rewrite.py's parse_block_page_ip: extracting a plain
 IPv4 host from a DASHBOARD_URL-shaped value for the $dnsrewrite target.
 
-Moved here from controller/main.py's own private _parse_block_page_ip
-2026-09-08, alongside the function itself -- see
-common/optigate_rewrite.py's own docstring for why: both
-controller/adguard_sync.py's periodic cycle AND dashboard.py's own
-direct push (the fix for the feature silently not working when the
-interception profile is off) need this, so it moved to common/ the
-same way category_fetch.py already did for an analogous "both
-containers need this" case."""
+Lives in common/ because both controller/adguard_sync.py's periodic
+cycle and dashboard.py's own direct push need it."""
 from __future__ import annotations
 
 import pytest
