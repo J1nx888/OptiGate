@@ -309,21 +309,35 @@ def test_run_loop_automatic_sweep_does_not_log_a_system_event(conn, monkeypatch)
     assert conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"] == 0
 
 
-def test_run_loop_run_now_fires_only_once_per_request(conn, monkeypatch):
+def test_run_loop_ignores_a_pre_existing_run_now_request_from_before_startup(conn, monkeypatch):
+    """A `network_sweep_run_now_requested_at` value already sitting in the
+    database before this process even started (a real click from a much
+    earlier session that was never cleared, say) must not be misread as a
+    brand-new manual request just because this process's own in-memory
+    tracking starts empty on every restart -- confirmed live 2026-09-15
+    that this exact gap made every controller startup mislabel its normal
+    automatic sweep as "Manual sweep complete" on the Events page, going
+    back to a single real click from days earlier. Automatic sweeping is
+    left enabled (the default) here so the normal at-startup sweep still
+    happens -- this is a labeling fix, not a "startup sweep stops
+    happening" regression; see test_run_loop_sweeps_immediately_then_repeats_when_due
+    for that base behavior."""
     _reset_fake_socket(monkeypatch)
     db.set_setting(conn, "local_network", "192.168.1.0/30")
-    db.set_setting(conn, "network_sweep_enabled", "0")
     db.set_setting(conn, "network_sweep_run_now_requested_at", "2026-09-09T00:00:00Z")
     conn.commit()
     monkeypatch.setattr(network_sweep, "_CHECK_INTERVAL_SECONDS", 0.02)
 
     task = network_sweep.run_loop()
     try:
-        time.sleep(0.1)
+        time.sleep(0.06)
     finally:
         task.stop()
 
-    assert len(_FakeSocket.instances) == 2, "one pre-existing request must trigger exactly one sweep (2 hosts), not one per tick"
+    assert len(_FakeSocket.instances) == 2, "the normal automatic startup sweep still ran"
+    assert conn.execute("SELECT COUNT(*) c FROM system_events").fetchone()["c"] == 0, (
+        "a stale pre-existing run-now flag must not be logged as a fresh manual request"
+    )
 
 
 def test_run_loop_run_now_fires_again_for_a_second_request(conn, monkeypatch):

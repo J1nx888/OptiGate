@@ -165,9 +165,41 @@ def _run_now_requested(conn: sqlite3.Connection, state: dict[str, object]) -> bo
 def run_loop(on_error=None, on_success=None) -> PeriodicTask:
     """Starts the check-then-maybe-sweep loop on its own background
     thread, until the returned PeriodicTask.stop() is called. Opens its
-    own DB connection lazily on the background thread -- sqlite3.Connection
-    objects are only usable from the thread that created them."""
+    own long-lived DB connection lazily on the background thread --
+    sqlite3.Connection objects are only usable from the thread that
+    created them.
+
+    Before that thread ever starts, though, this function takes a quick,
+    short-lived connection on the CALLING thread just to snapshot
+    whatever `network_sweep_run_now_requested_at` already holds, as the
+    "already consumed" baseline `_run_now_requested()` compares against.
+    Without this, a real manual click from days/sessions ago (still
+    sitting in that setting, never cleared) looks "new" to a
+    freshly-started process, since `state` itself always starts empty on
+    a restart -- confirmed live 2026-09-15: every controller startup
+    sweep was logging (and posting to the Events page) as "Manual sweep
+    complete" because of exactly this, going back to a single real click
+    from 2026-09-09. The automatic "run once at startup" path below still
+    fires a real sweep regardless (it never depended on this flag), so a
+    restart never actually skips discovery -- this only fixes which
+    sweeps get mislabeled as if an admin had just clicked the button.
+
+    Deliberately snapshotted HERE, synchronously, rather than lazily on
+    the background thread's own first tick: seeding it there would race
+    a genuinely fresh request against however long that first tick takes
+    to actually run -- a request written in that window would be
+    (wrongly) absorbed into the baseline instead of recognized as new.
+    Snapshotting before the background thread even starts closes that
+    window entirely: anything written after `run_loop()` returns is
+    unambiguously "new" relative to this baseline.
+    """
     state: dict[str, object] = {}
+    _seed_conn = db.get_conn()
+    try:
+        db.init_db(_seed_conn)
+        state["last_run_now_consumed"] = db.get_setting(_seed_conn, "network_sweep_run_now_requested_at", "")
+    finally:
+        _seed_conn.close()
 
     def task() -> None:
         conn = state.get("conn")
