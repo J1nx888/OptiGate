@@ -265,6 +265,24 @@ def test_add_domain_invalid_regex_rejected(client, db_conn):
     assert db_conn.execute("SELECT * FROM domains").fetchone() is None
 
 
+def test_add_domain_rejects_a_full_url_instead_of_a_bare_domain(client, db_conn):
+    resp = client.post(
+        "/domains/add",
+        data={"pattern": "https://w13.returnersmagicshould.com", "mode": "bump"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM domains").fetchone() is None
+
+
+def test_add_domain_rejects_a_pattern_with_a_path(client, db_conn):
+    resp = client.post(
+        "/domains/add", data={"pattern": "example.com/some/path", "mode": "splice"}, headers=_auth_header()
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM domains").fetchone() is None
+
+
 def test_add_domain_invalid_mode_rejected(client, db_conn):
     resp = client.post(
         "/domains/add", data={"pattern": r"example\.com", "mode": "not-a-mode"}, headers=_auth_header()
@@ -833,6 +851,51 @@ def test_approve_from_report_scope_group_grants_group_domains_row(client, db_con
     assert matching.group_has_domain(db_conn, group_id, domain["id"]) is True
 
 
+def test_approve_dns_category_deny_writes_to_allowlist_not_domains(client, db_conn):
+    """A block traced to AdGuard's own list (dns_category_deny/
+    dns_native_filter_deny) must be approved into adguard_allowlist, not
+    the generic domains table -- granting a domains row would do nothing
+    here, since neither an over-threshold category subscription nor
+    AdGuard's own built-in filter ever consults it."""
+    client.post("/users/add", data={"username": "kid1", "password": "pw"}, headers=_auth_header())
+    user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid1'").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, block_source) "
+        "VALUES (datetime('now'), ?, 'kid1', 'mobalytics.gg', NULL, 0, 'dns_category_deny', 'Games')",
+        (user_id,),
+    )
+    db_conn.commit()
+    log_id = db_conn.execute("SELECT id FROM access_log").fetchone()["id"]
+
+    resp = client.post("/report/approve", data={"log_id": log_id, "scope": "user"}, headers=_auth_header())
+
+    assert "error=1" not in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM domains WHERE pattern LIKE '%mobalytics%'").fetchone() is None
+    allowlist_row = db_conn.execute("SELECT * FROM adguard_allowlist WHERE pattern = 'mobalytics\\.gg'").fetchone()
+    assert allowlist_row is not None
+    import matching
+    assert matching.user_has_allowlist_entry(db_conn, user_id, allowlist_row["id"]) is True
+
+
+def test_approve_dns_native_filter_deny_scope_global(client, db_conn):
+    device_id = _insert_device(db_conn, "aa:bb:cc:dd:ee:01", label="Jacob Tablet")
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, device_id, block_source) "
+        "VALUES (datetime('now'), NULL, 'Jacob Tablet', 'ecsv2.roblox.com', NULL, 0, "
+        "'dns_native_filter_deny', ?, 'AdGuard DNS filter')",
+        (device_id,),
+    )
+    db_conn.commit()
+    log_id = db_conn.execute("SELECT id FROM access_log").fetchone()["id"]
+
+    resp = client.post("/report/approve", data={"log_id": log_id, "scope": "global"}, headers=_auth_header())
+
+    assert "error=1" not in resp.headers["Location"]
+    row = db_conn.execute("SELECT * FROM adguard_allowlist WHERE pattern = 'ecsv2\\.roblox\\.com'").fetchone()
+    assert row is not None
+    assert row["is_global"] == 1
+
+
 def test_approve_path_not_allowed_redirects_to_prefilled_add_path_form(client, db_conn):
     """Approving a path-blocked row must send the admin to review a
     derived pattern instead of silently re-asserting a domain assignment
@@ -1145,6 +1208,50 @@ def test_report_show_routine_does_not_leak_into_other_status_filters_unexpectedl
 
     assert resp.status_code == 200
     assert b"routine-site.example" not in resp.data
+
+
+def test_report_hides_dns_native_filter_deny_rows_by_default(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, block_source) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'ecsv2.roblox.com', NULL, 0, 'dns_native_filter_deny', 'AdGuard DNS filter')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"ecsv2.roblox.com" not in resp.data
+
+
+def test_report_show_native_blocks_checkbox_reveals_them(client, db_conn):
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, block_source) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'ecsv2.roblox.com', NULL, 0, 'dns_native_filter_deny', 'AdGuard DNS filter')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report?show_native_blocks=1", headers=_auth_header())
+
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "ecsv2.roblox.com" in body
+    assert "own built-in filter" in body  # _reason_label() text (apostrophe gets HTML-escaped)
+
+
+def test_report_dns_category_deny_is_always_visible_regardless_of_the_toggle(client, db_conn):
+    """A block traced to one of the household's own categories must show
+    plainly by default, unlike dns_native_filter_deny -- it isn't gated
+    by show_native_blocks (or show_routine) at all."""
+    db_conn.execute(
+        "INSERT INTO access_log (ts, user_id, username, domain, path, allowed, reason, block_source) "
+        "VALUES (datetime('now'), NULL, 'kid1', 'mobalytics.gg', NULL, 0, 'dns_category_deny', 'Games')"
+    )
+    db_conn.commit()
+
+    resp = client.get("/report", headers=_auth_header())
+
+    assert resp.status_code == 200
+    assert b"mobalytics.gg" in resp.data
 
 
 # ============================================================
@@ -4324,10 +4431,10 @@ def test_user_detail_shows_its_assigned_devices(client, db_conn):
     assert "Active" in body
 
 
-def test_user_detail_devices_card_links_each_device_to_the_devices_page(client, db_conn):
-    """Links straight to the Devices page's own ?q= server-side search,
-    rather than making the admin copy the MAC and search for it
-    manually."""
+def test_user_detail_devices_card_links_each_device_directly_to_its_own_page(client, db_conn):
+    """The MAC address itself is the link, straight to that device's own
+    detail page (same pattern the Report page already uses) -- no more
+    copying the MAC and searching for it on the Devices page by hand."""
     client.post("/users/add", data={"username": "kid5b", "password": "pw"}, headers=_auth_header())
     user_id = db_conn.execute("SELECT id FROM users WHERE username = 'kid5b'").fetchone()["id"]
     db_conn.execute(
@@ -4336,11 +4443,13 @@ def test_user_detail_devices_card_links_each_device_to_the_devices_page(client, 
         (user_id,),
     )
     db_conn.commit()
+    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:75'").fetchone()["id"]
 
     resp = client.get(f"/users/{user_id}", headers=_auth_header())
 
     assert resp.status_code == 200
-    assert b"/devices?q=aa:bb:cc:dd:ee:75" in resp.data
+    assert f"/devices/{device_id}".encode() in resp.data
+    assert b"/devices?q=aa:bb:cc:dd:ee:75" not in resp.data
 
 
 def test_user_detail_devices_card_shows_no_devices_message_when_empty(client, db_conn):
@@ -4811,7 +4920,7 @@ def test_group_detail_page_renders(client, db_conn):
     assert b"Pause the internet" in resp.data
 
 
-def test_group_detail_devices_card_links_each_device_to_the_devices_page(client, db_conn):
+def test_group_detail_devices_card_links_each_device_directly_to_its_own_page(client, db_conn):
     client.post("/groups/add", data={"name": "TVs2"}, headers=_auth_header())
     group_id = db_conn.execute("SELECT id FROM groups WHERE name = 'TVs2'").fetchone()["id"]
     db_conn.execute(
@@ -4820,11 +4929,13 @@ def test_group_detail_devices_card_links_each_device_to_the_devices_page(client,
         (group_id,),
     )
     db_conn.commit()
+    device_id = db_conn.execute("SELECT id FROM devices WHERE mac_address = 'aa:bb:cc:dd:ee:76'").fetchone()["id"]
 
     resp = client.get(f"/groups/{group_id}", headers=_auth_header())
 
     assert resp.status_code == 200
-    assert b"/devices?q=aa:bb:cc:dd:ee:76" in resp.data
+    assert f"/devices/{device_id}".encode() in resp.data
+    assert b"/devices?q=aa:bb:cc:dd:ee:76" not in resp.data
 
 
 def test_group_detail_shows_global_domains_separately_from_assigned(client, db_conn):
@@ -6970,6 +7081,117 @@ def test_add_category_override_then_appears(client, db_conn):
     ).fetchone()
     assert row["pattern"] == r"safe\.example\.com"
     assert row["note"] == "school portal"
+
+
+def test_add_category_override_rejects_a_full_url_instead_of_a_bare_domain(client, db_conn):
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    resp = client.post(
+        "/categories/overrides/add",
+        data={"category_id": category_id, "pattern": "https://safe.example.com/portal"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM category_overrides").fetchone() is None
+
+
+def test_add_category_override_rejects_an_invalid_regex(client, db_conn):
+    client.post("/categories/add", data={"name": "Gambling"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Gambling'").fetchone()["id"]
+    resp = client.post(
+        "/categories/overrides/add", data={"category_id": category_id, "pattern": "(unbalanced"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM category_overrides").fetchone() is None
+
+
+def test_add_category_domain_rejects_a_full_url_instead_of_a_bare_domain(client, db_conn):
+    client.post("/categories/add", data={"name": "Manual"}, headers=_auth_header())
+    category_id = db_conn.execute("SELECT id FROM categories WHERE name = 'Manual'").fetchone()["id"]
+    resp = client.post(
+        "/categories/domains/add",
+        data={"category_id": category_id, "pattern": "https://w13.returnersmagicshould.com"},
+        headers=_auth_header(),
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM category_domains").fetchone() is None
+
+
+# ============================================================
+# AdGuard exceptions (adguard_allowlist)
+# ============================================================
+
+def test_add_adguard_allowlist_then_appears(client, db_conn):
+    resp = client.post(
+        "/adguard-allowlist/add", data={"pattern": "mobalytics.gg", "note": "gaming stats site"},
+        headers=_auth_header(),
+    )
+    assert resp.status_code == 302
+    assert "error=1" not in resp.headers["Location"]
+    row = db_conn.execute("SELECT * FROM adguard_allowlist WHERE pattern = 'mobalytics.gg'").fetchone()
+    assert row is not None
+    assert row["note"] == "gaming stats site"
+    assert row["is_global"] == 0
+
+
+def test_add_adguard_allowlist_rejects_a_full_url_instead_of_a_bare_domain(client, db_conn):
+    resp = client.post(
+        "/adguard-allowlist/add", data={"pattern": "https://mobalytics.gg/some/page"}, headers=_auth_header()
+    )
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM adguard_allowlist").fetchone() is None
+
+
+def test_add_adguard_allowlist_rejects_an_invalid_regex(client, db_conn):
+    resp = client.post("/adguard-allowlist/add", data={"pattern": "(unbalanced"}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT * FROM adguard_allowlist").fetchone() is None
+
+
+def test_add_adguard_allowlist_rejects_a_duplicate_pattern(client, db_conn):
+    client.post("/adguard-allowlist/add", data={"pattern": "mobalytics.gg"}, headers=_auth_header())
+    resp = client.post("/adguard-allowlist/add", data={"pattern": "mobalytics.gg"}, headers=_auth_header())
+    assert "error=1" in resp.headers["Location"]
+    assert db_conn.execute("SELECT COUNT(*) AS c FROM adguard_allowlist").fetchone()["c"] == 1
+
+
+def test_add_adguard_allowlist_global_scope(client, db_conn):
+    client.post(
+        "/adguard-allowlist/add", data={"pattern": "mobalytics.gg", "is_global": "1"}, headers=_auth_header()
+    )
+    row = db_conn.execute("SELECT * FROM adguard_allowlist WHERE pattern = 'mobalytics.gg'").fetchone()
+    assert row["is_global"] == 1
+
+
+def test_add_adguard_allowlist_scoped_to_a_specific_device(client, db_conn):
+    device_id = _insert_device(db_conn, "aa:bb:cc:dd:ee:01", label="Jacob Tablet")
+    client.post(
+        "/adguard-allowlist/add", data={"pattern": "mobalytics.gg", "device_ids": [str(device_id)]},
+        headers=_auth_header(),
+    )
+    allowlist_id = db_conn.execute("SELECT id FROM adguard_allowlist WHERE pattern = 'mobalytics.gg'").fetchone()["id"]
+    grant = db_conn.execute(
+        "SELECT * FROM device_adguard_allowlist WHERE device_id = ? AND allowlist_id = ?",
+        (device_id, allowlist_id),
+    ).fetchone()
+    assert grant is not None
+
+
+def test_delete_adguard_allowlist_removes_row(client, db_conn):
+    client.post("/adguard-allowlist/add", data={"pattern": "mobalytics.gg"}, headers=_auth_header())
+    allowlist_id = db_conn.execute("SELECT id FROM adguard_allowlist WHERE pattern = 'mobalytics.gg'").fetchone()["id"]
+
+    resp = client.post("/adguard-allowlist/delete", data={"allowlist_id": allowlist_id}, headers=_auth_header())
+
+    assert resp.status_code == 302
+    assert db_conn.execute("SELECT * FROM adguard_allowlist WHERE id = ?", (allowlist_id,)).fetchone() is None
+
+
+def test_delete_adguard_allowlist_nonexistent_id_redirects_cleanly(client):
+    resp = client.post("/adguard-allowlist/delete", data={"allowlist_id": "999999"}, headers=_auth_header())
+    assert resp.status_code == 302
+    assert "error=1" in resp.headers["Location"]
 
 
 def test_update_category_access_sets_global_and_targets(client, db_conn):

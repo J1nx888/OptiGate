@@ -120,6 +120,236 @@ def test_domain_rule_with_block_page_ip_adds_dnsrewrite():
 
 
 # ============================================================
+# _merge_duplicate_domain_rules
+#
+# AdGuard Home, confirmed live against a real instance, applies NEITHER
+# of two custom rules that share the identical regex body, even when a
+# client is correctly listed in both -- see this function's own
+# docstring and RoadMap.md's dated entry. These tests lock in the merge
+# that closes that gap.
+# ============================================================
+
+def test_merge_unions_client_lists_for_same_body_and_same_action():
+    rule_a = adguard_sync._domain_rule("crunchyroll\\.com", ["192.168.1.41"], block_page_ip="192.168.1.250")
+    rule_b = adguard_sync._domain_rule("crunchyroll\\.com", ["192.168.1.57"], block_page_ip="192.168.1.250")
+
+    merged = adguard_sync._merge_duplicate_domain_rules([rule_a, rule_b])
+
+    assert merged == [
+        "/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.41,192.168.1.57,dnsrewrite=NOERROR;A;192.168.1.250"
+    ]
+
+
+def test_merge_deduplicates_an_ip_present_in_both_rules():
+    rule_a = adguard_sync._domain_rule("crunchyroll\\.com", ["192.168.1.41", "192.168.1.57"])
+    rule_b = adguard_sync._domain_rule("crunchyroll\\.com", ["192.168.1.57", "192.168.1.71"])
+
+    merged = adguard_sync._merge_duplicate_domain_rules([rule_a, rule_b])
+
+    assert merged == ["/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.41,192.168.1.57,192.168.1.71"]
+
+
+def test_merge_unscoped_rule_wins_over_a_scoped_duplicate_for_the_same_action():
+    scoped = adguard_sync._domain_rule("example\\.com", ["192.168.1.41"], block_page_ip="192.168.1.250")
+    unscoped = adguard_sync._domain_rule_unscoped("example\\.com", block_page_ip="192.168.1.250")
+
+    merged = adguard_sync._merge_duplicate_domain_rules([scoped, unscoped])
+
+    assert merged == [unscoped]
+    assert "client=" not in merged[0]
+
+
+def test_merge_never_combines_a_deny_rule_with_an_ech_strip_rule_for_the_same_body():
+    deny = adguard_sync._domain_rule("crunchyroll\\.com", ["192.168.1.41"], block_page_ip="192.168.1.250")
+    ech_strip = adguard_sync._ech_strip_rule("crunchyroll\\.com", ["192.168.1.20"])
+
+    merged = adguard_sync._merge_duplicate_domain_rules([deny, ech_strip])
+
+    assert merged == [deny, ech_strip]
+
+
+def test_merge_leaves_rules_for_different_domains_untouched():
+    rule_a = adguard_sync._domain_rule("crunchyroll\\.com", ["192.168.1.41"])
+    rule_b = adguard_sync._domain_rule("asurascans\\.com", ["192.168.1.41"])
+
+    assert adguard_sync._merge_duplicate_domain_rules([rule_a, rule_b]) == [rule_a, rule_b]
+
+
+def test_merge_is_a_no_op_for_a_single_rule_per_domain():
+    rules = [
+        adguard_sync._domain_rule("crunchyroll\\.com", ["192.168.1.41"], block_page_ip="192.168.1.250"),
+        adguard_sync._domain_rule_unscoped("use-application-dns.net"),
+    ]
+    assert adguard_sync._merge_duplicate_domain_rules(rules) == rules
+
+
+def test_merge_never_combines_an_allow_rule_with_a_deny_rule_for_the_same_body():
+    """An allow rule (build_adguard_allow_rules()) and a deny rule
+    (build_rules()/build_category_deny_rules()) can legitimately coexist
+    for the same domain -- the whole point of the allow rule is to
+    override a deny that would otherwise apply. Merging them into one
+    would erase the exception it exists to guarantee."""
+    deny = adguard_sync._domain_rule("mobalytics\\.gg", ["192.168.1.10"])
+    allow = adguard_sync._domain_allow_rule("mobalytics\\.gg", ["192.168.1.28"])
+
+    merged = adguard_sync._merge_duplicate_domain_rules([deny, allow])
+
+    assert merged == [deny, allow]
+
+
+def test_merge_unions_client_lists_across_two_allow_rules_for_the_same_domain():
+    rule_a = adguard_sync._domain_allow_rule("mobalytics\\.gg", ["192.168.1.10"])
+    rule_b = adguard_sync._domain_allow_rule("mobalytics\\.gg", ["192.168.1.28"])
+
+    merged = adguard_sync._merge_duplicate_domain_rules([rule_a, rule_b])
+
+    assert merged == ["@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.10,192.168.1.28"]
+
+
+def test_merge_unscoped_allow_rule_wins_over_a_scoped_duplicate():
+    scoped = adguard_sync._domain_allow_rule("mobalytics\\.gg", ["192.168.1.10"])
+    unscoped = adguard_sync._domain_allow_rule("mobalytics\\.gg")
+
+    merged = adguard_sync._merge_duplicate_domain_rules([scoped, unscoped])
+
+    assert merged == [unscoped]
+    assert "client=" not in merged[0]
+
+
+# ============================================================
+# _domain_allow_rule / build_adguard_allow_rules
+# ============================================================
+
+def test_domain_allow_rule_is_at_prefixed_and_unscoped_by_default():
+    rule = adguard_sync._domain_allow_rule("mobalytics\\.gg")
+    assert rule == "@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/"
+
+
+def test_domain_allow_rule_scoped_to_client_ips():
+    rule = adguard_sync._domain_allow_rule("mobalytics\\.gg", ["192.168.1.10", "192.168.1.28"])
+    assert rule == "@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.10,192.168.1.28"
+
+
+def _insert_allowlist(conn, pattern: str, *, is_global: bool = False) -> int:
+    conn.execute(
+        "INSERT INTO adguard_allowlist (pattern, is_global, created_at) VALUES (?, ?, datetime('now'))",
+        (pattern, int(is_global)),
+    )
+    conn.commit()
+    return conn.execute("SELECT id FROM adguard_allowlist WHERE pattern = ?", (pattern,)).fetchone()["id"]
+
+
+def test_build_adguard_allow_rules_empty_when_no_entries(conn):
+    assert adguard_sync.build_adguard_allow_rules(conn) == []
+
+
+def test_build_adguard_allow_rules_global_entry_is_unscoped(conn):
+    _insert_allowlist(conn, "mobalytics\\.gg", is_global=True)
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10")
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:02", "192.168.1.28")
+
+    rules = adguard_sync.build_adguard_allow_rules(conn)
+
+    assert rules == ["@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/"]
+
+
+def test_build_adguard_allow_rules_scoped_to_the_device_it_was_granted_to(conn):
+    allowlist_id = _insert_allowlist(conn, "mobalytics\\.gg")
+    device_id = _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.28")
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:02", "192.168.1.10")
+    conn.execute(
+        "INSERT INTO device_adguard_allowlist (device_id, allowlist_id) VALUES (?, ?)",
+        (device_id, allowlist_id),
+    )
+    conn.commit()
+
+    rules = adguard_sync.build_adguard_allow_rules(conn)
+
+    assert rules == ["@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.28"]
+
+
+def test_build_adguard_allow_rules_ungranted_entry_produces_nothing(conn):
+    _insert_allowlist(conn, "mobalytics\\.gg")
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.10")
+
+    assert adguard_sync.build_adguard_allow_rules(conn) == []
+
+
+def test_sync_once_pushes_an_allow_rule_alongside_an_unrelated_deny(conn, monkeypatch):
+    """End-to-end: an admin-approved adguard_allowlist entry for one
+    device coexists in the pushed managed block with an unrelated deny
+    rule for a different domain -- confirms build_adguard_allow_rules()
+    is wired into sync_once() and survives _merge_duplicate_domain_rules()
+    intact."""
+    _insert_domain(conn, "crunchyroll\\.com", mode="bump", is_global=True)
+    device_id = _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.28", bump_enabled=False)
+    # A second, ungranted device keeps the allowlist entry from qualifying
+    # for the "applies to literally everyone" unscoped shortcut, so the
+    # assertion below can confirm real $client= scoping.
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:02", "192.168.1.10", bump_enabled=False)
+    allowlist_id = _insert_allowlist(conn, "mobalytics\\.gg")
+    conn.execute(
+        "INSERT INTO device_adguard_allowlist (device_id, allowlist_id) VALUES (?, ?)",
+        (device_id, allowlist_id),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: [])
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_safesearch_status", lambda *a, **k: {"enabled": False})
+    monkeypatch.setattr(adguard_sync, "sync_optigate_rewrite", lambda *a, **k: None)
+    pushed = {}
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: pushed.setdefault("rules", rules),
+    )
+
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x")
+
+    managed = pushed["rules"][1:-1]
+    allow_rules = [r for r in managed if r.startswith("@@") and "mobalytics" in r]
+    deny_rules = [r for r in managed if "crunchyroll" in r]
+    assert allow_rules == ["@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.28"]
+    assert len(deny_rules) == 1 and "192.168.1.28" in deny_rules[0]
+
+
+def test_sync_once_merges_a_bump_domain_that_is_also_a_scoped_category_domain(conn, monkeypatch):
+    """Reproduces the live household bug directly: crunchyroll.com is
+    both a mode='bump' domain (build_rules()) and present in a small,
+    in-scope category's domain list (build_category_deny_rules()) --
+    two independent sources that used to each emit their own
+    $client=-scoped rule for the identical pattern, which AdGuard then
+    failed to enforce for EITHER source's clients at all."""
+    _insert_domain(conn, "crunchyroll\\.com", mode="bump", is_global=True)
+    category_id = _insert_category(conn, "Entertainment")
+    _insert_category_domains(conn, category_id, ["crunchyroll\\.com"], source="subscription")
+    # Non-bump device: denied by build_rules() (not bump_eligible).
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:01", "192.168.1.41", bump_enabled=False)
+    # A second non-bump device that ALSO has the category applied to it,
+    # so build_category_deny_rules() denies it too -- both builders now
+    # contribute a rule for the same crunchyroll.com pattern.
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:02", "192.168.1.57", bump_enabled=False)
+
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_custom_rules", lambda *a, **k: [])
+    monkeypatch.setattr(adguard_sync.adguard_client, "get_safesearch_status", lambda *a, **k: {"enabled": False})
+    monkeypatch.setattr(adguard_sync, "sync_optigate_rewrite", lambda *a, **k: None)
+    pushed = {}
+    monkeypatch.setattr(
+        adguard_sync.adguard_client, "set_custom_rules",
+        lambda base_url, u, p, rules: pushed.setdefault("rules", rules),
+    )
+
+    adguard_sync.sync_once(conn, "http://127.0.0.1:3000", "admin", "x", block_page_ip="192.168.1.250")
+
+    managed = pushed["rules"][1:-1]
+    crunchyroll_rules = [r for r in managed if "crunchyroll" in r]
+    # Exactly ONE rule for the domain -- not two competing ones -- and it
+    # covers every device either source wanted denied.
+    assert len(crunchyroll_rules) == 1
+    assert "192.168.1.41" in crunchyroll_rules[0]
+    assert "192.168.1.57" in crunchyroll_rules[0]
+
+
+# ============================================================
 # build_rules
 # ============================================================
 

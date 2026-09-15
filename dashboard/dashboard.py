@@ -1628,20 +1628,19 @@ USER_DETAIL_BODY = """
 <h2>Devices ({{ assigned_devices|length }})</h2>
 <div class="table-scroll">
 <table>
-  <tr><th>MAC address</th><th>Label</th><th>Status</th><th></th></tr>
+  <tr><th>MAC address</th><th>Label</th><th>Status</th></tr>
   {% for d in assigned_devices %}
   <tr>
-    <td><code>{{ d.mac_address }}</code></td>
+    <td><a href="{{ url_for('device_detail', device_id=d.id) }}"><code>{{ d.mac_address }}</code></a></td>
     <td>{{ d.label or '' }}</td>
     <td>
       {% if d.ignored %}<span class="badge pending">Ignored</span>
       {% elif d.quarantined_at %}<span class="badge blocked">Paused</span>
       {% else %}<span class="badge allowed">Active</span>{% endif %}
     </td>
-    <td><a class="btn small" href="{{ url_for('devices', q=d.mac_address) }}">View on Devices</a></td>
   </tr>
   {% else %}
-  <tr><td colspan="4"><em>No devices assigned.</em></td></tr>
+  <tr><td colspan="3"><em>No devices assigned.</em></td></tr>
   {% endfor %}
 </table>
 </div>
@@ -1795,7 +1794,7 @@ def user_detail(user_id: int):
     # reasoning) -- this card's job is accurately answering "what's
     # assigned here", not "what's pausable".
     assigned_devices = conn.execute(
-        "SELECT mac_address, label, ignored, quarantined_at FROM devices "
+        "SELECT id, mac_address, label, ignored, quarantined_at FROM devices "
         "WHERE user_id = ? ORDER BY label IS NULL, label, mac_address",
         (user_id,),
     ).fetchall()
@@ -1951,33 +1950,6 @@ INTEGRATIONS_BODY = """
 </div>
 
 <div class="card">
-<h2>Required domains ({{ required_domains|length }})</h2>
-<p class="hint">
-  Infrastructure Crunchyroll's site and video playback depend on --
-  cookie consent, CDNs, single sign-on, and the raw video CDN itself, plus
-  the main <code>crunchyroll.com</code> domain the per-user show
-  approvals above are enforced against. Everyone gets these automatically
-  (they're not a per-kid decision), and they can't be deleted from the
-  dashboard -- removing one could silently break playback or login for
-  everyone, with no obvious link back to "the domain an admin deleted."
-  Edit a domain's mode or note from its own Manage page if you need to.
-</p>
-<div class="table-scroll">
-<table>
-  <tr><th>Pattern</th><th>Mode</th><th>Note</th><th></th></tr>
-  {% for d in required_domains %}
-  <tr>
-    <td><code>{{ d.pattern }}</code></td>
-    <td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td>
-    <td>{{ d.note or '' }}</td>
-    <td><a class="btn small" href="{{ url_for('domain_detail', domain_id=d.id) }}">Manage</a></td>
-  </tr>
-  {% endfor %}
-</table>
-</div>
-</div>
-
-<div class="card">
 <h2>Approved Crunchyroll shows &mdash; everyone ({{ series|length }})</h2>
 <div class="table-scroll">
 <table>
@@ -2043,6 +2015,33 @@ INTEGRATIONS_BODY = """
 {% else %}
 <p class="hint">No users yet -- add one from the <a href="{{ url_for('users') }}">Users</a> page first.</p>
 {% endif %}
+</div>
+
+<div class="card">
+<h2>Required domains ({{ required_domains|length }})</h2>
+<p class="hint">
+  Infrastructure Crunchyroll's site and video playback depend on --
+  cookie consent, CDNs, single sign-on, and the raw video CDN itself, plus
+  the main <code>crunchyroll.com</code> domain the per-user show
+  approvals above are enforced against. Everyone gets these automatically
+  (they're not a per-kid decision), and they can't be deleted from the
+  dashboard -- removing one could silently break playback or login for
+  everyone, with no obvious link back to "the domain an admin deleted."
+  Edit a domain's mode or note from its own Manage page if you need to.
+</p>
+<div class="table-scroll">
+<table>
+  <tr><th>Pattern</th><th>Mode</th><th>Note</th><th></th></tr>
+  {% for d in required_domains %}
+  <tr>
+    <td><code>{{ d.pattern }}</code></td>
+    <td><span class="badge mode-{{ d.mode }}">{{ d.mode }}</span></td>
+    <td>{{ d.note or '' }}</td>
+    <td><a class="btn small" href="{{ url_for('domain_detail', domain_id=d.id) }}">Manage</a></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
 </div>
 """
 
@@ -2529,6 +2528,44 @@ DOMAINS_BODY = """
 </form>
 </div>
 {% endif %}
+
+<div class="card">
+<h2>AdGuard exceptions ({{ adguard_allowlist|length }})</h2>
+<p class="hint">
+  A domain here is never blocked by AdGuard, no matter which list would
+  have caught it -- one of this household's own categories,
+  AdGuard's own built-in filter, or the uBlockOrigin extras. Use this
+  when the Report page shows something blocked that you don't want
+  blocked; for everything else, the domains list above is what you want.
+</p>
+{% if adguard_allowlist %}
+<div class="table-scroll">
+<table>
+  <tr><th>Pattern</th><th>Applies to</th><th>Note</th><th></th></tr>
+  {% for a in adguard_allowlist %}
+  <tr>
+    <td><code>{{ a.pattern }}</code></td>
+    <td>{{ a.scope }}</td>
+    <td>{{ a.note or '' }}</td>
+    <td>
+      <form class="inline" method="post" action="{{ url_for('delete_adguard_allowlist') }}"
+            onsubmit="return confirm('Remove this exception? {{ a.pattern }} could get blocked again.');">
+        <input type="hidden" name="allowlist_id" value="{{ a.id }}">
+        <button class="danger small" type="submit">Remove</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+<form class="add-form" method="post" action="{{ url_for('add_adguard_allowlist') }}">
+  <input type="text" name="pattern" placeholder="e.g. mobalytics.gg" required>
+  <input type="text" name="note" placeholder="Note (optional)">
+  <button class="add" type="submit">Add exception</button>
+""" + ACCESS_SELECTS + """
+</form>
+</div>
 """
 
 
@@ -2732,8 +2769,64 @@ def domains():
             search=search, clear_search_args=clear_search_args, any_domains_exist=any_domains_exist,
             range_start=0 if domain_count == 0 else (page - 1) * per_page + 1,
             range_end=min(page * per_page, domain_count),
+            adguard_allowlist=_adguard_allowlist_rows(conn),
         ),
     )
+
+
+def _adguard_allowlist_rows(conn) -> list[dict]:
+    """One display row per `adguard_allowlist` entry, with its scope
+    resolved to a readable string -- "Everyone" for `is_global`,
+    otherwise the names of whichever specific users/groups/devices it's
+    actually granted to. Used by the Domains page's "AdGuard exceptions"
+    card; kept as plain raw-SQL joins (no matching.py-level authorization
+    check needed here, this is just a display listing, not an
+    enforcement decision)."""
+    rows = []
+    for entry in conn.execute("SELECT * FROM adguard_allowlist ORDER BY pattern").fetchall():
+        if entry["is_global"]:
+            scope = "Everyone"
+        else:
+            names = [
+                r["display_name"] for r in conn.execute(
+                    "SELECT u.display_name FROM user_adguard_allowlist a JOIN users u ON u.id = a.user_id "
+                    "WHERE a.allowlist_id = ?", (entry["id"],),
+                )
+            ]
+            names += [
+                r["name"] for r in conn.execute(
+                    "SELECT g.name FROM group_adguard_allowlist a JOIN groups g ON g.id = a.group_id "
+                    "WHERE a.allowlist_id = ?", (entry["id"],),
+                )
+            ]
+            names += [
+                r["name"] for r in conn.execute(
+                    "SELECT COALESCE(d.label, d.mac_address) AS name FROM device_adguard_allowlist a "
+                    "JOIN devices d ON d.id = a.device_id WHERE a.allowlist_id = ?", (entry["id"],),
+                )
+            ]
+            scope = ", ".join(names) if names else "Not granted to anyone yet"
+        rows.append({"id": entry["id"], "pattern": entry["pattern"], "note": entry["note"], "scope": scope})
+    return rows
+
+
+_URL_LIKE_PATTERN_RE = re.compile(r"://|[/\s]")
+
+
+def _looks_like_a_pasted_url(pattern: str) -> bool:
+    """A domain-matching regex (see common/matching.py's `_domain_regex`)
+    is anchored against a bare hostname and never legitimately needs a
+    URL scheme, a path separator, or whitespace -- a real DNS/SNI
+    hostname never contains any of those. `re.compile()` alone accepts
+    `https://example.com/page` as a syntactically valid regex, but it
+    can never match a single real query once anchored -- a household
+    domain was stored exactly that way for days before anyone noticed
+    it silently matched nothing. Only for the forms that take a
+    hand-typed pattern directly (`add_domain`, `add_category_domain`,
+    `add_category_override`) -- callers that already extract a hostname
+    from a pasted URL themselves (`_extract_domain()`, `_extract_path()`)
+    don't need this."""
+    return bool(_URL_LIKE_PATTERN_RE.search(pattern))
 
 
 @app.route("/domains/add", methods=["POST"])
@@ -2765,6 +2858,13 @@ def add_domain():
         return flash_redirect("domains", "Invalid mode.", error=True, **redirect_kwargs)
     if len(pattern) > 200:
         return flash_redirect("domains", "Pattern too long (200 characters max).", error=True, **redirect_kwargs)
+    if _looks_like_a_pasted_url(pattern):
+        return flash_redirect(
+            "domains",
+            "That looks like a URL, not a domain -- paste just the hostname "
+            "(e.g. example.com), no scheme or path.",
+            error=True, **redirect_kwargs,
+        )
     try:
         re.compile(pattern)
     except re.error as exc:
@@ -2805,6 +2905,79 @@ def add_domain():
         conn.execute("INSERT OR IGNORE INTO device_domains (device_id, domain_id) VALUES (?,?)", (did, domain_id))
     conn.commit()
     return flash_redirect("domains", f"Added {pattern}.", **redirect_kwargs)
+
+
+@app.route("/adguard-allowlist/add", methods=["POST"])
+@require_admin
+def add_adguard_allowlist():
+    """Domains page's own "AdGuard exceptions" card -- same shape as
+    add_domain() above, minus `mode` (an allowlist entry has no notion of
+    splice/bump/trusted, it's a pure override) and writing to
+    adguard_allowlist/user_adguard_allowlist/group_adguard_allowlist/
+    device_adguard_allowlist instead of domains/user_domains/etc. See
+    adguard_allowlist's own schema comment (common/db.py) for why this is
+    a separate table."""
+    pattern = request.form.get("pattern", "").strip()
+    is_global = 1 if request.form.get("is_global") else 0
+    note = request.form.get("note", "").strip() or None
+    if not pattern:
+        return flash_redirect("domains", "Pattern is required.", error=True)
+    if len(pattern) > 200:
+        return flash_redirect("domains", "Pattern too long (200 characters max).", error=True)
+    if _looks_like_a_pasted_url(pattern):
+        return flash_redirect(
+            "domains",
+            "That looks like a URL, not a domain -- paste just the hostname "
+            "(e.g. example.com), no scheme or path.",
+            error=True,
+        )
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        return flash_redirect("domains", f"Not a valid regex: {exc}", error=True)
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO adguard_allowlist (pattern, is_global, note, created_at) VALUES (?,?,?,?)",
+            (pattern, is_global, note, db.now_iso()),
+        )
+        conn.commit()
+    except Exception as exc:
+        if "UNIQUE" in str(exc):
+            return flash_redirect("domains", f"{pattern!r} is already an exception.", error=True)
+        raise
+
+    allowlist_id = conn.execute("SELECT id FROM adguard_allowlist WHERE pattern = ?", (pattern,)).fetchone()["id"]
+    for uid in {int(x) for x in request.form.getlist("user_ids") if x.isdigit()}:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_adguard_allowlist (user_id, allowlist_id) VALUES (?,?)", (uid, allowlist_id)
+        )
+    for gid in {int(x) for x in request.form.getlist("group_ids") if x.isdigit()}:
+        conn.execute(
+            "INSERT OR IGNORE INTO group_adguard_allowlist (group_id, allowlist_id) VALUES (?,?)",
+            (gid, allowlist_id),
+        )
+    for did in {int(x) for x in request.form.getlist("device_ids") if x.isdigit()}:
+        conn.execute(
+            "INSERT OR IGNORE INTO device_adguard_allowlist (device_id, allowlist_id) VALUES (?,?)",
+            (did, allowlist_id),
+        )
+    conn.commit()
+    return flash_redirect("domains", f"Added {pattern} as an exception.")
+
+
+@app.route("/adguard-allowlist/delete", methods=["POST"])
+@require_admin
+def delete_adguard_allowlist():
+    allowlist_id = request.form.get("allowlist_id", "")
+    conn = get_db()
+    row = conn.execute("SELECT pattern FROM adguard_allowlist WHERE id = ?", (allowlist_id,)).fetchone()
+    if row is None:
+        return flash_redirect("domains", "That exception no longer exists.", error=True)
+    conn.execute("DELETE FROM adguard_allowlist WHERE id = ?", (allowlist_id,))
+    conn.commit()
+    return flash_redirect("domains", f"Removed the exception for {row['pattern']}.")
 
 
 @app.route("/domains/add-url", methods=["POST"])
@@ -4674,6 +4847,13 @@ def add_category_domain():
         return flash_redirect("category_detail", "Pattern is required.", error=True, category_id=category_id)
     if len(pattern) > 200:
         return flash_redirect("category_detail", "Pattern too long (200 characters max).", error=True, category_id=category_id)
+    if _looks_like_a_pasted_url(pattern):
+        return flash_redirect(
+            "category_detail",
+            "That looks like a URL, not a domain -- paste just the hostname "
+            "(e.g. example.com), no scheme or path.",
+            error=True, category_id=category_id,
+        )
     try:
         re.compile(pattern)
     except re.error as exc:
@@ -4747,6 +4927,19 @@ def add_category_override():
     note = request.form.get("note", "").strip() or None
     if not pattern:
         return flash_redirect("category_detail", "Pattern is required.", error=True, category_id=category_id)
+    if len(pattern) > 200:
+        return flash_redirect("category_detail", "Pattern too long (200 characters max).", error=True, category_id=category_id)
+    if _looks_like_a_pasted_url(pattern):
+        return flash_redirect(
+            "category_detail",
+            "That looks like a URL, not a domain -- paste just the hostname "
+            "(e.g. example.com), no scheme or path.",
+            error=True, category_id=category_id,
+        )
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        return flash_redirect("category_detail", f"Not a valid regex: {exc}", error=True, category_id=category_id)
     conn = get_db()
     conn.execute(
         "INSERT OR IGNORE INTO category_overrides (category_id, pattern, note, created_at) VALUES (?, ?, ?, ?)",
@@ -6440,16 +6633,15 @@ GROUP_DETAIL_BODY = """
 <h2>Devices in this group ({{ group_devices|length }})</h2>
 <div class="table-scroll">
 <table>
-  <tr><th>MAC address</th><th>Label</th><th>Status</th><th></th></tr>
+  <tr><th>MAC address</th><th>Label</th><th>Status</th></tr>
   {% for d in group_devices %}
   <tr>
-    <td><code>{{ d.mac_address }}</code></td>
+    <td><a href="{{ url_for('device_detail', device_id=d.id) }}"><code>{{ d.mac_address }}</code></a></td>
     <td>{{ d.label or '' }}</td>
     <td>{% if d.quarantined_at %}<span class="badge blocked">Paused</span>{% else %}<span class="badge">Active</span>{% endif %}</td>
-    <td><a class="btn small" href="{{ url_for('devices', q=d.mac_address) }}">View on Devices</a></td>
   </tr>
   {% else %}
-  <tr><td colspan="4"><em>No devices assigned.</em></td></tr>
+  <tr><td colspan="3"><em>No devices assigned.</em></td></tr>
   {% endfor %}
 </table>
 </div>
@@ -6869,10 +7061,11 @@ REPORT_BODY = """
     {% endfor %}
   </select>
   <label><input type="checkbox" name="show_routine" value="1" {{ 'checked' if show_routine }}> Show routine DNS-tier activity</label>
+  <label><input type="checkbox" name="show_native_blocks" value="1" {{ 'checked' if show_native_blocks }}> Show blocks from AdGuard's own filter lists</label>
   <button class="add" type="submit">Apply</button>
   {% if filters_active %}<a class="btn" href="{{ url_for('report') }}">Clear filters</a>{% endif %}
 </form>
-<p class="hint">Applies to everything below -- the totals, both graphs, and the activity table. Click Allowed or Blocked below to filter to just that. "Show routine DNS-tier activity" reveals sampled, ordinary browsing from devices that aren't SSL-Bump-enabled (<code>dns_tier_allowed</code> rows) -- hidden by default since there are far more of them than anything needing your attention.</p>
+<p class="hint">Applies to everything below -- the totals, both graphs, and the activity table. Click Allowed or Blocked below to filter to just that. "Show routine DNS-tier activity" reveals sampled, ordinary browsing from devices that aren't SSL-Bump-enabled (<code>dns_tier_allowed</code> rows) -- hidden by default since there are far more of them than anything needing your attention. "Show blocks from AdGuard's own filter lists" reveals blocks from AdGuard's built-in default filter or the uBlockOrigin extras (<code>dns_native_filter_deny</code> rows) -- hidden by default since they aren't tied to anything this household configured; a block from one of your own categories always shows regardless.</p>
 </div>
 
 <div class="stat-strip">
@@ -7058,6 +7251,8 @@ def _report_redirect_kwargs(source) -> dict:
         kwargs["days"] = _parse_report_days(source.get("days"))
     if source.get("show_routine"):
         kwargs["show_routine"] = "1"
+    if source.get("show_native_blocks"):
+        kwargs["show_native_blocks"] = "1"
     return kwargs
 
 
@@ -7103,6 +7298,8 @@ _ACCESS_LOG_REASON_LABELS = {
     "dns_tier_denied": "blocked at the DNS/category layer (AdGuard) before reaching the proxy",
     "dns_hard_deny": "blocked at the DNS/category layer (AdGuard) -- HTTPS, so the block page itself never loaded",
     "dns_tier_allowed": "routine DNS-tier activity, sampled -- not reviewed or assigned, just visibility",
+    "dns_category_deny": "blocked by one of this household's own categories, via AdGuard's own filter list",
+    "dns_native_filter_deny": "blocked by AdGuard's own built-in filter, not something this household configured",
 }
 
 
@@ -7212,6 +7409,14 @@ def report():
     # default so the Report page stays focused on blocks and proxy-tier
     # traffic, revealed with this one checkbox.
     show_routine = bool(request.args.get("show_routine"))
+    # A block from AdGuard's own built-in filter or the uBlockOrigin
+    # extras isn't tied to anything this household configured -- noisier
+    # and less immediately actionable than a block from one of the
+    # household's own categories (dns_category_deny, never hidden by
+    # this), so it's hidden by default too, same spirit as show_routine
+    # above but a separate toggle since this governs blocked rows, not
+    # allowed ones.
+    show_native_blocks = bool(request.args.get("show_native_blocks"))
     report_target = (
         f"user:{filtered_user['id']}" if filtered_user else
         f"group:{filtered_group['id']}" if filtered_group else
@@ -7242,6 +7447,8 @@ def report():
         where_sql += " AND allowed = 1"
     if not show_routine:
         where_sql += " AND reason IS NOT 'dns_tier_allowed'"
+    if not show_native_blocks:
+        where_sql += " AND reason IS NOT 'dns_native_filter_deny'"
 
     # A blocked row for an unauthenticated device shows
     # "(unauthenticated)" as its "User" -- true, but useless for
@@ -7310,9 +7517,10 @@ def report():
         reason_label=_reason_label, to_local=to_local, tz_abbr=tz_abbr,
         report_target=report_target, report_filter_combo=_report_filter_combo(all_users, all_groups, all_devices),
         filter_status=filter_status, days=days, day_options=REPORT_DAY_OPTIONS, show_routine=show_routine,
+        show_native_blocks=show_native_blocks,
         filters_active=bool(
             filtered_user or filtered_group or filtered_device or filter_status
-            or days != REPORT_DEFAULT_DAYS or show_routine
+            or days != REPORT_DEFAULT_DAYS or show_routine or show_native_blocks
         ),
         redirect_kwargs=_report_redirect_kwargs(request.args),
         resolver_error=db.get_setting(conn, "cr_resolver_last_error"),
@@ -7407,6 +7615,47 @@ def approve_from_report():
         return redirect(url_for(
             "domain_detail", domain_id=domain["id"], prefill_path=path_to_pattern(row["path"]),
         ))
+
+    if row["reason"] in ("dns_category_deny", "dns_native_filter_deny"):
+        # This block came from AdGuard's own side (an over-threshold
+        # category's native subscription, AdGuard's built-in filter, or a
+        # uBlockOrigin extra), never from this project's own `domains`
+        # table -- granting it there would do nothing, since none of
+        # those mechanisms ever consult `domains`. adguard_allowlist +
+        # controller/adguard_sync.py's build_adguard_allow_rules() is the
+        # one lever (an AdGuard `@@` rule) that actually overrides a
+        # block regardless of which AdGuard-side list produced it.
+        pattern = re.escape(row["domain"])
+        is_global = 1 if scope == "global" else 0
+        conn.execute(
+            "INSERT OR IGNORE INTO adguard_allowlist (pattern, is_global, note, created_at) "
+            "VALUES (?, ?, 'Auto-added from report approval', ?)",
+            (pattern, is_global, db.now_iso()),
+        )
+        entry = conn.execute("SELECT id FROM adguard_allowlist WHERE pattern = ?", (pattern,)).fetchone()
+        if scope == "global":
+            conn.execute("UPDATE adguard_allowlist SET is_global = 1 WHERE id = ?", (entry["id"],))
+            label = "everyone"
+        elif scope == "device":
+            conn.execute(
+                "INSERT OR IGNORE INTO device_adguard_allowlist (device_id, allowlist_id) VALUES (?,?)",
+                (device["id"], entry["id"]),
+            )
+            label = row["username"]
+        elif scope == "group":
+            conn.execute(
+                "INSERT OR IGNORE INTO group_adguard_allowlist (group_id, allowlist_id) VALUES (?,?)",
+                (device["group_id"], entry["id"]),
+            )
+            label = "this group"
+        else:  # "user"
+            conn.execute(
+                "INSERT OR IGNORE INTO user_adguard_allowlist (user_id, allowlist_id) VALUES (?,?)",
+                (row["user_id"], entry["id"]),
+            )
+            label = row["username"]
+        conn.commit()
+        return flash_redirect("report", f"Allowed {row['domain']} for {label}.", **redirect_kwargs)
 
     domain = matching.find_domain(conn, row["domain"])
     if domain is None:

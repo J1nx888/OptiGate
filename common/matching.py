@@ -253,6 +253,51 @@ def device_domain_reason(conn: sqlite3.Connection, device: sqlite3.Row, domain: 
     return None
 
 
+def user_has_allowlist_entry(conn: sqlite3.Connection, user_id: int, allowlist_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM user_adguard_allowlist WHERE user_id = ? AND allowlist_id = ?",
+        (user_id, allowlist_id),
+    ).fetchone()
+    return row is not None
+
+
+def group_has_allowlist_entry(conn: sqlite3.Connection, group_id: int, allowlist_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM group_adguard_allowlist WHERE group_id = ? AND allowlist_id = ?",
+        (group_id, allowlist_id),
+    ).fetchone()
+    return row is not None
+
+
+def device_has_allowlist_entry(conn: sqlite3.Connection, device_id: int, allowlist_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM device_adguard_allowlist WHERE device_id = ? AND allowlist_id = ?",
+        (device_id, allowlist_id),
+    ).fetchone()
+    return row is not None
+
+
+def device_allowlist_reason(conn: sqlite3.Connection, device: sqlite3.Row, allowlist_row: sqlite3.Row) -> str | None:
+    """Same shape and precedence as device_domain_reason() above, against
+    adguard_allowlist/user_adguard_allowlist/group_adguard_allowlist/
+    device_adguard_allowlist instead of domains/user_domains/etc. Used by
+    controller/adguard_sync.py's build_adguard_allow_rules() to decide
+    which currently-bound devices a given AdGuard-allowlist exception
+    applies to -- an exception is a narrower, different claim than a
+    domains-table grant (see adguard_allowlist's own schema comment), so
+    this is a parallel check, not a reuse of device_domain_reason() itself.
+    """
+    if allowlist_row["is_global"]:
+        return "global_allowlist"
+    if device["user_id"] is not None and user_has_allowlist_entry(conn, device["user_id"], allowlist_row["id"]):
+        return "user_allowlist"
+    if device["group_id"] is not None and group_has_allowlist_entry(conn, device["group_id"], allowlist_row["id"]):
+        return "group_allowlist"
+    if device_has_allowlist_entry(conn, device["id"], allowlist_row["id"]):
+        return "device_allowlist"
+    return None
+
+
 # Real category blocklists range from tens to ~953K domains. Scoping a
 # list that size to a subset of clients via AdGuard's `$client=` custom-rule
 # modifier is exactly what AdGuard's own team calls "unworkable" for

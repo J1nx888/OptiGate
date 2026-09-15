@@ -39,6 +39,7 @@ def log_access(
     series_name: str | None = None,
     device_id: int | None = None,
     ip_address: str | None = None,
+    block_source: str | None = None,
 ) -> None:
     """device_id: which `devices` row made this request, when known --
     lets the Report page filter/act on a row by device or group even when
@@ -57,6 +58,11 @@ def log_access(
     metadata on the row, not a new dedupe dimension" treatment as
     device_id -- a device's IP moving between requests within the dedupe
     window still collapses the same way it always has.
+
+    block_source: human-readable name of whichever AdGuard-side list
+    caused a dns_category_deny/dns_native_filter_deny row (see
+    dashboard/adguard_report_sync.py) -- same "descriptive metadata, not
+    a dedupe dimension" treatment as device_id/ip_address above.
     """
     cutoff_iso = iso_secs_ago(DEDUPE_WINDOW_SECONDS)
     # series_id is part of the dedupe key (SQLite's `IS` is null-safe, so two
@@ -78,8 +84,8 @@ def log_access(
         return
     conn.execute(
         "INSERT INTO access_log "
-        "(ts, user_id, username, domain, path, series_id, series_name, allowed, reason, device_id, ip_address) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(ts, user_id, username, domain, path, series_id, series_name, allowed, reason, device_id, ip_address, block_source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             now_iso(),
             user_id,
@@ -92,5 +98,6 @@ def log_access(
             reason,
             device_id,
             ip_address,
+            block_source,
         ),
     )

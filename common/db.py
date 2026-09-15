@@ -272,6 +272,51 @@ CREATE TABLE IF NOT EXISTS category_overrides (
     UNIQUE(category_id, pattern)
 );
 
+-- A domain that must never be blocked by ANY AdGuard-side mechanism --
+-- this project's own hard-deny rules, an over-threshold category's native
+-- AdGuard filter subscription, AdGuard's own built-in default filter, or
+-- the curated uBlockOrigin extras. Distinct from `domains` on purpose:
+-- a `domains` row is a content-permission decision (splice/bump/trusted,
+-- path rules, Crunchyroll show approval); a row here is a narrower,
+-- different claim that a specific hostname is never AdGuard-denied for
+-- its audience, regardless of which list would otherwise catch it.
+-- controller/adguard_sync.py's build_adguard_allow_rules() turns each row
+-- into an AdGuard `@@` (allowlist) rule, which AdGuard evaluates with
+-- priority over any blocklist match no matter which list produced it.
+CREATE TABLE IF NOT EXISTS adguard_allowlist (
+    id         INTEGER PRIMARY KEY,
+    pattern    TEXT UNIQUE NOT NULL,
+    note       TEXT,
+    is_global  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- Same shape as user_domains/group_domains/device_domains -- who a
+-- non-global adguard_allowlist row applies to. See
+-- common/matching.py's device_allowlist_reason() for the precedence
+-- (is_global, then user, then group, then device -- same order
+-- device_domain_reason() already uses).
+CREATE TABLE IF NOT EXISTS user_adguard_allowlist (
+    id           INTEGER PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    allowlist_id INTEGER NOT NULL REFERENCES adguard_allowlist(id) ON DELETE CASCADE,
+    UNIQUE(user_id, allowlist_id)
+);
+
+CREATE TABLE IF NOT EXISTS group_adguard_allowlist (
+    id           INTEGER PRIMARY KEY,
+    group_id     INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    allowlist_id INTEGER NOT NULL REFERENCES adguard_allowlist(id) ON DELETE CASCADE,
+    UNIQUE(group_id, allowlist_id)
+);
+
+CREATE TABLE IF NOT EXISTS device_adguard_allowlist (
+    id           INTEGER PRIMARY KEY,
+    device_id    INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    allowlist_id INTEGER NOT NULL REFERENCES adguard_allowlist(id) ON DELETE CASCADE,
+    UNIQUE(device_id, allowlist_id)
+);
+
 -- The Categories page's "Add category from catalog" search picker -- a
 -- searchable menu of ready-made subscription sources, so an admin
 -- doesn't have to go find a raw blocklist URL themselves for a common
@@ -611,7 +656,13 @@ CREATE TABLE IF NOT EXISTS access_log (
     -- today (block_page_server.py, adguard_report_sync.py,
     -- proxy/authz_helper.py, proxy/sni_helper.py); still NULL for rows
     -- written before this column existed.
-    ip_address  TEXT
+    ip_address  TEXT,
+    -- Human-readable name of whichever AdGuard-side list caused a
+    -- dns_category_deny/dns_native_filter_deny row (a category name like
+    -- "Games", or a native AdGuard filter's own name like "AdGuard DNS
+    -- filter") -- see dashboard/adguard_report_sync.py's reason=="Filtered*"
+    -- branch. NULL for every other reason.
+    block_source TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_log_ts ON access_log(ts DESC);
@@ -721,6 +772,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # the next time the proxy container starts, the same way it
         # already owns those patterns' notes.
         conn.execute("ALTER TABLE domains ADD COLUMN protected INTEGER NOT NULL DEFAULT 0")
+
+    access_log_columns = {row["name"] for row in conn.execute("PRAGMA table_info(access_log)")}
+    if access_log_columns and "block_source" not in access_log_columns:
+        # See this column's own schema comment above.
+        conn.execute("ALTER TABLE access_log ADD COLUMN block_source TEXT")
 
     # system_events.severity's CHECK constraint can't be widened with a
     # plain ALTER TABLE the way every migration above is -- SQLite has

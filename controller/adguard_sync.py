@@ -34,6 +34,14 @@ complete desired managed-rules block (all rule sets combined), and
 replaces it whole -- no incremental add/remove, no assumption about
 what a previous cycle left behind.
 
+Before that block is pushed, `_merge_duplicate_domain_rules()` collapses
+any rules that share an identical regex body and action (e.g. a domain
+that's both a `mode='bump'` row AND in a subscribed category's domain
+list, which used to get one rule from each of the two sources above) --
+confirmed live against a real AdGuard Home instance that leaving two
+such rules in place causes it to enforce NEITHER, for any client. See
+that function's own docstring.
+
 Content-category blocking (`build_category_deny_rules()`) adds a THIRD
 rule source to the same managed block, for categories at or under
 `matching.MAX_SCOPED_CATEGORY_DOMAINS` domains. Real category
@@ -67,6 +75,18 @@ actually authorized to reach that domain through Squid, so a
 Cloudflare-fronted domain's Encrypted Client Hello (which lives ONLY in
 that record) can't hide the real SNI from Squid's own bump/splice
 decision. See that function's own docstring for the mechanism.
+
+`build_adguard_allow_rules()` adds a FIFTH rule source: one `@@`
+(allowlist) rule per admin-approved `adguard_allowlist` entry. Unlike
+every rule source above (all denies, or the ECH-strip withholding),
+these are the one case where this project generates an AdGuard
+allowlist rule -- evaluated with priority over any blocklist match
+regardless of which list produced it, which is what lets a
+dashboard-approved exception hold even against AdGuard's own built-in
+default filter or the uBlockOrigin extras, not just this project's own
+rules. See that function's own docstring, and `adguard_allowlist`'s
+schema comment (common/db.py) for why it's a separate table from
+`domains`.
 """
 from __future__ import annotations
 
@@ -135,6 +155,135 @@ def _domain_rule_unscoped(pattern: str, block_page_ip: str | None = None) -> str
     if block_page_ip:
         rule += f"$dnsrewrite=NOERROR;A;{block_page_ip}"
     return rule
+
+
+def _domain_allow_rule(pattern: str, client_ips: list[str] | None = None) -> str:
+    """One AdGuard allowlist (`@@`) rule -- same regex-body construction as
+    `_domain_rule()`, `@@`-prefixed instead of carrying a deny/`$dnsrewrite`
+    action. AdGuard evaluates an allowlist rule with priority over any
+    blocklist match regardless of which list produced the block --
+    this project's own hard-deny rules, an over-threshold category's
+    native AdGuard filter subscription, AdGuard's own built-in default
+    filter, or the curated uBlockOrigin extras alike -- which is what lets
+    `build_adguard_allow_rules()` guarantee a dashboard-approved exception
+    actually holds no matter which AdGuard mechanism would otherwise
+    block it.
+
+    `client_ips=None` (the default) means unscoped -- applies to every
+    eligible device, same "cheap unscoped when it's literally everyone"
+    convention `_domain_rule_unscoped()` uses; otherwise `$client=`-scoped
+    to just the listed IPs.
+    """
+    body = f"(?i)(?:^|\\.)(?:{pattern})$"
+    if client_ips is None:
+        return f"@@/{body}/"
+    return f"@@/{body}/$client={','.join(client_ips)}"
+
+
+def _split_rule(rule: str) -> tuple[bool, str, tuple[str, ...] | None, str]:
+    """Decomposes a `_domain_rule()`/`_domain_rule_unscoped()`/
+    `_ech_strip_rule()`/`_domain_allow_rule()` rule string into
+    `(is_allow, body, client_ips, suffix)`: whether it's an AdGuard
+    allowlist rule (`@@`-prefixed), the regex body between the two `/`s,
+    the `$client=` IP list (`None` if the rule is unscoped), and whatever
+    modifier text follows the client list (e.g. `dnsrewrite=NOERROR;A;x.x.x.x`
+    or `dnstype=HTTPS`, `''` if there is none). The body is assumed to
+    contain no literal `/` -- true for every pattern this module ever
+    builds a rule from, since domain patterns are dots/word characters/
+    backslash-escapes only.
+
+    `_merge_duplicate_domain_rules()` is the only caller; kept separate
+    so that function's own logic reads as "group by (is_allow, body,
+    suffix), union the client lists" without the string-splitting mixed
+    in."""
+    is_allow = rule.startswith("@@")
+    if is_allow:
+        rule = rule[2:]
+    _, body, modifiers = rule.split("/", 2)
+    if not modifiers:
+        return is_allow, body, None, ""
+    modifiers = modifiers[1:]  # drop the leading "$"
+    if not modifiers.startswith("client="):
+        return is_allow, body, None, modifiers
+    parts = modifiers[len("client=") :].split(",")
+    i = 0
+    while i < len(parts) and "=" not in parts[i]:
+        i += 1
+    return is_allow, body, tuple(parts[:i]), ",".join(parts[i:])
+
+
+def _rebuild_rule(is_allow: bool, body: str, client_ips: tuple[str, ...] | None, suffix: str) -> str:
+    """Inverse of `_split_rule()`."""
+    prefix = "@@" if is_allow else ""
+    if client_ips is None:
+        return f"{prefix}/{body}/${suffix}" if suffix else f"{prefix}/{body}/"
+    modifiers = f"client={','.join(client_ips)}"
+    if suffix:
+        modifiers += f",{suffix}"
+    return f"{prefix}/{body}/${modifiers}"
+
+
+def _merge_duplicate_domain_rules(rules: list[str]) -> list[str]:
+    """Collapses rules that share the identical regex body AND the
+    identical trailing action (same `dnsrewrite=...`/`dnstype=...`/no
+    modifier at all, AND the same allow-vs-deny polarity) into one,
+    unioning their `$client=` scopes -- confirmed live against a real
+    AdGuard Home instance that it applies NEITHER of two custom rules
+    sharing one regex body, even when a client is correctly listed in
+    both (see RoadMap.md's dated entry, "AdGuard drops both rules when
+    two custom rules share one regex body"). This project's own rule
+    sources can legitimately produce more than one rule for the same
+    domain -- a `mode='bump'` domain that's ALSO present in a subscribed
+    category's domain list (e.g. Crunchyroll also being in a v2fly
+    Entertainment-category list) gets one rule from `build_rules()` and
+    another from `build_category_deny_rules()`, with different `$client=`
+    lists but the identical body and the identical `dnsrewrite=...`
+    target -- so without this, AdGuard silently enforces NEITHER, for ANY
+    client, which is exactly the live household bug this was written to
+    close.
+
+    Grouped by `(is_allow, body, suffix)`, not by body alone: a deny rule
+    (`dnsrewrite=...`) and an ECH-strip rule (`dnstype=HTTPS`) for the
+    SAME domain are a deliberate, different-purpose pair
+    (`build_ech_strip_rules()`'s own docstring) and must never be merged
+    into each other -- and, since `build_adguard_allow_rules()` started
+    generating `@@`-prefixed allow rules, an allow rule must never merge
+    with a deny rule for the same body either, or the merge would erase
+    the very exception it exists to guarantee. Within a group, an
+    unscoped rule (`client_ips is None`) already covers every client and
+    wins outright over any scoped duplicate for the same key; otherwise
+    every group member's client list is unioned, in first-seen order,
+    into one rule. Non-domain-rule-shaped entries (should never occur
+    here, but this stays defensive) round-trip through
+    `_split_rule()`/`_rebuild_rule()` unchanged since a rule that doesn't
+    collide with anything is simply a group of one.
+    """
+    order: list[tuple[bool, str, str]] = []
+    by_key: dict[tuple[bool, str, str], list[tuple[str, ...] | None]] = {}
+    for rule in rules:
+        is_allow, body, client_ips, suffix = _split_rule(rule)
+        key = (is_allow, body, suffix)
+        if key not in by_key:
+            by_key[key] = []
+            order.append(key)
+        by_key[key].append(client_ips)
+
+    merged = []
+    for key in order:
+        is_allow, body, suffix = key
+        client_lists = by_key[key]
+        if any(ips is None for ips in client_lists):
+            merged.append(_rebuild_rule(is_allow, body, None, suffix))
+            continue
+        union: list[str] = []
+        seen: set[str] = set()
+        for ips in client_lists:
+            for ip in ips:
+                if ip not in seen:
+                    seen.add(ip)
+                    union.append(ip)
+        merged.append(_rebuild_rule(is_allow, body, tuple(union), suffix))
+    return merged
 
 
 # Domains a browser's own built-in "Secure DNS"/DNS-over-HTTPS toggle
@@ -600,6 +749,50 @@ def build_category_deny_rules(
     return rules
 
 
+def build_adguard_allow_rules(
+    conn: sqlite3.Connection, eligible_devices: list[sqlite3.Row] | None = None
+) -> list[str]:
+    """One `@@` (allowlist) rule per `adguard_allowlist` row, scoped to
+    whichever currently-bound eligible devices `matching.device_allowlist_reason()`
+    authorizes for it -- the dashboard-driven guarantee that an
+    admin-approved exception holds regardless of which AdGuard mechanism
+    would otherwise have blocked it (this project's own hard-deny rules,
+    an over-threshold category's native filter subscription, AdGuard's
+    own built-in default filter, or the uBlockOrigin extras). See
+    `adguard_allowlist`'s own schema comment (common/db.py) for why this
+    is a separate table from `domains` rather than folded into it.
+
+    Same "cheap unscoped rule when it's literally everyone eligible"
+    convention as `build_category_deny_rules()` above. Returns an empty
+    list when there are no allowlist entries at all, or no eligible
+    device currently qualifies for any of them -- both legitimate
+    "nothing to allow yet" states, not errors.
+    """
+    entries = conn.execute("SELECT * FROM adguard_allowlist ORDER BY id").fetchall()
+    if not entries:
+        return []
+
+    if eligible_devices is None:
+        eligible_devices = _fetch_eligible_devices(conn)
+    if not eligible_devices:
+        return []
+
+    rules = []
+    for entry in entries:
+        applicable_ips = [
+            device["ipv4_address"]
+            for device in eligible_devices
+            if matching.device_allowlist_reason(conn, device, entry) is not None
+        ]
+        if not applicable_ips:
+            continue
+        if len(applicable_ips) == len(eligible_devices):
+            rules.append(_domain_allow_rule(entry["pattern"]))
+        else:
+            rules.append(_domain_allow_rule(entry["pattern"], applicable_ips))
+    return rules
+
+
 def sync_category_subscriptions(
     conn: sqlite3.Connection, base_url: str, username: str, password: str,
     now: datetime | None = None, timeout: float = adguard_client.DEFAULT_TIMEOUT,
@@ -769,12 +962,13 @@ def sync_once(
     the WRITE is now conditional.
     """
     eligible_devices = _fetch_eligible_devices(conn)
-    managed = (
+    managed = _merge_duplicate_domain_rules(
         build_rules(conn, block_page_ip, eligible_devices=eligible_devices)
         + build_splice_deny_rules(conn, block_page_ip, eligible_devices=eligible_devices)
         + build_category_deny_rules(conn, block_page_ip=block_page_ip, eligible_devices=eligible_devices)
         + build_anti_doh_rules()
         + build_ech_strip_rules(conn, eligible_devices=eligible_devices)
+        + build_adguard_allow_rules(conn, eligible_devices=eligible_devices)
     )
     current = adguard_client.get_custom_rules(base_url, username, password)
     preserved = _strip_managed_block(current)

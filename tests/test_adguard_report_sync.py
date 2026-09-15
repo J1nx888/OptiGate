@@ -11,6 +11,8 @@ import re
 import threading
 import time
 
+import pytest
+
 import adguard_report_sync
 import db
 import identity
@@ -18,6 +20,17 @@ import identity
 MAC_A = "aa:bb:cc:dd:ee:01"
 IP_1 = "192.168.1.10"
 BLOCK_PAGE_IP = "192.168.1.250"
+
+
+@pytest.fixture(autouse=True)
+def _default_empty_filters(monkeypatch):
+    """correlate_once() now unconditionally calls get_filters_status()
+    (needed to resolve a native-block's filterId back to a category or
+    AdGuard's own list name) -- default it to an empty list for every
+    test here so existing tests that only care about the query log don't
+    each need their own mock. Tests exercising native-block resolution
+    override this with their own monkeypatch.setattr() call."""
+    monkeypatch.setattr(adguard_report_sync.adguard_client, "get_filters_status", lambda *a, **k: [])
 
 
 def _entry(hostname, client, *, answer_ip=BLOCK_PAGE_IP, time_str="2026-09-09T13:17:13.089285447Z"):
@@ -55,6 +68,25 @@ def _insert_category_with_domain(conn, name, pattern, *, is_global=True):
         (category_id, pattern),
     )
     conn.commit()
+
+
+def _native_entry(hostname, client, *, filter_id=1, reason="FilteredBlackList", time_str="2026-09-14T18:16:20.533082721Z"):
+    """A querylog entry shaped like a real AdGuard native-list block --
+    confirmed live: {"filterId": 1, "reason": "FilteredBlackList",
+    "rule": "||x^", "answer": [{"type": "A", "value": "0.0.0.0", ...}]}."""
+    return {
+        "question": {"class": "IN", "name": hostname, "type": "A"},
+        "client": client,
+        "answer": [{"type": "A", "value": "0.0.0.0", "ttl": 10}],
+        "reason": reason,
+        "filterId": filter_id,
+        "rule": f"||{hostname}^",
+        "time": time_str,
+    }
+
+
+def _fake_filters(filters):
+    return lambda *a, **k: list(filters)
 
 
 def _fake_log(entries):
@@ -180,6 +212,113 @@ def test_ignores_a_domain_this_project_does_not_manage(conn, monkeypatch):
 
     assert adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP) == 0
     assert _rows(conn) == []
+
+
+# ============================================================
+# Native AdGuard-list blocks (dns_category_deny / dns_native_filter_deny)
+# ============================================================
+
+def test_native_block_traced_to_a_household_category_is_labeled_and_visible(conn, monkeypatch):
+    """The filterId resolves to a filter whose url matches one of the
+    household's own categories.subscription_url -- dns_category_deny,
+    named after the category."""
+    conn.execute(
+        "INSERT INTO categories (name, subscription_url, is_global, created_at) "
+        "VALUES ('Games', 'https://example.invalid/games.txt', 1, datetime('now'))"
+    )
+    conn.commit()
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_query_log",
+        _fake_log([_native_entry("mobalytics.gg", IP_1, filter_id=42)]),
+    )
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_filters_status",
+        _fake_filters([{"id": 42, "name": "Games", "url": "https://example.invalid/games.txt"}]),
+    )
+
+    written = adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP)
+
+    assert written == 1
+    row = conn.execute("SELECT domain, reason, block_source FROM access_log").fetchone()
+    assert row["domain"] == "mobalytics.gg"
+    assert row["reason"] == "dns_category_deny"
+    assert row["block_source"] == "Games"
+
+
+def test_native_block_with_no_matching_category_is_labeled_as_adguard_native(conn, monkeypatch):
+    """The filterId resolves to a real AdGuard filter (its own built-in
+    default, or a uBlockOrigin extra), but its url matches none of the
+    household's own categories -- dns_native_filter_deny, named after the
+    filter's own display name."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_query_log",
+        _fake_log([_native_entry("ecsv2.roblox.com", IP_1, filter_id=1)]),
+    )
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_filters_status",
+        _fake_filters([{"id": 1, "name": "AdGuard DNS filter", "url": "https://adguardteam.github.io/x.txt"}]),
+    )
+
+    written = adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP)
+
+    assert written == 1
+    row = conn.execute("SELECT domain, reason, block_source FROM access_log").fetchone()
+    assert row["domain"] == "ecsv2.roblox.com"
+    assert row["reason"] == "dns_native_filter_deny"
+    assert row["block_source"] == "AdGuard DNS filter"
+
+
+def test_native_block_with_unresolvable_filter_id_still_gets_logged(conn, monkeypatch):
+    """A filterId this cycle's filter list doesn't recognize (removed
+    between the block and this poll) still produces a row -- a block with
+    an unresolved source is still more visible than no row at all."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_query_log",
+        _fake_log([_native_entry("somesite.example", IP_1, filter_id=999)]),
+    )
+    monkeypatch.setattr(adguard_report_sync.adguard_client, "get_filters_status", _fake_filters([]))
+
+    written = adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP)
+
+    assert written == 1
+    row = conn.execute("SELECT reason, block_source FROM access_log").fetchone()
+    assert row["reason"] == "dns_native_filter_deny"
+    assert row["block_source"] == "AdGuard"
+
+
+def test_native_block_detection_works_without_a_block_page_ip_configured(conn, monkeypatch):
+    """DASHBOARD_URL being unset (block_page_ip=None/empty) must not
+    suppress native-block visibility -- only the $dnsrewrite hard-deny
+    half needs it."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_query_log",
+        _fake_log([_native_entry("mobalytics.gg", IP_1)]),
+    )
+    monkeypatch.setattr(adguard_report_sync.adguard_client, "get_filters_status", _fake_filters([]))
+
+    written = adguard_report_sync.correlate_once(conn, "http://x", "a", "b", None)
+
+    assert written == 1
+    assert conn.execute("SELECT reason FROM access_log").fetchone()["reason"] == "dns_native_filter_deny"
+
+
+def test_not_filtered_not_found_is_not_treated_as_a_native_block(conn, monkeypatch):
+    """A plain NotFilteredNotFound/RewriteRule entry must never be
+    misread as a native-list block."""
+    identity.record_binding(conn, MAC_A, IP_1, source="rtnetlink")
+    monkeypatch.setattr(
+        adguard_report_sync.adguard_client, "get_query_log",
+        _fake_log([_entry("example.com", IP_1, answer_ip="93.184.216.34")]),
+    )
+
+    adguard_report_sync.correlate_once(conn, "http://x", "a", "b", BLOCK_PAGE_IP)
+
+    rows = _rows(conn)
+    assert all(r["reason"] not in ("dns_category_deny", "dns_native_filter_deny") for r in rows)
 
 
 def test_attributes_the_row_to_the_resolved_device_and_user(conn, monkeypatch):
@@ -371,12 +510,16 @@ def test_start_survives_an_adguard_error_without_dying(conn, monkeypatch):
     assert len(calls) >= 2, "loop should keep polling after an AdGuardError, not die"
 
 
-def test_start_skips_when_dashboard_url_is_not_a_plain_ip(conn, monkeypatch):
+def test_start_runs_with_no_block_page_ip_when_dashboard_url_is_not_a_plain_ip(conn, monkeypatch):
+    """correlate_once() must still run without a usable block-page IP --
+    only its $dnsrewrite hard-deny half needs one (see its own docstring);
+    native-block visibility works regardless, so an unconfigured/
+    unparseable DASHBOARD_URL is no longer a reason to skip the cycle."""
     monkeypatch.setenv("DASHBOARD_URL", "http://dashboard.example.com:8787")
     db.set_setting(conn, "adguard_url", "http://127.0.0.1:3000")
     db.set_setting(conn, "adguard_password", "secret")
     calls = []
-    monkeypatch.setattr(adguard_report_sync, "correlate_once", lambda *a, **k: calls.append(1) or 0)
+    monkeypatch.setattr(adguard_report_sync, "correlate_once", lambda *a, **k: calls.append(a[-1]) or 0)
     stop = threading.Event()
 
     thread = adguard_report_sync.start(interval=0.02, stop_event=stop)
@@ -386,4 +529,5 @@ def test_start_skips_when_dashboard_url_is_not_a_plain_ip(conn, monkeypatch):
         stop.set()
         thread.join(timeout=1)
 
-    assert calls == [], "correlate_once must not run without a usable block-page IP"
+    assert calls, "correlate_once should still run for native-block visibility"
+    assert all(not c for c in calls), "block_page_ip should be falsy when DASHBOARD_URL isn't a plain IP"
