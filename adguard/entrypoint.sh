@@ -90,14 +90,28 @@ _disable_dns_cache_via_file() {
   sed -i 's/^  cache_enabled: true$/  cache_enabled: false/' "$CONF" 2>/dev/null || true
 }
 
+# Adds a couple of fallback resolvers (see the fresh-install path's own
+# /control/dns_config call further down for the full reasoning) by
+# editing $CONF directly -- same "no known password for an existing
+# install" constraint as _disable_dns_cache_via_file() above. Matched
+# against the exact empty-list literal AdGuard itself writes
+# (`fallback_dns: []`, confirmed live 2026-09-15) so this is a no-op
+# once a value is already set, whether by this fix or by an admin's own
+# later choice -- never overwrites a deliberately-changed list. Must
+# run BEFORE AdGuard is started in this branch, same as the cache fix.
+_add_fallback_dns_via_file() {
+  sed -i 's/^  fallback_dns: \[\]$/  fallback_dns: ["tls:\/\/1.1.1.1", "tls:\/\/8.8.8.8"]/' "$CONF" 2>/dev/null || true
+}
+
 if [ -f "$CONF" ]; then
   # Already configured from a previous run (persisted volume) --
-  # nothing to bootstrap except forcing this one setting (see
-  # _disable_dns_cache_via_file's own comment). Backgrounded (not
-  # exec'd) so this script can still run _grant_dashboard_access after
-  # it's actually up, same signal-forwarding shape the first-boot path
-  # below already uses.
+  # nothing to bootstrap except forcing these two settings (see
+  # _disable_dns_cache_via_file's and _add_fallback_dns_via_file's own
+  # comments). Backgrounded (not exec'd) so this script can still run
+  # _grant_dashboard_access after it's actually up, same
+  # signal-forwarding shape the first-boot path below already uses.
   _disable_dns_cache_via_file
+  _add_fallback_dns_via_file
   "$BIN" --no-check-update -c "$CONF" -w "$WORK" &
   PID=$!
   trap 'kill -TERM "$PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
@@ -289,13 +303,27 @@ fi
 # (an existing deployment upgrading onto this code) via a direct
 # AdGuardHome.yaml edit instead, since this script has no way to know an
 # existing install's live admin password.
-echo "Disabling AdGuard's shared DNS cache (see RoadMap.md, 2026-09-15)..." >&2
+#
+# fallback_dns is set in the SAME call: AdGuard ships with exactly one
+# upstream (Quad9, over DoH) and no fallback at all -- confirmed live
+# 2026-09-15 that a real, transient Quad9 DoH outage (repeated
+# "connection reset by peer"/"unexpected EOF" in AdGuard's own logs)
+# made unrelated real sites intermittently fail to load, with nothing
+# ever showing up as "blocked" anywhere, since the query simply never
+# got an answer at all. Two DoT fallbacks (Cloudflare, Google) keep
+# every upstream lookup encrypted, matching the primary's own DoH
+# transport, and only ever get used if the primary upstream itself
+# fails -- see AdGuard's own `upstream_mode`/`fallback_dns` docs. Plain
+# IPs (not hostnames) deliberately, so resolving them needs no DNS
+# lookup of their own and can never depend on this box's own upstream
+# health in the first place.
+echo "Disabling AdGuard's shared DNS cache and adding fallback resolvers (see RoadMap.md, 2026-09-15)..." >&2
 wget -q -O /dev/null \
   --header "Authorization: Basic $AUTH_B64" \
   --header 'Content-Type: application/json' \
-  --post-data '{"cache_enabled":false}' \
+  --post-data '{"cache_enabled":false,"fallback_dns":["tls://1.1.1.1","tls://8.8.8.8"]}' \
   http://127.0.0.1:3000/control/dns_config \
-  || echo "  warning: failed to disable AdGuard's DNS cache -- continuing anyway" >&2
+  || echo "  warning: failed to disable AdGuard's DNS cache / set fallback resolvers -- continuing anyway" >&2
 
 # Same reasoning as dashboard/dashboard.py's DASHBOARD_BIND default:
 # with `network_mode: host` (required for DNS interception, see
