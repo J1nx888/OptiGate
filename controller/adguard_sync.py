@@ -635,12 +635,31 @@ def _category_domain_patterns(conn: sqlite3.Connection, category_id: int) -> lis
     """A category's blocked-domain patterns minus anything matching a
     `category_overrides` row -- allow-exceptions the admin added for a
     domain the category's own list/manual additions would otherwise
-    catch. Matched by exact pattern-string equality (not suffix/regex
-    overlap) -- an MVP-scope limitation: an override has to name the same
-    pattern that's actually stored in `category_domains`, not a broader
-    or narrower one that happens to overlap it."""
+    catch. Matched by pattern equality modulo backslash-escaping (not
+    suffix/regex overlap) -- an MVP-scope limitation: an override still
+    has to name the same domain that's actually stored in
+    `category_domains`, not a broader or narrower one that happens to
+    overlap it, but does NOT need to match its exact escaping.
+
+    Confirmed live 2026-09-15: a subscription-sourced `category_domains`
+    row stores its pattern pre-escaped (`youtubekids\\.com`, the raw
+    upstream list's own convention), while `add_category_override()`
+    stores whatever an admin actually typed in the form -- naturally the
+    plain domain (`youtubekids.com`), with no expectation they'd
+    hand-escape it. Comparing those two strings directly never matches,
+    so an override for a subscription-sourced domain silently never
+    applied at all. `_normalize()` strips every backslash before
+    comparing (only ever used as a comparison key, never returned in the
+    rule list itself) -- domain patterns only ever contain one
+    meaningfully-escaped character (`.`), so this is a safe, general fix
+    for escaped-vs-unescaped mismatches regardless of which of this
+    project's several category_domains-writing paths (subscription
+    sync, manual single add, bulk add) produced either side."""
+    def _normalize(pattern: str) -> str:
+        return pattern.replace("\\", "")
+
     overrides = {
-        row["pattern"] for row in conn.execute(
+        _normalize(row["pattern"]) for row in conn.execute(
             "SELECT pattern FROM category_overrides WHERE category_id = ?", (category_id,)
         )
     }
@@ -648,7 +667,7 @@ def _category_domain_patterns(conn: sqlite3.Connection, category_id: int) -> lis
         row["pattern"] for row in conn.execute(
             "SELECT pattern FROM category_domains WHERE category_id = ?", (category_id,)
         )
-        if row["pattern"] not in overrides
+        if _normalize(row["pattern"]) not in overrides
     ]
 
 

@@ -1086,6 +1086,27 @@ def test_build_category_deny_rules_override_excludes_that_domain(conn):
     assert rules == ["/(?i)(?:^|\\.)(?:bet\\.example\\.com)$/"]
 
 
+def test_build_category_deny_rules_override_matches_regardless_of_escaping(conn):
+    # Confirmed live 2026-09-15 (youtubekids.com): a subscription-sourced
+    # category_domains row stores its pattern pre-escaped
+    # ("casino\.example\.com"), while an admin typing an override in the
+    # dashboard naturally types the plain domain ("casino.example.com",
+    # no backslash) -- these must still match, or the override silently
+    # never applies at all.
+    category = _insert_category(conn, "Gambling", is_global=True)
+    _insert_category_domains(conn, category, [r"bet\.example\.com", r"casino\.example\.com"])
+    conn.execute(
+        "INSERT INTO category_overrides (category_id, pattern, created_at) VALUES (?, ?, datetime('now'))",
+        (category, "casino.example.com"),
+    )
+    conn.commit()
+    _insert_device_with_binding(conn, "aa:bb:cc:dd:ee:20", "192.168.1.90")
+
+    rules = adguard_sync.build_category_deny_rules(conn)
+
+    assert rules == ["/(?i)(?:^|\\.)(?:bet\\.example\\.com)$/"]
+
+
 def test_build_category_deny_rules_excludes_an_ignored_device_from_a_global_category(conn):
     category = _insert_category(conn, "Gambling", is_global=True)
     _insert_category_domains(conn, category, [r"bet\.example\.com"])
