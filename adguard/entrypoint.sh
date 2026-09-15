@@ -73,11 +73,31 @@ _wait_for_control_api() {
   return 0
 }
 
+# Forces `cache_enabled: false` (see the fresh-install path's own
+# `/control/dns_config` call further down for the full reasoning) by
+# editing $CONF directly, rather than the authenticated API -- this
+# script has no way to know an EXISTING deployment's live admin
+# password (it's owned by the dashboard after first boot, see
+# dashboard/adguard_config_sync.py's own docstring), only file access to
+# the persisted volume. Must run BEFORE AdGuard is started in this
+# branch: AdGuardHome.yaml only takes effect while the process isn't
+# running, same constraint the WEB_BIND rewrite further down already
+# works around. Idempotent (no-op once already `false`), so this is safe
+# to run on every single container start, forever -- an existing
+# deployment upgrading onto this code gets the fix applied automatically
+# on its very next restart, with no manual step.
+_disable_dns_cache_via_file() {
+  sed -i 's/^  cache_enabled: true$/  cache_enabled: false/' "$CONF" 2>/dev/null || true
+}
+
 if [ -f "$CONF" ]; then
   # Already configured from a previous run (persisted volume) --
-  # nothing to bootstrap. Backgrounded (not exec'd) so this script can
-  # still run _grant_dashboard_access after it's actually up, same
-  # signal-forwarding shape the first-boot path below already uses.
+  # nothing to bootstrap except forcing this one setting (see
+  # _disable_dns_cache_via_file's own comment). Backgrounded (not
+  # exec'd) so this script can still run _grant_dashboard_access after
+  # it's actually up, same signal-forwarding shape the first-boot path
+  # below already uses.
+  _disable_dns_cache_via_file
   "$BIN" --no-check-update -c "$CONF" -w "$WORK" &
   PID=$!
   trap 'kill -TERM "$PID" 2>/dev/null; wait "$PID" 2>/dev/null' TERM INT
@@ -161,6 +181,10 @@ _json_escape() {
 }
 USERNAME_JSON=$(_json_escape "${ADGUARD_USERNAME:-admin}")
 PASSWORD_JSON=$(_json_escape "$ADGUARD_PASSWORD")
+# Computed unconditionally (not just inside the extra-blocklists block
+# below) -- _disable_dns_cache further down needs it regardless of
+# ADGUARD_SKIP_EXTRA_BLOCKLISTS.
+AUTH_B64=$(printf '%s:%s' "${ADGUARD_USERNAME:-admin}" "$ADGUARD_PASSWORD" | base64 -w0)
 
 # Web is ALWAYS configured onto the wildcard address here, regardless
 # of ADGUARD_WEB_BIND -- confirmed live 2026-08-30 that
@@ -216,7 +240,6 @@ fi
 # this step entirely and keep only AdGuard's own default filter.
 if [ "${ADGUARD_SKIP_EXTRA_BLOCKLISTS:-}" != "1" ]; then
   echo "Adding uBlock Origin (uAssets) filter lists..." >&2
-  AUTH_B64=$(printf '%s:%s' "${ADGUARD_USERNAME:-admin}" "$ADGUARD_PASSWORD" | base64 -w0)
   UASSETS_BASE="https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters"
   for entry in \
     "uBO - filters|$UASSETS_BASE/filters.txt" \
@@ -250,6 +273,29 @@ if [ "${ADGUARD_SKIP_EXTRA_BLOCKLISTS:-}" != "1" ]; then
     http://127.0.0.1:3000/control/filtering/config \
     || echo "  warning: failed to set the filter update interval -- continuing anyway" >&2
 fi
+
+# AdGuard's DNS answer cache is shared across every client and is
+# consulted BEFORE (not instead of) re-evaluating this project's own
+# `$client=`-scoped custom rules -- confirmed live 2026-09-15 (RoadMap.md's
+# dated entry): once ANY client resolves a domain to a real answer, every
+# OTHER client (blocked or not) can ride that same cached answer until it
+# expires, defeating per-client enforcement regardless of which rule
+# mechanism would otherwise have denied it. Disabled outright rather than
+# just shortening its TTL -- the owner's own call, since a client's own
+# DNS cache still exists regardless of what AdGuard does on its side, and
+# a household member's device shouldn't be able to keep another device's
+# permissions by riding a shared cache entry. `_disable_dns_cache_via_file()`
+# further up applies the same fix to an ALREADY-configured instance
+# (an existing deployment upgrading onto this code) via a direct
+# AdGuardHome.yaml edit instead, since this script has no way to know an
+# existing install's live admin password.
+echo "Disabling AdGuard's shared DNS cache (see RoadMap.md, 2026-09-15)..." >&2
+wget -q -O /dev/null \
+  --header "Authorization: Basic $AUTH_B64" \
+  --header 'Content-Type: application/json' \
+  --post-data '{"cache_enabled":false}' \
+  http://127.0.0.1:3000/control/dns_config \
+  || echo "  warning: failed to disable AdGuard's DNS cache -- continuing anyway" >&2
 
 # Same reasoning as dashboard/dashboard.py's DASHBOARD_BIND default:
 # with `network_mode: host` (required for DNS interception, see
