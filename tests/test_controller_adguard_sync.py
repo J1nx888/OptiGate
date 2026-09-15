@@ -104,9 +104,14 @@ def test_domain_rule_shape_mirrors_matching_pys_own_anchoring():
     assert rule == "/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.10"
 
 
-def test_domain_rule_joins_multiple_client_ips_with_commas():
+def test_domain_rule_joins_multiple_client_ips_with_pipes():
+    # AdGuard's own rule syntax uses "," to separate different modifiers
+    # within one "$...", and "|" to separate multiple values WITHIN a
+    # single modifier (the same convention "$domain=a.com|b.com" uses) --
+    # a comma-joined list here is silently invalid and the whole rule
+    # becomes a no-op, confirmed live against a real AdGuard instance.
     rule = adguard_sync._domain_rule("example\\.com", ["10.0.0.1", "10.0.0.2"])
-    assert rule.endswith("$client=10.0.0.1,10.0.0.2")
+    assert rule.endswith("$client=10.0.0.1|10.0.0.2")
 
 
 def test_domain_rule_without_block_page_ip_has_no_dnsrewrite():
@@ -136,7 +141,7 @@ def test_merge_unions_client_lists_for_same_body_and_same_action():
     merged = adguard_sync._merge_duplicate_domain_rules([rule_a, rule_b])
 
     assert merged == [
-        "/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.41,192.168.1.57,dnsrewrite=NOERROR;A;192.168.1.250"
+        "/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.41|192.168.1.57,dnsrewrite=NOERROR;A;192.168.1.250"
     ]
 
 
@@ -146,7 +151,7 @@ def test_merge_deduplicates_an_ip_present_in_both_rules():
 
     merged = adguard_sync._merge_duplicate_domain_rules([rule_a, rule_b])
 
-    assert merged == ["/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.41,192.168.1.57,192.168.1.71"]
+    assert merged == ["/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.41|192.168.1.57|192.168.1.71"]
 
 
 def test_merge_unscoped_rule_wins_over_a_scoped_duplicate_for_the_same_action():
@@ -203,7 +208,7 @@ def test_merge_unions_client_lists_across_two_allow_rules_for_the_same_domain():
 
     merged = adguard_sync._merge_duplicate_domain_rules([rule_a, rule_b])
 
-    assert merged == ["@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.10,192.168.1.28"]
+    assert merged == ["@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.10|192.168.1.28"]
 
 
 def test_merge_unscoped_allow_rule_wins_over_a_scoped_duplicate():
@@ -227,7 +232,7 @@ def test_domain_allow_rule_is_at_prefixed_and_unscoped_by_default():
 
 def test_domain_allow_rule_scoped_to_client_ips():
     rule = adguard_sync._domain_allow_rule("mobalytics\\.gg", ["192.168.1.10", "192.168.1.28"])
-    assert rule == "@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.10,192.168.1.28"
+    assert rule == "@@/(?i)(?:^|\\.)(?:mobalytics\\.gg)$/$client=192.168.1.10|192.168.1.28"
 
 
 def _insert_allowlist(conn, pattern: str, *, is_global: bool = False) -> int:
@@ -498,9 +503,9 @@ def test_ech_strip_rule_shape():
     assert rule == "/(?i)(?:^|\\.)(?:crunchyroll\\.com)$/$client=192.168.1.10,dnstype=HTTPS"
 
 
-def test_ech_strip_rule_joins_multiple_client_ips_with_commas():
+def test_ech_strip_rule_joins_multiple_client_ips_with_pipes():
     rule = adguard_sync._ech_strip_rule("example\\.com", ["10.0.0.1", "10.0.0.2"])
-    assert rule == "/(?i)(?:^|\\.)(?:example\\.com)$/$client=10.0.0.1,10.0.0.2,dnstype=HTTPS"
+    assert rule == "/(?i)(?:^|\\.)(?:example\\.com)$/$client=10.0.0.1|10.0.0.2,dnstype=HTTPS"
 
 
 def test_build_ech_strip_rules_empty_when_no_bump_domains(conn):

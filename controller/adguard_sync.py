@@ -137,7 +137,7 @@ def _domain_rule(pattern: str, client_ips: list[str], block_page_ip: str | None 
     CA would be worse than today's plain failure, not better.
     """
     body = f"(?i)(?:^|\\.)(?:{pattern})$"
-    rule = f"/{body}/$client={','.join(client_ips)}"
+    rule = f"/{body}/$client={'|'.join(client_ips)}"
     if block_page_ip:
         rule += f",dnsrewrite=NOERROR;A;{block_page_ip}"
     return rule
@@ -177,7 +177,7 @@ def _domain_allow_rule(pattern: str, client_ips: list[str] | None = None) -> str
     body = f"(?i)(?:^|\\.)(?:{pattern})$"
     if client_ips is None:
         return f"@@/{body}/"
-    return f"@@/{body}/$client={','.join(client_ips)}"
+    return f"@@/{body}/$client={'|'.join(client_ips)}"
 
 
 def _split_rule(rule: str) -> tuple[bool, str, tuple[str, ...] | None, str]:
@@ -205,11 +205,9 @@ def _split_rule(rule: str) -> tuple[bool, str, tuple[str, ...] | None, str]:
     modifiers = modifiers[1:]  # drop the leading "$"
     if not modifiers.startswith("client="):
         return is_allow, body, None, modifiers
-    parts = modifiers[len("client=") :].split(",")
-    i = 0
-    while i < len(parts) and "=" not in parts[i]:
-        i += 1
-    return is_allow, body, tuple(parts[:i]), ",".join(parts[i:])
+    rest = modifiers[len("client=") :]
+    client_part, _, suffix = rest.partition(",")
+    return is_allow, body, tuple(client_part.split("|")), suffix
 
 
 def _rebuild_rule(is_allow: bool, body: str, client_ips: tuple[str, ...] | None, suffix: str) -> str:
@@ -217,7 +215,7 @@ def _rebuild_rule(is_allow: bool, body: str, client_ips: tuple[str, ...] | None,
     prefix = "@@" if is_allow else ""
     if client_ips is None:
         return f"{prefix}/{body}/${suffix}" if suffix else f"{prefix}/{body}/"
-    modifiers = f"client={','.join(client_ips)}"
+    modifiers = f"client={'|'.join(client_ips)}"
     if suffix:
         modifiers += f",{suffix}"
     return f"{prefix}/{body}/${modifiers}"
@@ -524,7 +522,7 @@ def _ech_strip_rule(pattern: str, client_ips: list[str]) -> str:
     falls back to a normal, visible-SNI TLS 1.3 handshake. See
     `build_ech_strip_rules()`'s own docstring for why this is needed."""
     body = f"(?i)(?:^|\\.)(?:{pattern})$"
-    return f"/{body}/$client={','.join(client_ips)},dnstype=HTTPS"
+    return f"/{body}/$client={'|'.join(client_ips)},dnstype=HTTPS"
 
 
 def build_ech_strip_rules(
